@@ -14,6 +14,7 @@ import { schedulerPlugin } from './plugins/scheduler/scheduler-plugin.js';
 import { linkSummarizerPlugin } from './plugins/link-summarizer/link-plugin.js';
 import { conversationExportPlugin } from './plugins/export/export-plugin.js';
 import { contactPlugin } from './plugins/contact/contact-plugin.js';
+import { voiceNotePlugin } from './plugins/voice-note/voice-plugin.js';
 import { reloadPluginsTool } from './plugins/hot-reload.js';
 import { whatsAppClient } from './core/client.js';
 
@@ -89,6 +90,7 @@ async function bootstrap() {
   await pluginRegistry.registerPlugin(memoryPlugin);
   await pluginRegistry.registerPlugin(datasetExporterPlugin);
   await pluginRegistry.registerPlugin(webSearchPlugin);
+  await pluginRegistry.registerPlugin(voiceNotePlugin);
 
   console.log(`🔌 Registered ${pluginRegistry.getAllTools().length} tools across plugins.`);
 

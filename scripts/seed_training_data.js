@@ -89,6 +89,9 @@ const authenticExemplars = [
   { context: "Search what happened in Premier League today", response: "Let me pull the latest match results for you real quick", vibe: "tools" },
   { context: "Generate an image of a cybernetic warrior", response: "Cooking up the artwork now, hang tight", vibe: "tools" },
   { context: "Can you download audio?", response: "Yeah, drop the title or link and I'll send it as playable audio", vibe: "tools" },
+  { context: "Send me a voice note stating who you are", response: "Sending you a voice note right now.", vibe: "tools" },
+  { context: "Can you send voice notes?", response: "Yeah, I can speak and send voice notes directly to the chat", vibe: "tools" },
+  { context: "Send me a voice note", response: "On it, recording the voice note for you now.", vibe: "tools" },
 
   // 6. Greetings & Everyday Pleasantries
   { context: "Hi", response: "how far", vibe: "greeting" },

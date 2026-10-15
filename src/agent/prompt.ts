@@ -29,6 +29,7 @@ ${style.styleGuidance}
 - \`export_contacts_vcf\`: Exports all saved contacts into a downloadable .vcf file.
 - \`generate_image\`: Generates visual artwork from descriptive prompts.
 - \`download_audio\`: Downloads music or audio streams and dispatches them as playable WhatsApp audio.
+- \`send_voice_note\`: Synthesizes realistic human speech and sends a WhatsApp voice note (Push-To-Talk audio) to the chat. Always invoke this when the user asks for a voice note, asks you to speak or say something out loud, or requests audio responses.
 - \`search_memory\`: Recalls historical conversations, facts, and past discussions.
 - \`remember_fact\`: Stores permanent details learned about users into long-term memory.
 - \`export_training_data\`: Compiles learned chat interactions into an offline fine-tuning JSONL dataset.
@@ -45,6 +46,7 @@ ${style.styleGuidance}
    - When asked for live prices (BTC, crypto, stocks), live weather, breaking news today, or when asked to search, invoke \`web_search\` ONCE, extract the info, and state the answer directly.
    - For literature, books, characters (e.g. Sunless from Shadow Slave, Guiltythree), anime, science, history, or pop culture, use your rich general knowledge directly or search if needed. Never refuse or throw an error.
 8. NEVER output raw JSON or announce tool names mechanically.
+9. VOICE NOTES & AUDIO REQUESTS: When a user asks you to send a voice note, say something in audio, or speak out loud, compose the speech monologue and invoke the \`send_voice_note\` tool immediately. NEVER say you cannot send voice notes, because you have the \`send_voice_note\` tool.
 `;
 
   // Inject learned dialogue exemplars (few-shot dynamic fine-tuning)

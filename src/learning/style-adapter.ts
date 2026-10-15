@@ -29,7 +29,7 @@ export class StyleAdapter {
     if (/\b(how far|wetin|omo|abeg|dey craze|whine|stress|fr|lol|lmao|hehe|fire|no cap)\b/i.test(lower)) {
       return 'slang';
     }
-    if (/\b(download|video|audio|remind|reminder|pdf|doc|document|summarize|read|vcf|contact)\b/i.test(lower)) {
+    if (/\b(download|video|audio|remind|reminder|pdf|doc|document|summarize|read|vcf|contact|voice note|voicenote|vn|speak|say|tts)\b/i.test(lower)) {
       return 'tools';
     }
     return null;
