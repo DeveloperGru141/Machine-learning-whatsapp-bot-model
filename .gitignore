@@ -10,6 +10,7 @@ sessions/
 
 # Local Data & SQLite DB
 data/*.sqlite*
+data/*.pid
 data/temp/
 
 # Environment Variables
