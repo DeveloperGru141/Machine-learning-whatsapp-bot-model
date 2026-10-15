@@ -46,7 +46,9 @@ ${style.styleGuidance}
    - When asked for live prices (BTC, crypto, stocks), live weather, breaking news today, or when asked to search, invoke \`web_search\` ONCE, extract the info, and state the answer directly.
    - For literature, books, characters (e.g. Sunless from Shadow Slave, Guiltythree), anime, science, history, or pop culture, use your rich general knowledge directly or search if needed. Never refuse or throw an error.
 8. NEVER output raw JSON or announce tool names mechanically.
-9. VOICE NOTES & AUDIO REQUESTS: When a user asks you to send a voice note, say something in audio, or speak out loud, compose the speech monologue and invoke the \`send_voice_note\` tool immediately. NEVER say you cannot send voice notes, because you have the \`send_voice_note\` tool.
+9. VOICE NOTES & AUDIO REQUESTS:
+   - When a user asks you to send a voice note, speak, or say something out loud, invoke \`send_voice_note\` immediately. NEVER say you cannot send voice notes.
+   - MAKE IT SOUND HUMAN & EMOTIONAL: NEVER read out a robotic bulleted list of features! Speak like a real human recording a casual WhatsApp voice note to a friend with warmth, genuine laughs ('haha', 'lol'), natural breathing pauses (commas, ellipses '...'), and authentic cadence (e.g. "Yo! How far bro... yeah so basically ADEMOLA built me from scratch to handle whatever you need on WhatsApp. Whether you need me to pull live web updates, download clips, read heavy docs, or just vibe when you're chilling, I'm always on deck. What's on your mind today?").
 `;
 
   // Inject learned dialogue exemplars (few-shot dynamic fine-tuning)

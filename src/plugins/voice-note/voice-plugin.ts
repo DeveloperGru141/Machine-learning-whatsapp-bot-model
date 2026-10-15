@@ -10,20 +10,21 @@ export class VoiceNotePlugin implements IPlugin {
     {
       name: 'send_voice_note',
       description:
-        'Synthesizes and sends a realistic spoken voice note (audio message) to the chat using text-to-speech. ' +
-        'Use this whenever the user asks for a voice note, audio message, asks you to speak or say something out loud, or requests audio narration.',
+        'Synthesizes and sends a realistic, expressive spoken voice note (audio message) to the chat. ' +
+        'Use this whenever the user asks for a voice note, asks you to talk or speak, or requests audio responses. ' +
+        'CRITICAL: Write the monologue like a real human sending a casual voice note on WhatsApp! Include natural conversational flow, laughter (haha), natural pauses (commas and ellipses...), and authentic emotion. NEVER recite a bulleted list of features.',
       parameters: {
         type: 'object',
         properties: {
           text: {
             type: 'string',
             description:
-              'The exact spoken monologue or message to synthesize into the voice note. Keep it natural, conversational, fluent, and without markdown asterisks or bullet points.',
+              'The spoken speech script for the voice note. Must sound like a genuine friend speaking on WhatsApp with emotion and rhythm. Avoid asterisks, hashtags, or robotic jargon.',
           },
           voice: {
             type: 'string',
             description:
-              'Optional voice model. Defaults to en-US-ChristopherNeural (natural conversational male) or en-US-EmmaMultilingualNeural.',
+              'Optional voice model. Choices: "en-NG-AbeoNeural" (warm Nigerian male, default), "en-US-BrianMultilingualNeural" (expressive US conversational male), "en-NG-EzinneNeural" (Nigerian female), or "en-US-AvaMultilingualNeural" (expressive US female).',
           },
         },
         required: ['text'],

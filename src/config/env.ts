@@ -14,6 +14,8 @@ const envSchema = z.object({
   BOT_NAME: z.string().default('Forgelabs assistant'),
   BOT_CREATOR: z.string().default('ADEMOLA'),
   BOT_PREFIX: z.string().default(''),
+  BOT_VOICE: z.string().default('en-NG-AbeoNeural'),
+  GEMINI_API_KEY: z.string().optional(),
   BOT_OWNERS: z.string().default('').transform((val) => 
     val.split(',').map((s) => s.trim()).filter(Boolean)
   ),
@@ -42,9 +44,13 @@ export const config = {
     name: process.env.BOT_NAME || 'Forgelabs assistant',
     creator: process.env.BOT_CREATOR || 'ADEMOLA',
     prefix: process.env.BOT_PREFIX || '',
+    voice: process.env.BOT_VOICE || 'en-NG-AbeoNeural',
     owners: (process.env.BOT_OWNERS || '').split(',').map((s) => s.trim()).filter(Boolean),
     pairingMethod: (process.env.PAIRING_METHOD as 'code' | 'qr') || 'code',
     pairingPhoneNumber: process.env.PAIRING_PHONE_NUMBER || '',
+  },
+  gemini: {
+    apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',
   },
   paths: {
     sessions: path.resolve(process.env.SESSIONS_DIR || './sessions'),
