@@ -249,8 +249,6 @@ export class WhatsAppClient {
 
     // Message handler
     this.sock.ev.on('messages.upsert', async (m) => {
-      if (m.type !== 'notify') return;
-
       for (const msg of m.messages) {
         if (msg.key?.id && msg.message) {
           this.messageStore.set(msg.key.id, msg.message);
@@ -258,6 +256,15 @@ export class WhatsAppClient {
             const first = this.messageStore.keys().next().value;
             if (first) this.messageStore.delete(first);
           }
+        }
+
+        // Ignore messages sent by ourselves
+        if (msg.key?.fromMe) continue;
+
+        // Skip historical backlog messages older than 2 minutes to prevent reprocessing
+        const msgTime = Number(msg.messageTimestamp) * 1000;
+        if (msgTime && Date.now() - msgTime > 120_000) {
+          continue;
         }
 
         const normalized = normalizeMessage(msg);
@@ -300,17 +307,19 @@ export class WhatsAppClient {
           if (wasLinkDeleted) continue;
         }
 
-        // Passive Anti-Spam Moderation (frequency, repetition, flood checks)
-        const spamStatus = await antiSpamFilter.checkMessage(
-          normalized.senderJid,
-          normalized.chatJid,
-          normalized.text || '',
-          this.sock,
-          msg
-        );
-        if (spamStatus.isSpam) {
-          analyticsEngine.trackEvent('spam_blocked', { action: spamStatus.action }, normalized.chatJid, normalized.senderJid);
-          continue;
+        // Passive Anti-Spam Moderation for Groups only (prevent accidental DM blockage)
+        if (normalized.isGroup) {
+          const spamStatus = await antiSpamFilter.checkMessage(
+            normalized.senderJid,
+            normalized.chatJid,
+            normalized.text || '',
+            this.sock,
+            msg
+          );
+          if (spamStatus.isSpam) {
+            analyticsEngine.trackEvent('spam_blocked', { action: spamStatus.action }, normalized.chatJid, normalized.senderJid);
+            continue;
+          }
         }
 
         // 2. Trigger Evaluation (DM vs Group @mention/quote)

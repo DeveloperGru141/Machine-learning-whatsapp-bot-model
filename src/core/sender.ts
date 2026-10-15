@@ -47,11 +47,19 @@ export class OutboundSender {
       ? bufferOrUrl
       : { url: bufferOrUrl };
 
-    return await sock.sendMessage(
-      chatJid,
-      { image: content, caption },
-      { quoted }
-    );
+    try {
+      return await sock.sendMessage(
+        chatJid,
+        { image: content, caption },
+        { quoted }
+      );
+    } catch (err: any) {
+      if (quoted) {
+        console.warn(`[OutboundSender] sendImage with quoted failed (${err.message}), retrying directly...`);
+        return await sock.sendMessage(chatJid, { image: content, caption });
+      }
+      throw err;
+    }
   }
 
   public static async sendAudio(
@@ -65,15 +73,27 @@ export class OutboundSender {
       ? bufferOrUrl
       : { url: bufferOrUrl };
 
-    return await sock.sendMessage(
-      chatJid,
-      {
-        audio: content,
-        mimetype: isVoiceNote ? 'audio/ogg; codecs=opus' : 'audio/mp4',
-        ptt: isVoiceNote,
-      },
-      { quoted }
-    );
+    try {
+      return await sock.sendMessage(
+        chatJid,
+        {
+          audio: content,
+          mimetype: isVoiceNote ? 'audio/ogg; codecs=opus' : 'audio/mp4',
+          ptt: isVoiceNote,
+        },
+        { quoted }
+      );
+    } catch (err: any) {
+      if (quoted) {
+        console.warn(`[OutboundSender] sendAudio with quoted failed (${err.message}), retrying directly...`);
+        return await sock.sendMessage(chatJid, {
+          audio: content,
+          mimetype: isVoiceNote ? 'audio/ogg; codecs=opus' : 'audio/mp4',
+          ptt: isVoiceNote,
+        });
+      }
+      throw err;
+    }
   }
 
   public static async sendVideo(
@@ -87,15 +107,27 @@ export class OutboundSender {
       ? bufferOrUrl
       : { url: bufferOrUrl };
 
-    return await sock.sendMessage(
-      chatJid,
-      {
-        video: content,
-        caption,
-        mimetype: 'video/mp4',
-      },
-      { quoted }
-    );
+    try {
+      return await sock.sendMessage(
+        chatJid,
+        {
+          video: content,
+          caption,
+          mimetype: 'video/mp4',
+        },
+        { quoted }
+      );
+    } catch (err: any) {
+      if (quoted) {
+        console.warn(`[OutboundSender] sendVideo with quoted failed (${err.message}), retrying directly...`);
+        return await sock.sendMessage(chatJid, {
+          video: content,
+          caption,
+          mimetype: 'video/mp4',
+        });
+      }
+      throw err;
+    }
   }
 
   public static async sendContact(

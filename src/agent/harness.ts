@@ -101,6 +101,13 @@ export class AgentHarness {
         } else {
           // Final text reply from the LLM
           if (message.content) {
+            // When send_voice_note was executed, the voice note IS the complete response.
+            // Suppress redundant follow-up text like "Voice note sent. Let me know if you need anything else."
+            if (executedTools.has('send_voice_note')) {
+              console.log(`[AgentHarness] 🔇 Suppressed redundant post-voice-note text: "${message.content}"`);
+              break;
+            }
+
             console.log(`[AgentHarness] 💬 Bot replied to ${context.senderName}: "${message.content.slice(0, 100)}..."`);
             await context.replyText(message.content);
 
