@@ -89,4 +89,32 @@ export class OutboundSender {
       { quoted }
     );
   }
+
+  public static async sendContact(
+    sock: WASocket,
+    chatJid: string,
+    displayName: string,
+    phoneNumber: string,
+    quoted?: proto.IWebMessageInfo
+  ): Promise<any> {
+    const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+    const vcard =
+      'BEGIN:VCARD\n' +
+      'VERSION:3.0\n' +
+      `FN:${displayName}\n` +
+      `TEL;type=CELL;type=VOICE;waid=${cleanNumber}:+${cleanNumber}\n` +
+      'END:VCARD';
+
+    return await sock.sendMessage(
+      chatJid,
+      {
+        contacts: {
+          displayName,
+          contacts: [{ vcard }],
+        },
+      },
+      { quoted }
+    );
+  }
 }
+

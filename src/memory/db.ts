@@ -121,6 +121,23 @@ export function initDatabase() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_conversation_summaries_chat ON conversation_summaries(chat_jid, to_timestamp);
+
+    -- Contacts Book: Automatic and manual contact saving, address book indexing, and vCard export
+    CREATE TABLE IF NOT EXISTS contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      phone_number TEXT NOT NULL,
+      jid TEXT NOT NULL UNIQUE,
+      display_name TEXT NOT NULL,
+      custom_name TEXT,
+      notes TEXT,
+      tags TEXT DEFAULT '[]',
+      is_auto_saved INTEGER DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone_number);
+    CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(display_name);
   `);
 }
 

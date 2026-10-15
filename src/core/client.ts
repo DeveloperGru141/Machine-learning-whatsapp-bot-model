@@ -31,6 +31,7 @@ import { healthMonitor } from './health-monitor.js';
 import { analyticsEngine } from './analytics.js';
 import { userRateLimiter } from './rate-limiter.js';
 import { userProfileManager } from '../memory/user-profiles.js';
+import { contactService } from '../memory/contact-service.js';
 import { setSchedulerSocket } from '../plugins/scheduler/scheduler-plugin.js';
 
 export class WhatsAppClient {
@@ -154,6 +155,9 @@ export class WhatsAppClient {
 
         // Persistent User Profile Tracking across all chats
         userProfileManager.upsertProfile(normalized.senderJid, normalized.senderName);
+
+        // Automatic Contact Saving: passively record and index all contacts
+        contactService.autoSaveContact(normalized.senderJid, normalized.senderName);
 
         // Harvest incoming sticker if present to expand sticker catalog autonomously
         if (normalized.contentType === 'sticker') {
@@ -283,6 +287,8 @@ export class WhatsAppClient {
             OutboundSender.sendAudio(sock, normalized.chatJid, bufferOrUrl, isVoiceNote, msg),
           sendVideo: (bufferOrUrl: Buffer | string, caption?: string) =>
             OutboundSender.sendVideo(sock, normalized.chatJid, bufferOrUrl, caption, msg),
+          sendContact: (displayName: string, phoneNumber: string) =>
+            OutboundSender.sendContact(sock, normalized.chatJid, displayName, phoneNumber, msg),
         };
 
         // 4. Dispatch via Concurrency Queue (Anti-Crash & Rate Limiting)

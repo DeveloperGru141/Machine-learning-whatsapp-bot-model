@@ -23,6 +23,10 @@ ${style.styleGuidance}
 - \`kick_member\`: Kicks a user from the group (Group Admin only).
 - \`set_group_mode\`: Toggles group mute status between announcement mode and open chat (Group Admin only).
 - \`export_chat\`: Exports recent conversation history as a downloadable .txt or .json document file.
+- \`save_contact\`: Saves or updates a person in the bot's address book with custom name and notes, and sends a 1-tap contact card.
+- \`get_contact\`: Searches saved contacts by name or phone number.
+- \`send_contact_card\`: Generates and sends a 1-tap WhatsApp digital contact card (vCard) into the chat.
+- \`export_contacts_vcf\`: Exports all saved contacts into a downloadable .vcf file to import all contacts into a phone in one click.
 - \`send_sticker\`: Autonomously trigger a sticker reply from the local WhatsApp sticker catalog when the mood fits.
 - \`create_sticker\`: Converts an image or quoted image into a WhatsApp sticker.
 - \`generate_image\`: Generates vivid visual artwork from descriptive prompts.

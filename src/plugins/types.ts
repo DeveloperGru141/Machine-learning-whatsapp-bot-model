@@ -12,6 +12,7 @@ export interface ExecutionContext {
   sendImage: (bufferOrUrl: Buffer | string, caption?: string) => Promise<any>;
   sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) => Promise<any>;
   sendVideo: (bufferOrUrl: Buffer | string, caption?: string) => Promise<any>;
+  sendContact: (displayName: string, phoneNumber: string) => Promise<any>;
 }
 
 export interface ToolResult {

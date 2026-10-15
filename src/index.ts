@@ -12,6 +12,7 @@ import { documentReaderPlugin } from './plugins/document-reader/document-plugin.
 import { schedulerPlugin } from './plugins/scheduler/scheduler-plugin.js';
 import { linkSummarizerPlugin } from './plugins/link-summarizer/link-plugin.js';
 import { conversationExportPlugin } from './plugins/export/export-plugin.js';
+import { contactPlugin } from './plugins/contact/contact-plugin.js';
 import { reloadPluginsTool } from './plugins/hot-reload.js';
 import { whatsAppClient } from './core/client.js';
 
@@ -34,6 +35,7 @@ async function bootstrap() {
   await pluginRegistry.registerPlugin(schedulerPlugin);
   await pluginRegistry.registerPlugin(linkSummarizerPlugin);
   await pluginRegistry.registerPlugin(conversationExportPlugin);
+  await pluginRegistry.registerPlugin(contactPlugin);
   await pluginRegistry.registerPlugin({
     name: 'SystemAdmin',
     version: '1.0.0',
