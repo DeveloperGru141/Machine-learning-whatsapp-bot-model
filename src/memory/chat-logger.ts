@@ -1,4 +1,5 @@
 import { db } from './db.js';
+import { config } from '../config/env.js';
 
 export interface LogMessageInput {
   chatJid: string;
@@ -55,7 +56,7 @@ export class ChatLogger {
       this.insertLogStmt.run(
         chatJid,
         'bot',
-        'Nova',
+        config.bot.name,
         chatJid.endsWith('@g.us') ? 1 : 0,
         'text',
         text,

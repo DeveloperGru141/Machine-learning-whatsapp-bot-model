@@ -157,6 +157,9 @@ export class ContextManager {
       for (let i = 0; i < reversedCandidates.length; i++) {
         const row = reversedCandidates[i];
         const isBot =
+          row.sender_name === config.bot.name ||
+          row.sender_name === 'Forgelabs assistant' ||
+          row.sender_name === 'Forgelabs Assistant' ||
           row.sender_name === 'Nova' ||
           row.sender_jid === 'bot' ||
           (row.sender_jid && row.sender_jid.startsWith('2349014896714'));

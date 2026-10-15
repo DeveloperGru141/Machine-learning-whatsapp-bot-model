@@ -10,8 +10,8 @@ const envSchema = z.object({
   GROQ_TEMPERATURE: z.coerce.number().default(1),
   GROQ_MAX_TOKENS: z.coerce.number().default(2048),
   GROQ_TOP_P: z.coerce.number().default(1),
-  GROQ_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
-  BOT_NAME: z.string().default('Nova'),
+  GROQ_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('low'),
+  BOT_NAME: z.string().default('Forgelabs assistant'),
   BOT_CREATOR: z.string().default('ADEMOLA'),
   BOT_PREFIX: z.string().default(''),
   BOT_OWNERS: z.string().default('').transform((val) => 
@@ -39,7 +39,7 @@ export const config = {
     reasoningEffort: process.env.GROQ_REASONING_EFFORT || 'low',
   },
   bot: {
-    name: process.env.BOT_NAME || 'Nova',
+    name: process.env.BOT_NAME || 'Forgelabs assistant',
     creator: process.env.BOT_CREATOR || 'ADEMOLA',
     prefix: process.env.BOT_PREFIX || '',
     owners: (process.env.BOT_OWNERS || '').split(',').map((s) => s.trim()).filter(Boolean),
