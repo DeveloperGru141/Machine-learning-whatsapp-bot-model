@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { initDatabase } from './memory/db.js';
 import { pluginRegistry } from './plugins/registry.js';
 import { imageGenPlugin } from './plugins/image-gen/image-plugin.js';
@@ -14,6 +16,35 @@ import { conversationExportPlugin } from './plugins/export/export-plugin.js';
 import { contactPlugin } from './plugins/contact/contact-plugin.js';
 import { reloadPluginsTool } from './plugins/hot-reload.js';
 import { whatsAppClient } from './core/client.js';
+
+// Single-instance process lock to prevent duplicate WhatsApp socket conflict 440 loops
+const pidFile = path.resolve('./data/bot.pid');
+if (fs.existsSync(pidFile)) {
+  try {
+    const oldPid = parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
+    if (!isNaN(oldPid)) {
+      // Check if process is still running
+      process.kill(oldPid, 0);
+      console.warn(`⚠️ [SingleInstance] Another instance is already running with PID ${oldPid}. Terminating duplicate process to prevent WhatsApp conflict.`);
+      process.exit(0);
+    }
+  } catch {
+    // Process not running, stale PID file
+  }
+}
+try {
+  fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+  fs.writeFileSync(pidFile, String(process.pid), 'utf8');
+} catch {}
+
+const cleanupLock = () => {
+  try {
+    if (fs.existsSync(pidFile)) fs.unlinkSync(pidFile);
+  } catch {}
+};
+process.on('exit', cleanupLock);
+process.on('SIGINT', () => { cleanupLock(); process.exit(0); });
+process.on('SIGTERM', () => { cleanupLock(); process.exit(0); });
 
 async function bootstrap() {
   console.log('==============================================');
