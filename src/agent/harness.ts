@@ -34,21 +34,16 @@ export class AgentHarness {
 
     console.log(`[AgentHarness] Managed context built with ~${tokenBudgetUsed} estimated tokens.`);
 
-    // Fast-path detection: Check if message is casual dialogue that doesn't need tool invocation
-    const isToolCandidate = this.requiresTools(userMessage);
-    const allTools = pluginRegistry.getGroqToolDefinitions();
-    const tools = isToolCandidate ? allTools : [];
-
+    const tools = pluginRegistry.getGroqToolDefinitions();
     let currentIteration = 0;
-    const maxIterations = 2; // Strict limit: 1 iteration for tool call, 1 iteration for final text response
+    const maxIterations = 2; // 1 iteration for tool call, 1 iteration for final text response
     const executedTools = new Set<string>();
 
     while (currentIteration < maxIterations) {
       currentIteration++;
 
       try {
-        // Only provide tools on the first iteration to prevent infinite search loops
-        const activeTools = currentIteration === 1 && tools.length > 0 ? tools : undefined;
+        const activeTools = tools.length > 0 ? tools : undefined;
 
         const response = await groq.chat.completions.create({
           model: config.groq.model,
@@ -72,6 +67,12 @@ export class AgentHarness {
           for (const toolCall of message.tool_calls) {
             const toolName = toolCall.function.name;
             if (executedTools.has(toolName)) {
+              // Prevent duplicate execution of same tool in single turn
+              messages.push({
+                role: 'tool',
+                tool_call_id: toolCall.id,
+                content: JSON.stringify({ status: 'done', note: 'Search completed. Answer directly now.' }),
+              });
               continue;
             }
             executedTools.add(toolName);
@@ -120,6 +121,31 @@ export class AgentHarness {
         }
       } catch (err: any) {
         console.error('[AgentHarness] Error in reasoning loop:', err.message || err);
+
+        // Fail-safe fallback: Answer directly from pre-trained knowledge without tools
+        try {
+          console.log('[AgentHarness] Attempting fail-safe direct knowledge answer...');
+          const fallbackRes = await groq.chat.completions.create({
+            model: config.groq.model,
+            messages: [
+              messages[0], // system prompt
+              { role: 'user', content: `${context.senderName}: ${userMessage}` },
+            ],
+            temperature: config.groq.temperature,
+            max_completion_tokens: config.groq.maxTokens,
+          });
+
+          const fallbackText = fallbackRes.choices[0]?.message?.content;
+          if (fallbackText) {
+            console.log(`[AgentHarness] 💬 Bot replied via direct fallback to ${context.senderName}: "${fallbackText.slice(0, 100)}..."`);
+            await context.replyText(fallbackText);
+            chatLogger.logOutboundMessage(context.chatJid, fallbackText);
+            break;
+          }
+        } catch (fbErr: any) {
+          console.error('[AgentHarness] Fallback also failed:', fbErr.message);
+        }
+
         await context.replyText('network slow small, abeg try again in a sec');
         break;
       }
@@ -128,45 +154,6 @@ export class AgentHarness {
     try {
       await context.sock.sendPresenceUpdate('paused', context.chatJid);
     } catch {}
-  }
-
-  /**
-   * Fast-path classifier: determines if a message requires invoking tools.
-   * Casual dialogue, greetings, bot identity inquiries, and banter bypass tool overhead (<600ms latency).
-   */
-  private requiresTools(text: string): boolean {
-    const lower = (text || '').toLowerCase().trim();
-
-    // 1. Explicit URLs
-    if (/https?:\/\//i.test(lower)) return true;
-
-    // 2. Factual / real-time / price lookups
-    if (/\b(price|crypto|stock|btc|eth|sol|bitcoin|ethereum|weather|news|match|score|scoreline|search|lookup|google)\b/i.test(lower)) {
-      return true;
-    }
-
-    // 3. Media & downloader commands
-    if (/\b(download|video|reel|tiktok|mp4|audio|song|music|mp3|voice note)\b/i.test(lower)) {
-      return true;
-    }
-
-    // 4. Scheduler / Reminders
-    if (/\b(remind|reminder|schedule|timer|alarm)\b/i.test(lower)) {
-      return true;
-    }
-
-    // 5. Document & PDF reading
-    if (/\b(read|summarize|pdf|docx?|document|attached file)\b/i.test(lower)) {
-      return true;
-    }
-
-    // 6. Admin, moderation, contact management
-    if (/\b(tag all|tagall|kick|group mode|mute group|unmute group|save contact|get contact|contact card|vcf|generate image|draw|picture of)\b/i.test(lower)) {
-      return true;
-    }
-
-    // Casual chat, greetings, creator queries, banter do NOT need tools
-    return false;
   }
 }
 

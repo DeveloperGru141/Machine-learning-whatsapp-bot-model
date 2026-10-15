@@ -53,6 +53,7 @@ export class WhatsAppClient {
   private isConnecting = false;
   private keepAliveInterval: NodeJS.Timeout | null = null;
   private pairingRequested = false;
+  private messageStore: Map<string, any> = new Map();
 
   private startKeepAlive(): void {
     this.stopKeepAlive();
@@ -127,6 +128,12 @@ export class WhatsAppClient {
         syncFullHistory: false,
         markOnlineOnConnect: true,
         msgRetryCounterCache,
+        getMessage: async (key) => {
+          if (key.id) {
+            return this.messageStore.get(key.id);
+          }
+          return undefined;
+        },
         shouldIgnoreJid: (jid) => jid?.endsWith('@broadcast') || jid?.includes('status@broadcast'),
       });
 
@@ -245,6 +252,14 @@ export class WhatsAppClient {
       if (m.type !== 'notify') return;
 
       for (const msg of m.messages) {
+        if (msg.key?.id && msg.message) {
+          this.messageStore.set(msg.key.id, msg.message);
+          if (this.messageStore.size > 2000) {
+            const first = this.messageStore.keys().next().value;
+            if (first) this.messageStore.delete(first);
+          }
+        }
+
         const normalized = normalizeMessage(msg);
         if (!normalized) continue;
 

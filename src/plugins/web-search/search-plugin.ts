@@ -67,55 +67,106 @@ export class WebSearchPlugin implements IPlugin {
             } catch {}
           }
 
-          // 2. Query DuckDuckGo Instant Answer API with 4s timeout
-          const encodedQuery = encodeURIComponent(rawQuery);
-          const url = `https://api.duckduckgo.com/?q=${encodedQuery}&format=json&no_html=1&skip_disambig=1`;
-          const res = await fetch(url, {
-            headers: { 'User-Agent': 'WhatsAppBot/1.0' },
-            signal: AbortSignal.timeout(4000),
-          });
+          // 2. Real Web Search: Query DuckDuckGo HTML Search for genuine web snippets
+          try {
+            const htmlRes = await fetch(
+              `https://html.duckduckgo.com/html/?q=${encodeURIComponent(rawQuery)}`,
+              {
+                headers: {
+                  'User-Agent':
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                  'Accept-Language': 'en-US,en;q=0.5',
+                },
+                signal: AbortSignal.timeout(5000),
+              }
+            );
 
-          if (res.ok) {
-            const data = (await res.json()) as any;
-            const results: string[] = [];
+            if (htmlRes.ok) {
+              const html = await htmlRes.text();
+              const snippets: string[] = [];
 
-            if (data.AbstractText) {
-              results.push(`Summary: ${data.AbstractText}`);
-            }
-            if (data.Answer) {
-              results.push(`Direct Answer: ${data.Answer}`);
-            }
+              // Extract snippet blocks from DDG HTML search results
+              const snippetRegex = /<a\s+class="result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+              let match: RegExpExecArray | null;
 
-            if (Array.isArray(data.RelatedTopics)) {
-              for (const topic of data.RelatedTopics.slice(0, 3)) {
-                if (topic.Text) {
-                  results.push(`- ${topic.Text}`);
+              while ((match = snippetRegex.exec(html)) !== null && snippets.length < 5) {
+                const cleaned = match[1]
+                  .replace(/<[^>]+>/g, '')
+                  .replace(/&quot;/g, '"')
+                  .replace(/&#x27;/g, "'")
+                  .replace(/&amp;/g, '&')
+                  .replace(/&lt;/g, '<')
+                  .replace(/&gt;/g, '>')
+                  .replace(/\s+/g, ' ')
+                  .trim();
+                if (cleaned.length > 20) {
+                  snippets.push(cleaned);
                 }
               }
-            }
 
-            if (results.length > 0) {
-              return {
-                success: true,
-                message: `Web Search Results for "${rawQuery}":\n${results.join('\n')}`,
-                data: results,
-              };
+              if (snippets.length > 0) {
+                console.log(`[WebSearch] Found ${snippets.length} web snippet(s) for "${rawQuery}"`);
+                return {
+                  success: true,
+                  message: `Live Web Search Results for "${rawQuery}":\n` + snippets.map((s, i) => `${i + 1}. ${s}`).join('\n\n'),
+                  data: snippets,
+                };
+              }
             }
+          } catch (ddgHtmlErr: any) {
+            console.warn(`[WebSearch] DDG HTML lookup error: ${ddgHtmlErr.message}`);
           }
 
-          // 3. Fallback: Wikipedia summary
+          // 3. Fallback: Wikipedia REST summary
           try {
-            const cleanTopic = rawQuery.replace(/^(who is|what is|whats the|define)\s+/i, '').trim();
-            const wikiRes = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(cleanTopic)}`, {
-              signal: AbortSignal.timeout(3000),
-            });
+            const cleanTopic = rawQuery.replace(/^(who is|what is|whats the|define|tell me about)\s+/i, '').trim();
+            const wikiRes = await fetch(
+              `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(cleanTopic)}`,
+              {
+                headers: { 'User-Agent': 'WhatsAppBot/1.0' },
+                signal: AbortSignal.timeout(3000),
+              }
+            );
             if (wikiRes.ok) {
               const wikiData = (await wikiRes.json()) as any;
               if (wikiData.extract) {
                 return {
                   success: true,
-                  message: `Summary for "${cleanTopic}": ${wikiData.extract}`,
+                  message: `Wikipedia Summary for "${cleanTopic}":\n${wikiData.extract}`,
                   data: [wikiData.extract],
+                };
+              }
+            }
+          } catch {}
+
+          // 4. Fallback: DuckDuckGo Instant Answer API
+          try {
+            const encodedQuery = encodeURIComponent(rawQuery);
+            const url = `https://api.duckduckgo.com/?q=${encodedQuery}&format=json&no_html=1&skip_disambig=1`;
+            const res = await fetch(url, {
+              headers: { 'User-Agent': 'WhatsAppBot/1.0' },
+              signal: AbortSignal.timeout(3000),
+            });
+
+            if (res.ok) {
+              const data = (await res.json()) as any;
+              const results: string[] = [];
+
+              if (data.AbstractText) results.push(data.AbstractText);
+              if (data.Answer) results.push(data.Answer);
+
+              if (Array.isArray(data.RelatedTopics)) {
+                for (const topic of data.RelatedTopics.slice(0, 3)) {
+                  if (topic.Text) results.push(topic.Text);
+                }
+              }
+
+              if (results.length > 0) {
+                return {
+                  success: true,
+                  message: `Search Summary for "${rawQuery}":\n${results.join('\n')}`,
+                  data: results,
                 };
               }
             }
@@ -123,13 +174,13 @@ export class WebSearchPlugin implements IPlugin {
 
           return {
             success: true,
-            message: `Search executed for "${rawQuery}". No direct summary was returned. State what you know clearly and directly.`,
+            message: `Search executed for "${rawQuery}". No direct web snippets found. State the answer using your general knowledge directly.`,
             data: [],
           };
         } catch (err: any) {
           return {
             success: false,
-            message: `Web search temporary error: ${err.message}`,
+            message: `Web search error: ${err.message}`,
           };
         }
       },
