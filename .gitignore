@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build Output
+dist/
+
+# WhatsApp Auth Sessions (DO NOT COMMIT)
+sessions/
+*.session.json
+
+# Local Data & SQLite DB
+data/*.sqlite
+data/*.sqlite-journal
+data/temp/
+
+# Environment Variables
+.env
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS Files
+.DS_Store
+Thumbs.db

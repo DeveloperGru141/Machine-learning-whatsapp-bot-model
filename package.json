@@ -1,0 +1,40 @@
+{
+  "name": "whatsapp-modular-bot",
+  "version": "1.0.0",
+  "description": "Agentic WhatsApp Bot with Groq-powered tool-calling, continuous chat learning, and modular plugins",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "groq",
+    "agent",
+    "tool-calling",
+    "plugins",
+    "sticker-engine"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.12",
+    "dotenv": "^16.4.7",
+    "groq-sdk": "^0.15.0",
+    "node-cron": "^3.0.3",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0",
+    "qrcode-terminal": "^0.12.0",
+    "sharp": "^0.33.5",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/node-cron": "^3.0.11",
+    "@types/qrcode-terminal": "^0.12.2",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
