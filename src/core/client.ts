@@ -17,6 +17,9 @@ import { agentHarness } from '../agent/harness.js';
 import { ExecutionContext } from '../plugins/types.js';
 import { patternMiner } from '../learning/pattern-miner.js';
 import { stickerPlugin } from '../plugins/sticker/sticker-plugin.js';
+import { downloadMediaMessage } from '@whiskeysockets/baileys';
+import { transcribeAudioBuffer } from './transcription.js';
+import { analyzeImageBuffer } from './vision.js';
 
 export class WhatsAppClient {
   private sock: WASocket | null = null;
@@ -107,10 +110,40 @@ export class WhatsAppClient {
           normalized.text
         );
 
-        if (!shouldRespond || !cleanedText) continue;
+        if (!shouldRespond) continue;
+
+        let promptText = cleanedText;
+
+        // Process Voice Notes: Listen to voice notes and transcribe with Groq Whisper
+        if (normalized.contentType === 'audio') {
+          try {
+            console.log(`[WhatsAppClient] Downloading voicenote from ${normalized.senderName}...`);
+            const audioBuffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
+            const transcript = await transcribeAudioBuffer(audioBuffer);
+            if (transcript) {
+              promptText = `[User sent a voice note]: "${transcript}"`;
+            }
+          } catch (err: any) {
+            console.error('[WhatsAppClient] Voicenote processing error:', err.message);
+          }
+        } else if (normalized.contentType === 'image') {
+          // Process Image: Read visual content with Groq Vision
+          try {
+            console.log(`[WhatsAppClient] Reading image content from ${normalized.senderName}...`);
+            const imgBuffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
+            const visionDesc = await analyzeImageBuffer(imgBuffer, cleanedText);
+            if (visionDesc) {
+              promptText = `[Visual Content Analysis of Attached Image]:\n${visionDesc}\n\nUser Question/Caption: ${cleanedText || 'Describe and answer based on this image'}`;
+            }
+          } catch (err: any) {
+            console.error('[WhatsAppClient] Image vision processing error:', err.message);
+          }
+        }
+
+        if (!promptText) continue;
 
         console.log(
-          `[Incoming Trigger] From: ${normalized.senderName} (${normalized.chatJid}): "${cleanedText}"`
+          `[Incoming Trigger] From: ${normalized.senderName} (${normalized.chatJid}): "${promptText.slice(0, 80)}..."`
         );
 
         // 3. Build Execution Context
@@ -133,7 +166,7 @@ export class WhatsAppClient {
 
         // 4. Dispatch to Groq Agent Harness
         try {
-          await agentHarness.handleMessage(cleanedText, context);
+          await agentHarness.handleMessage(promptText, context);
         } catch (err) {
           console.error('[WhatsAppClient] Error in agent handler:', err);
         }

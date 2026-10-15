@@ -5,6 +5,7 @@ import { imageGenPlugin } from './plugins/image-gen/image-plugin.js';
 import { audioDownloaderPlugin } from './plugins/audio-downloader/audio-plugin.js';
 import { memoryPlugin } from './plugins/memory-search/memory-plugin.js';
 import { datasetExporterPlugin } from './learning/dataset-exporter.js';
+import { webSearchPlugin } from './plugins/web-search/search-plugin.js';
 import { whatsAppClient } from './core/client.js';
 
 async function bootstrap() {
@@ -22,6 +23,7 @@ async function bootstrap() {
   await pluginRegistry.registerPlugin(audioDownloaderPlugin);
   await pluginRegistry.registerPlugin(memoryPlugin);
   await pluginRegistry.registerPlugin(datasetExporterPlugin);
+  await pluginRegistry.registerPlugin(webSearchPlugin);
 
   console.log(`🔌 Registered ${pluginRegistry.getAllTools().length} tools across plugins.`);
 
