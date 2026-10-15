@@ -98,3 +98,6 @@ export function initDatabase() {
     );
   `);
 }
+
+// Auto-initialize tables on module load
+initDatabase();

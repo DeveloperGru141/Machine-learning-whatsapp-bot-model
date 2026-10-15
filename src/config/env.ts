@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 import { z } from 'zod';
 import path from 'path';
 
-dotenv.config();
+dotenv.config({ override: true });
 
 const envSchema = z.object({
   GROQ_API_KEY: z.string().min(1, 'GROQ_API_KEY is required for the agentic harness'),
@@ -16,6 +16,8 @@ const envSchema = z.object({
   BOT_OWNERS: z.string().default('').transform((val) => 
     val.split(',').map((s) => s.trim()).filter(Boolean)
   ),
+  PAIRING_METHOD: z.enum(['code', 'qr']).default('code'),
+  PAIRING_PHONE_NUMBER: z.string().default(''),
   SESSIONS_DIR: z.string().default('./sessions'),
   DATABASE_PATH: z.string().default('./data/bot.sqlite'),
   STICKERS_DIR: z.string().default('./assets/stickers'),
@@ -41,6 +43,8 @@ export const config = {
     name: process.env.BOT_NAME || 'Nova',
     prefix: process.env.BOT_PREFIX || '',
     owners: (process.env.BOT_OWNERS || '').split(',').map((s) => s.trim()).filter(Boolean),
+    pairingMethod: (process.env.PAIRING_METHOD as 'code' | 'qr') || 'code',
+    pairingPhoneNumber: process.env.PAIRING_PHONE_NUMBER || '',
   },
   paths: {
     sessions: path.resolve(process.env.SESSIONS_DIR || './sessions'),

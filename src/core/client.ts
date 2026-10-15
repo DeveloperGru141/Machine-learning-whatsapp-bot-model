@@ -8,6 +8,7 @@ import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { Boom } from '@hapi/boom';
 import fs from 'fs';
+import readline from 'readline';
 import { config } from '../config/env.js';
 import { normalizeMessage } from './normalizer.js';
 import { shouldRespondToMessage } from './filter.js';
@@ -46,11 +47,44 @@ export class WhatsAppClient {
     // Save auth credentials whenever updated
     this.sock.ev.on('creds.update', saveCreds);
 
+    // Pairing Code Flow (Link with phone number instead of QR)
+    if (config.bot.pairingMethod === 'code' && !this.sock.authState.creds.registered) {
+      setTimeout(async () => {
+        let phoneNumber = config.bot.pairingPhoneNumber;
+        if (!phoneNumber) {
+          const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+          phoneNumber = await new Promise<string>((resolve) => {
+            rl.question('\n📱 Enter your WhatsApp phone number with country code (e.g. 2348012345678): ', (answer) => {
+              rl.close();
+              resolve(answer.trim());
+            });
+          });
+        }
+
+        const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+        if (cleanNumber) {
+          try {
+            const code = await this.sock!.requestPairingCode(cleanNumber);
+            console.log('\n======================================================');
+            console.log(`📱 YOUR WHATSAPP PAIRING CODE: ${code}`);
+            console.log('------------------------------------------------------');
+            console.log('1. Open WhatsApp on your phone');
+            console.log('2. Go to Settings > Linked Devices > Link a Device');
+            console.log('3. Tap "Link with phone number instead"');
+            console.log(`4. Enter code: ${code}`);
+            console.log('======================================================\n');
+          } catch (err: any) {
+            console.error('[WhatsAppClient] Error requesting pairing code:', err.message);
+          }
+        }
+      }, 4000);
+    }
+
     // Connection lifecycle management
     this.sock.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect, qr } = update;
 
-      if (qr) {
+      if (qr && config.bot.pairingMethod === 'qr') {
         console.log('\n📱 SCAN THE QR CODE BELOW TO CONNECT WHATSAPP:');
         qrcode.generate(qr, { small: true });
       }
