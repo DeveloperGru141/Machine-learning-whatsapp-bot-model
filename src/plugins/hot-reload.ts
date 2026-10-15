@@ -7,7 +7,6 @@ import { config } from '../config/env.js';
 
 export class PluginHotReloader {
   private pluginPaths: Map<string, string> = new Map([
-    ['StickerEngine', 'src/plugins/sticker/sticker-plugin.ts'],
     ['ImageGenerator', 'src/plugins/image-gen/image-plugin.ts'],
     ['AudioDownloader', 'src/plugins/audio-downloader/audio-plugin.ts'],
     ['VideoDownloader', 'src/plugins/video-downloader/video-plugin.ts'],

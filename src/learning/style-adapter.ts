@@ -17,26 +17,24 @@ export class StyleAdapter {
     let styleGuidance = '';
     if (profile) {
       if (profile.formality_style === 'short_punchy') {
-        styleGuidance = `Chat Vibe: Fast-paced & short. Keep your replies concise (1-2 sentences), vibrant, and punchy.`;
-      } else if (profile.formality_style === 'sticker_heavy') {
-        styleGuidance = `Chat Vibe: Highly visual and expressive. Sticker usage is frequent. Don't hesitate to use the \`send_sticker\` tool to react to jokes, banter, or greetings.`;
+        styleGuidance = `Chat Vibe: Fast-paced & direct. Keep replies short (1-2 sentences), natural, zero fluff, NO emoji spam.`;
       } else if (profile.formality_style === 'detailed') {
-        styleGuidance = `Chat Vibe: In-depth and thoughtful. Elaborate clearly when explaining concepts.`;
+        styleGuidance = `Chat Vibe: Thoughtful and clear. Explain concepts simply without robotic jargon, NO emoji spam.`;
       } else {
-        styleGuidance = `Chat Vibe: Natural, relaxed WhatsApp banter. Blend humor and helpfulness.`;
+        styleGuidance = `Chat Vibe: Natural, relaxed WhatsApp banter. Authentic friend vibe, sharp, witty, NO emoji spam (0 to 1 emoji max).`;
       }
     } else {
-      styleGuidance = `Chat Vibe: Natural, engaging, and friendly WhatsApp chat style.`;
+      styleGuidance = `Chat Vibe: Authentic WhatsApp user cadence. Short, sharp, friendly, zero AI clichés, NO emoji spam.`;
     }
 
-    // 2. Fetch top learned dialogue exemplars across the database
+    // 2. Fetch top learned dialogue exemplars across the database (text-only, human-like)
     const exemplars = db.prepare(`
       SELECT context_text, response_text, response_type
       FROM dialogue_exemplars
-      WHERE chat_jid = ? OR 1=1
+      WHERE response_type != 'sticker' AND response_text IS NOT NULL AND response_text != ''
       ORDER BY quality_score DESC, RANDOM()
-      LIMIT 3
-    `).all(chatJid) as unknown as Array<{ context_text: string; response_text: string; response_type: string }>;
+      LIMIT 6
+    `).all() as unknown as Array<{ context_text: string; response_text: string; response_type: string }>;
 
     const formattedExemplars = exemplars.map((e) => ({
       context: e.context_text,

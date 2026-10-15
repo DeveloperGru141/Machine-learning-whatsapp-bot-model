@@ -35,17 +35,21 @@ export class AgentHarness {
 
     const tools = pluginRegistry.getGroqToolDefinitions();
     let currentIteration = 0;
-    const maxIterations = 5;
+    const maxIterations = 2; // Strict limit: 1 iteration for tool call, 1 iteration for final text response
+    const executedTools = new Set<string>();
 
     while (currentIteration < maxIterations) {
       currentIteration++;
 
       try {
+        // Only provide tools on the first iteration to prevent infinite search loops
+        const activeTools = currentIteration === 1 && tools.length > 0 ? tools : undefined;
+
         const response = await groq.chat.completions.create({
           model: config.groq.model,
           messages: messages,
-          tools: tools.length > 0 ? tools : undefined,
-          tool_choice: tools.length > 0 ? 'auto' : undefined,
+          tools: activeTools,
+          tool_choice: activeTools ? 'auto' : undefined,
           temperature: config.groq.temperature,
           max_completion_tokens: config.groq.maxTokens,
           top_p: config.groq.topP,
@@ -59,9 +63,14 @@ export class AgentHarness {
         messages.push(message);
 
         // Check if the model decided to call tools
-        if (message.tool_calls && message.tool_calls.length > 0) {
+        if (message.tool_calls && message.tool_calls.length > 0 && currentIteration < maxIterations) {
           for (const toolCall of message.tool_calls) {
             const toolName = toolCall.function.name;
+            if (executedTools.has(toolName)) {
+              continue;
+            }
+            executedTools.add(toolName);
+
             let toolArgs = {};
             try {
               toolArgs = JSON.parse(toolCall.function.arguments || '{}');
@@ -101,8 +110,8 @@ export class AgentHarness {
           break;
         }
       } catch (err: any) {
-        console.error('[AgentHarness] Error in reasoning loop:', err);
-        await context.replyText(`⚠️ Error processing request: ${err.message}`);
+        console.error('[AgentHarness] Error in reasoning loop:', err.message || err);
+        await context.replyText('network slow small, abeg try again in a sec');
         break;
       }
     }

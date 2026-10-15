@@ -7,7 +7,10 @@ export class MessageReactor {
    * Reactions are strictly group-only per user request.
    */
   public shouldReact(text: string, isGroup: boolean): boolean {
-    return Boolean(isGroup);
+    if (!isGroup) return false;
+    const lower = (text || '').toLowerCase();
+    // Only react when there is an authentic emotional or conversational trigger
+    return /(lol|lmao|haha|😂|rofl|lmfao|🤣|thanks|thank you|goat|fire|amazing|awesome|facts|fr\b|no cap|sad|rip|sorry)/i.test(lower);
   }
 
   /**

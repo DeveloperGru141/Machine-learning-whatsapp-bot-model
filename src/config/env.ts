@@ -21,8 +21,6 @@ const envSchema = z.object({
   PAIRING_PHONE_NUMBER: z.string().default(''),
   SESSIONS_DIR: z.string().default('./sessions'),
   DATABASE_PATH: z.string().default('./data/bot.sqlite'),
-  STICKERS_DIR: z.string().default('./assets/stickers'),
-  STICKER_REPLY_PROBABILITY: z.coerce.number().min(0).max(1).default(0.65),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -35,10 +33,10 @@ export const config = {
   groq: {
     apiKey: process.env.GROQ_API_KEY || '',
     model: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
-    temperature: Number(process.env.GROQ_TEMPERATURE ?? 1),
+    temperature: Number(process.env.GROQ_TEMPERATURE ?? 0.7),
     maxTokens: Number(process.env.GROQ_MAX_TOKENS ?? 2048),
     topP: Number(process.env.GROQ_TOP_P ?? 1),
-    reasoningEffort: process.env.GROQ_REASONING_EFFORT || 'medium',
+    reasoningEffort: process.env.GROQ_REASONING_EFFORT || 'low',
   },
   bot: {
     name: process.env.BOT_NAME || 'Nova',
@@ -51,10 +49,6 @@ export const config = {
   paths: {
     sessions: path.resolve(process.env.SESSIONS_DIR || './sessions'),
     database: path.resolve(process.env.DATABASE_PATH || './data/bot.sqlite'),
-    stickers: path.resolve(process.env.STICKERS_DIR || './assets/stickers'),
     temp: path.resolve('./data/temp'),
-  },
-  stickers: {
-    replyProbability: Number(process.env.STICKER_REPLY_PROBABILITY || 0.65),
   },
 };

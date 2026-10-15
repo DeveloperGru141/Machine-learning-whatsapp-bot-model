@@ -17,7 +17,6 @@ import { chatLogger } from '../memory/chat-logger.js';
 import { agentHarness } from '../agent/harness.js';
 import { ExecutionContext } from '../plugins/types.js';
 import { patternMiner } from '../learning/pattern-miner.js';
-import { stickerPlugin } from '../plugins/sticker/sticker-plugin.js';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { transcribeAudioBuffer } from './transcription.js';
 import { analyzeImageBuffer } from './vision.js';
@@ -105,6 +104,14 @@ export class WhatsAppClient {
       const { version, isLatest } = await fetchLatestBaileysVersion();
       console.log(`[WhatsAppClient] Starting Baileys v${version.join('.')} (Latest: ${isLatest})`);
 
+      const msgRetryCounterMap = new Map<string, any>();
+      const msgRetryCounterCache = {
+        get: <T>(key: string): T | undefined => msgRetryCounterMap.get(key) as T,
+        set: <T>(key: string, value: T): void => { msgRetryCounterMap.set(key, value); },
+        del: (key: string): void => { msgRetryCounterMap.delete(key); },
+        flushAll: (): void => { msgRetryCounterMap.clear(); },
+      };
+
       this.sock = makeWASocket({
         version,
         logger: this.logger,
@@ -119,6 +126,8 @@ export class WhatsAppClient {
         maxMsgRetryCount: 5,
         syncFullHistory: false,
         markOnlineOnConnect: true,
+        msgRetryCounterCache,
+        shouldIgnoreJid: (jid) => jid?.endsWith('@broadcast') || jid?.includes('status@broadcast'),
       });
 
       // Initialize group welcome listener and scheduler background socket
@@ -261,11 +270,6 @@ export class WhatsAppClient {
         // Automatic Contact Saving: passively record and index all contacts
         contactService.autoSaveContact(normalized.senderJid, normalized.senderName);
 
-        // Harvest incoming sticker if present to expand sticker catalog autonomously
-        if (normalized.contentType === 'sticker') {
-          stickerPlugin.harvestIncomingSticker(msg).catch(() => {});
-        }
-
         // Continuous ML Pattern Mining
         patternMiner.analyzeInteraction(normalized.chatJid);
 
@@ -381,8 +385,7 @@ export class WhatsAppClient {
             }
             return await OutboundSender.replyText(sock, normalized.chatJid, text, msg);
           },
-          sendSticker: (bufferOrPath: Buffer | string) =>
-            OutboundSender.sendSticker(sock, normalized.chatJid, bufferOrPath, msg),
+          sendSticker: async () => false,
           sendImage: (bufferOrUrl: Buffer | string, caption?: string) =>
             OutboundSender.sendImage(sock, normalized.chatJid, bufferOrUrl, caption, msg),
           sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) =>

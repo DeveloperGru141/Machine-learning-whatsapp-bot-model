@@ -34,30 +34,18 @@ export class PatternMiner {
       const current = history[history.length - 1];
       const previous = history[history.length - 2];
 
-      // 1. Detect Sticker Reaction Pattern
-      if (current.content_type === 'sticker' && previous.content_type === 'text' && previous.message_text) {
-        this.recordStickerExemplar(chatJid, previous.message_text, current.sticker_filename);
-      }
-
-      // 2. Detect High-Humor / Banter Pattern
+      // 1. Detect High-Humor / Banter Pattern
       if (current.content_type === 'text' && current.message_text && this.laughterRegex.test(current.message_text)) {
         if (previous.content_type === 'text' && previous.message_text) {
           this.recordDialogueExemplar(chatJid, previous.message_text, current.message_text, 'humor');
         }
       }
 
-      // 3. Periodically update Chat Style Profile (e.g. every few messages)
+      // 2. Periodically update Chat Style Profile (e.g. every few messages)
       this.updateChatStyleProfile(chatJid);
     } catch (err) {
       // Fail silently in background to avoid disrupting main loop
     }
-  }
-
-  private recordStickerExemplar(chatJid: string, contextText: string, stickerFilename: string | null): void {
-    db.prepare(`
-      INSERT INTO dialogue_exemplars (chat_jid, context_text, response_text, response_type, sticker_filename, vibe_classification, quality_score, created_at)
-      VALUES (?, ?, ?, 'sticker', ?, 'reaction', 1.2, ?)
-    `).run(chatJid, contextText, '[Sent Sticker]', stickerFilename, Date.now());
   }
 
   private recordDialogueExemplar(chatJid: string, contextText: string, responseText: string, vibe: string): void {
@@ -75,33 +63,30 @@ export class PatternMiner {
     const stats = db.prepare(`
       SELECT 
         COUNT(*) as total,
-        AVG(CASE WHEN content_type = 'text' THEN LENGTH(COALESCE(message_text, '')) ELSE NULL END) as avg_len,
-        SUM(CASE WHEN content_type = 'sticker' THEN 1 ELSE 0 END) as sticker_count
+        AVG(CASE WHEN content_type = 'text' THEN LENGTH(COALESCE(message_text, '')) ELSE NULL END) as avg_len
       FROM chat_logs
       WHERE chat_jid = ?
-    `).get(chatJid) as unknown as { total: number; avg_len: number | null; sticker_count: number };
+    `).get(chatJid) as unknown as { total: number; avg_len: number | null };
 
     if (!stats || stats.total === 0) return;
 
-    const stickerRatio = stats.total > 0 ? (stats.sticker_count / stats.total) : 0;
     const avgLength = stats.avg_len || 0;
 
     // Determine formality style
     let formality = 'casual';
     if (avgLength > 80) formality = 'detailed';
-    else if (stickerRatio > 0.3) formality = 'sticker_heavy';
     else if (avgLength < 25) formality = 'short_punchy';
 
     db.prepare(`
       INSERT INTO chat_style_profiles (chat_jid, total_messages, sticker_ratio, avg_length, formality_style, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, 0.0, ?, ?, ?)
       ON CONFLICT(chat_jid) DO UPDATE SET
         total_messages = excluded.total_messages,
-        sticker_ratio = excluded.sticker_ratio,
+        sticker_ratio = 0.0,
         avg_length = excluded.avg_length,
         formality_style = excluded.formality_style,
         updated_at = excluded.updated_at
-    `).run(chatJid, stats.total, stickerRatio, avgLength, formality, Date.now());
+    `).run(chatJid, stats.total, avgLength, formality, Date.now());
   }
 }
 
