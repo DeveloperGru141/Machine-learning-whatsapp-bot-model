@@ -11,6 +11,7 @@ export interface ExecutionContext {
   sendSticker: (bufferOrPath: Buffer | string) => Promise<any>;
   sendImage: (bufferOrUrl: Buffer | string, caption?: string) => Promise<any>;
   sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) => Promise<any>;
+  sendVideo: (bufferOrUrl: Buffer | string, caption?: string) => Promise<any>;
 }
 
 export interface ToolResult {

@@ -67,4 +67,26 @@ export class OutboundSender {
       { quoted }
     );
   }
+
+  public static async sendVideo(
+    sock: WASocket,
+    chatJid: string,
+    bufferOrUrl: Buffer | string,
+    caption?: string,
+    quoted?: proto.IWebMessageInfo
+  ): Promise<any> {
+    const content = Buffer.isBuffer(bufferOrUrl)
+      ? bufferOrUrl
+      : { url: bufferOrUrl };
+
+    return await sock.sendMessage(
+      chatJid,
+      {
+        video: content,
+        caption,
+        mimetype: 'video/mp4',
+      },
+      { quoted }
+    );
+  }
 }

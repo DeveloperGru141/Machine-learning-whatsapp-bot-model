@@ -21,6 +21,9 @@ import { stickerPlugin } from '../plugins/sticker/sticker-plugin.js';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { transcribeAudioBuffer } from './transcription.js';
 import { analyzeImageBuffer } from './vision.js';
+import { synthesizeVoiceNote } from './tts.js';
+import { requestQueue } from './queue.js';
+import { groupAdminPlugin } from '../plugins/group-admin/admin-plugin.js';
 
 export class WhatsAppClient {
   private sock: WASocket | null = null;
@@ -136,6 +139,18 @@ export class WhatsAppClient {
         // Continuous ML Pattern Mining
         patternMiner.analyzeInteraction(normalized.chatJid);
 
+        // Passive Group Admin: Check and delete unauthorized group invite links
+        if (normalized.isGroup && normalized.text) {
+          const wasLinkDeleted = await groupAdminPlugin.handleAntiLink(
+            this.sock,
+            msg,
+            normalized.chatJid,
+            normalized.senderJid,
+            normalized.text
+          );
+          if (wasLinkDeleted) continue;
+        }
+
         // 2. Trigger Evaluation (DM vs Group @mention/quote)
         const botJid = this.sock?.user?.id || '';
         const { shouldRespond, cleanedText } = shouldRespondToMessage(
@@ -147,9 +162,10 @@ export class WhatsAppClient {
         if (!shouldRespond) continue;
 
         let promptText = cleanedText;
+        const isIncomingVoiceNote = normalized.contentType === 'audio';
 
         // Process Voice Notes: Listen to voice notes and transcribe with Groq Whisper
-        if (normalized.contentType === 'audio') {
+        if (isIncomingVoiceNote) {
           try {
             console.log(`[WhatsAppClient] Downloading voicenote from ${normalized.senderName}...`);
             const audioBuffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
@@ -189,21 +205,40 @@ export class WhatsAppClient {
           senderName: normalized.senderName,
           isGroup: normalized.isGroup,
           rawMessage: msg,
-          replyText: (text: string) => OutboundSender.replyText(sock, normalized.chatJid, text, msg),
+          replyText: async (text: string) => {
+            // If user sent a voice note, respond with a synthesized AI voice note in the fine-tuned persona!
+            if (isIncomingVoiceNote) {
+              console.log(`[TTS] Synthesizing voice note reply to ${normalized.senderName}...`);
+              const vnBuffer = await synthesizeVoiceNote(text);
+              if (vnBuffer) {
+                return await OutboundSender.sendAudio(sock, normalized.chatJid, vnBuffer, true, msg);
+              }
+            }
+            return await OutboundSender.replyText(sock, normalized.chatJid, text, msg);
+          },
           sendSticker: (bufferOrPath: Buffer | string) =>
             OutboundSender.sendSticker(sock, normalized.chatJid, bufferOrPath, msg),
           sendImage: (bufferOrUrl: Buffer | string, caption?: string) =>
             OutboundSender.sendImage(sock, normalized.chatJid, bufferOrUrl, caption, msg),
           sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) =>
             OutboundSender.sendAudio(sock, normalized.chatJid, bufferOrUrl, isVoiceNote, msg),
+          sendVideo: (bufferOrUrl: Buffer | string, caption?: string) =>
+            OutboundSender.sendVideo(sock, normalized.chatJid, bufferOrUrl, caption, msg),
         };
 
-        // 4. Dispatch to Groq Agent Harness
-        try {
-          await agentHarness.handleMessage(promptText, context);
-        } catch (err) {
-          console.error('[WhatsAppClient] Error in agent handler:', err);
-        }
+        // 4. Dispatch via Concurrency Queue (Anti-Crash & Rate Limiting)
+        requestQueue.enqueue({
+          id: `${normalized.chatJid}_${msg.key.id || Date.now()}`,
+          senderJid: normalized.senderJid,
+          chatJid: normalized.chatJid,
+          execute: async () => {
+            try {
+              await agentHarness.handleMessage(promptText, context);
+            } catch (err: any) {
+              console.error('[WhatsAppClient] Error in agent handler:', err.message);
+            }
+          },
+        });
       }
     });
   }

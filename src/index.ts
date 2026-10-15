@@ -6,6 +6,8 @@ import { audioDownloaderPlugin } from './plugins/audio-downloader/audio-plugin.j
 import { memoryPlugin } from './plugins/memory-search/memory-plugin.js';
 import { datasetExporterPlugin } from './learning/dataset-exporter.js';
 import { webSearchPlugin } from './plugins/web-search/search-plugin.js';
+import { videoDownloaderPlugin } from './plugins/video-downloader/video-plugin.js';
+import { groupAdminPlugin } from './plugins/group-admin/admin-plugin.js';
 import { whatsAppClient } from './core/client.js';
 
 async function bootstrap() {
@@ -21,6 +23,8 @@ async function bootstrap() {
   await pluginRegistry.registerPlugin(stickerPlugin);
   await pluginRegistry.registerPlugin(imageGenPlugin);
   await pluginRegistry.registerPlugin(audioDownloaderPlugin);
+  await pluginRegistry.registerPlugin(videoDownloaderPlugin);
+  await pluginRegistry.registerPlugin(groupAdminPlugin);
   await pluginRegistry.registerPlugin(memoryPlugin);
   await pluginRegistry.registerPlugin(datasetExporterPlugin);
   await pluginRegistry.registerPlugin(webSearchPlugin);
