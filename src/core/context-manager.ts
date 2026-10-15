@@ -71,7 +71,7 @@ export class ContextManager {
     this.checkAndTriggerAutoSummary(chatJid);
 
     // 2. Build full system prompt + cross-chat user profile context
-    let systemPromptText = buildSystemPrompt(userJid, chatJid, isGroup);
+    let systemPromptText = buildSystemPrompt(userJid, chatJid, isGroup, currentPrompt);
     const profileSummary = userProfileManager.getProfileSummaryForPrompt(userJid);
     if (profileSummary) {
       systemPromptText += `\n\n# User Profile Context (Cross-Chat Persistent Memory):\n${profileSummary}\n`;

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -9,82 +10,205 @@ if sys.platform == "win32":
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
+DB_PATH = DATA_DIR / "bot.sqlite"
 INPUT_DATASET = DATA_DIR / "finetune_dataset.jsonl"
 TRAIN_DATASET = DATA_DIR / "train.jsonl"
 VAL_DATASET = DATA_DIR / "validation.jsonl"
 
-def validate_and_tighten():
-    print("=" * 60)
-    print("🔍 WhatsApp Bot Fine-Tuning Dataset Validator & Tightener")
-    print("=" * 60)
+ROBOTIC_CLICHES = [
+    "as an ai",
+    "as a language model",
+    "how can i help you today",
+    "i'm here to assist",
+    "i am here to assist",
+    "feel free to ask",
+    "certainly!",
+    "certainly,",
+    "sure thing!",
+    "i hope this helps",
+    "let me know if you need anything else",
+    "is there anything else i can assist",
+    "an error occurred",
+    "network slow small",
+    "abeg try again in a sec",
+]
 
-    if not INPUT_DATASET.exists():
-        print(f"❌ Dataset file not found at: {INPUT_DATASET}")
-        print("💡 Run 'python scripts/ingest_chats.py' after placing chat .txt files in data/ to generate it.")
-        return
+OUTDATED_NAMES = [
+    "nova",
+]
+
+DEPRECATED_TERMS = [
+    "[sent sticker]",
+    "[sticker]",
+    "<media omitted>",
+    "roasts alex",
+    "uses stickers",
+]
+
+CREATOR_KEYWORDS = [
+    "who made",
+    "who built",
+    "who coded",
+    "who developed",
+    "who is your creator",
+    "who is the creator",
+    "who owns",
+]
+
+def count_emojis(text: str) -> int:
+    """Accurately counts emojis within unicode emoji ranges."""
+    count = 0
+    for char in text:
+        cp = ord(char)
+        if (
+            0x1F600 <= cp <= 0x1F64F  # Emoticons
+            or 0x1F300 <= cp <= 0x1F5FF  # Misc Symbols and Pictographs
+            or 0x1F680 <= cp <= 0x1F6FF  # Transport and Map
+            or 0x1F1E0 <= cp <= 0x1F1FF  # Flags
+            or 0x2600 <= cp <= 0x26FF    # Misc symbols
+            or 0x2700 <= cp <= 0x27BF    # Dingbats
+            or 0x1F900 <= cp <= 0x1F9FF  # Supplemental Symbols and Pictographs
+            or 0x1FA70 <= cp <= 0x1FAFF  # Symbols and Pictographs Extended-A
+        ):
+            count += 1
+    return count
+
+def validate_and_tighten():
+    print("=" * 65)
+    print("🎯 Forgelabs Assistant — Dataset Validator & Tightener")
+    print("=" * 65)
+
+    raw_candidates = []
+
+    # 1. Pull candidates from INPUT_DATASET if it exists
+    if INPUT_DATASET.exists():
+        with open(INPUT_DATASET, "r", encoding="utf-8") as f:
+            for line in f:
+                line_str = line.strip()
+                if not line_str:
+                    continue
+                try:
+                    data = json.loads(line_str)
+                    raw_candidates.append(data)
+                except json.JSONDecodeError:
+                    pass
+
+    # 2. Also pull candidates from SQLite fine_tuning_pairs & dialogue_exemplars
+    if DB_PATH.exists():
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            cursor = conn.cursor()
+
+            # From fine_tuning_pairs
+            cursor.execute("SELECT system_prompt, user_message, assistant_response FROM fine_tuning_pairs")
+            for sp, um, ar in cursor.fetchall():
+                if um and ar:
+                    raw_candidates.append({
+                        "messages": [
+                            {"role": "system", "content": sp or "You are Forgelabs assistant, built by ADEMOLA."},
+                            {"role": "user", "content": um},
+                            {"role": "assistant", "content": ar},
+                        ]
+                    })
+
+            # From dialogue_exemplars
+            cursor.execute("SELECT context_text, response_text FROM dialogue_exemplars WHERE response_type = 'text'")
+            for ctx, resp in cursor.fetchall():
+                if ctx and resp:
+                    raw_candidates.append({
+                        "messages": [
+                            {"role": "system", "content": "You are Forgelabs assistant, built by ADEMOLA."},
+                            {"role": "user", "content": ctx},
+                            {"role": "assistant", "content": resp},
+                        ]
+                    })
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ SQLite reading warning: {e}")
+
+    print(f"📥 Collected {len(raw_candidates)} total candidate samples for inspection.")
 
     valid_samples = []
     skipped_reasons = {
-        "too_short": 0,
         "missing_roles": 0,
-        "consecutive_roles": 0,
-        "system_artifacts": 0,
+        "too_short": 0,
+        "robotic_cliche": 0,
+        "emoji_spam": 0,
+        "outdated_name": 0,
+        "deprecated_artifact": 0,
+        "inconsistent_creator": 0,
         "duplicates": 0,
     }
 
     seen_pairs = set()
 
-    with open(INPUT_DATASET, "r", encoding="utf-8") as f:
-        for line_num, line in enumerate(f, start=1):
-            line_str = line.strip()
-            if not line_str:
+    for data in raw_candidates:
+        messages = data.get("messages", [])
+        if len(messages) < 2:
+            skipped_reasons["missing_roles"] += 1
+            continue
+
+        roles = [m.get("role") for m in messages]
+        if "user" not in roles or "assistant" not in roles:
+            skipped_reasons["missing_roles"] += 1
+            continue
+
+        user_msg = next((m.get("content", "") for m in messages if m.get("role") == "user"), "").strip()
+        asst_msg = next((m.get("content", "") for m in messages if m.get("role") == "assistant"), "").strip()
+
+        # Rule 1: Length check
+        if len(user_msg) < 2 or len(asst_msg) < 3:
+            skipped_reasons["too_short"] += 1
+            continue
+
+        asst_lower = asst_msg.lower()
+        user_lower = user_msg.lower()
+
+        # Rule 2: Outdated name check ("Nova")
+        if any(name in asst_lower for name in OUTDATED_NAMES):
+            skipped_reasons["outdated_name"] += 1
+            continue
+
+        # Rule 3: Robotic clichés check
+        if any(cliche in asst_lower for cliche in ROBOTIC_CLICHES):
+            skipped_reasons["robotic_cliche"] += 1
+            continue
+
+        # Rule 4: Deprecated artifacts / stickers
+        if any(dep in asst_lower or dep in user_lower for dep in DEPRECATED_TERMS):
+            skipped_reasons["deprecated_artifact"] += 1
+            continue
+
+        # Rule 5: Creator consistency check
+        if any(ck in user_lower for ck in CREATOR_KEYWORDS):
+            if "ademola" not in asst_lower:
+                skipped_reasons["inconsistent_creator"] += 1
                 continue
 
-            try:
-                data = json.loads(line_str)
-            except json.JSONDecodeError:
-                print(f"⚠️ Line {line_num}: Invalid JSON syntax. Skipping.")
-                continue
+        # Rule 6: Strict emoji limit (maximum 1 emoji per assistant reply)
+        if count_emojis(asst_msg) > 1:
+            skipped_reasons["emoji_spam"] += 1
+            continue
 
-            messages = data.get("messages", [])
-            if len(messages) < 2:
-                skipped_reasons["missing_roles"] += 1
-                continue
+        # Rule 7: Deduplication
+        pair_key = (user_lower, asst_lower)
+        if pair_key in seen_pairs:
+            skipped_reasons["duplicates"] += 1
+            continue
+        seen_pairs.add(pair_key)
 
-            # Check required roles
-            roles = [m.get("role") for m in messages]
-            if "user" not in roles or "assistant" not in roles:
-                skipped_reasons["missing_roles"] += 1
-                continue
+        valid_samples.append(data)
 
-            # Check content quality
-            user_msg = next((m.get("content", "") for m in messages if m.get("role") == "user"), "")
-            asst_msg = next((m.get("content", "") for m in messages if m.get("role") == "assistant"), "")
-
-            # Filter trivial replies
-            if len(user_msg.strip()) < 3 or len(asst_msg.strip()) < 3:
-                skipped_reasons["too_short"] += 1
-                continue
-
-            # Deduplication
-            pair_key = (user_msg.strip().lower(), asst_msg.strip().lower())
-            if pair_key in seen_pairs:
-                skipped_reasons["duplicates"] += 1
-                continue
-            seen_pairs.add(pair_key)
-
-            valid_samples.append(data)
-
-    print(f"\n📊 Dataset Analysis:")
-    print(f"   • Total Raw Samples:      {len(valid_samples) + sum(skipped_reasons.values())}")
-    print(f"   • High-Quality Valid:     {len(valid_samples)}")
-    print(f"   • Filtered Out / Tightened:")
+    print(f"\n📊 Validation Results:")
+    print(f"   • Total Candidates Inspected: {len(raw_candidates)}")
+    print(f"   • Valid High-Quality Pairs:   {len(valid_samples)}")
+    print(f"   • Filtered & Discarded:")
     for reason, count in skipped_reasons.items():
         if count > 0:
-            print(f"     - {reason.replace('_', ' ').capitalize()}: {count}")
+            print(f"     - {reason.replace('_', ' ').title()}: {count}")
 
-    if len(valid_samples) == 0:
-        print("\n⚠️ No valid training samples found yet. Ingest your WhatsApp chat exports to populate.")
+    if not valid_samples:
+        print("\n❌ No valid samples remaining after filtering.")
         return
 
     # Train / Validation Split (90% Train, 10% Validation)
@@ -100,10 +224,16 @@ def validate_and_tighten():
         for s in val_data:
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
 
-    print(f"\n✅ Dataset Cleaned, Tightened, and Split:")
-    print(f"   📁 Training Set (90%):    {TRAIN_DATASET} ({len(train_data)} samples)")
-    print(f"   📁 Validation Set (10%):  {VAL_DATASET} ({len(val_data)} samples)")
-    print(f"\n🚀 Ready for Fine-Tuning upload to Groq / OpenAI / Unsloth!")
+    # Also update finetune_dataset.jsonl with the full deduplicated valid dataset
+    with open(INPUT_DATASET, "w", encoding="utf-8") as f:
+        for s in valid_samples:
+            f.write(json.dumps(s, ensure_ascii=False) + "\n")
+
+    print(f"\n✅ Fine-Tuning Pipeline Tightened & Saved:")
+    print(f"   📁 Clean Unified Dataset: {INPUT_DATASET} ({len(valid_samples)} pairs)")
+    print(f"   📁 Training Set (90%):    {TRAIN_DATASET} ({len(train_data)} pairs)")
+    print(f"   📁 Validation Set (10%):  {VAL_DATASET} ({len(val_data)} pairs)")
+    print(f"\n✨ Zero emoji spam, zero robotic clichés, 100% authentic Forgelabs assistant identity.")
 
 if __name__ == "__main__":
     validate_and_tighten()

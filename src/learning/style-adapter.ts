@@ -6,7 +6,36 @@ export interface StyleAdapterContext {
 }
 
 export class StyleAdapter {
-  public getStyleContext(chatJid: string): StyleAdapterContext {
+  /**
+   * Detects the underlying intent or vibe of an incoming user message
+   * to select the most relevant few-shot training exemplars for the prompt.
+   */
+  private detectIntentVibe(text?: string): string | null {
+    if (!text) return null;
+    const lower = text.toLowerCase().trim();
+
+    if (/\b(ademola|creator|developer|who built|who made|who coded|who owns)\b/i.test(lower)) {
+      return 'creator';
+    }
+    if (/\b(who are you|what are you|your name|forgelabs|are you chatgpt|what is this bot|what can you do)\b/i.test(lower)) {
+      return 'identity';
+    }
+    if (/^(hi|hello|hey|yo|sup|good morning|gm|good afternoon|good evening|howdy)\b/i.test(lower)) {
+      return 'greeting';
+    }
+    if (/\b(btc|bitcoin|eth|sol|price|crypto|stock|market)\b/i.test(lower)) {
+      return 'crypto';
+    }
+    if (/\b(how far|wetin|omo|abeg|dey craze|whine|stress|fr|lol|lmao|hehe|fire|no cap)\b/i.test(lower)) {
+      return 'slang';
+    }
+    if (/\b(download|video|audio|remind|reminder|pdf|doc|document|summarize|read|vcf|contact)\b/i.test(lower)) {
+      return 'tools';
+    }
+    return null;
+  }
+
+  public getStyleContext(chatJid: string, incomingText?: string): StyleAdapterContext {
     // 1. Fetch learned profile for this chat
     const profile = db.prepare(`
       SELECT sticker_ratio, avg_length, formality_style
@@ -27,14 +56,42 @@ export class StyleAdapter {
       styleGuidance = `Chat Vibe: Authentic WhatsApp user cadence. Short, sharp, friendly, zero AI clichés, NO emoji spam.`;
     }
 
-    // 2. Fetch top learned dialogue exemplars across the database (text-only, human-like)
-    const exemplars = db.prepare(`
-      SELECT context_text, response_text, response_type
-      FROM dialogue_exemplars
-      WHERE response_type != 'sticker' AND response_text IS NOT NULL AND response_text != ''
-      ORDER BY quality_score DESC, RANDOM()
-      LIMIT 6
-    `).all() as unknown as Array<{ context_text: string; response_text: string; response_type: string }>;
+    // 2. Fetch targeted few-shot exemplars: Match user intent first, then backfill general exemplars
+    const targetVibe = this.detectIntentVibe(incomingText);
+    const exemplars: Array<{ context_text: string; response_text: string; response_type: string }> = [];
+
+    if (targetVibe) {
+      const targeted = db.prepare(`
+        SELECT context_text, response_text, response_type
+        FROM dialogue_exemplars
+        WHERE response_type != 'sticker' AND response_text IS NOT NULL AND response_text != ''
+          AND vibe_classification = ?
+        ORDER BY quality_score DESC, RANDOM()
+        LIMIT 3
+      `).all(targetVibe) as Array<{ context_text: string; response_text: string; response_type: string }>;
+
+      exemplars.push(...targeted);
+    }
+
+    const remainingSlots = 6 - exemplars.length;
+    if (remainingSlots > 0) {
+      const existingContexts = new Set(exemplars.map((e) => e.context_text));
+      const general = db.prepare(`
+        SELECT context_text, response_text, response_type
+        FROM dialogue_exemplars
+        WHERE response_type != 'sticker' AND response_text IS NOT NULL AND response_text != ''
+          ${targetVibe ? 'AND vibe_classification != ?' : ''}
+        ORDER BY quality_score DESC, RANDOM()
+        LIMIT ?
+      `).all(...(targetVibe ? [targetVibe, remainingSlots + 2] : [remainingSlots + 2])) as Array<{ context_text: string; response_text: string; response_type: string }>;
+
+      for (const g of general) {
+        if (!existingContexts.has(g.context_text) && exemplars.length < 6) {
+          exemplars.push(g);
+          existingContexts.add(g.context_text);
+        }
+      }
+    }
 
     const formattedExemplars = exemplars.map((e) => ({
       context: e.context_text,

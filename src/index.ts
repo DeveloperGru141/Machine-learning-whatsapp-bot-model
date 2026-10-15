@@ -17,6 +17,21 @@ import { contactPlugin } from './plugins/contact/contact-plugin.js';
 import { reloadPluginsTool } from './plugins/hot-reload.js';
 import { whatsAppClient } from './core/client.js';
 
+// Suppress noisy internal libsignal decrypt/Bad MAC dumps (Baileys handles Signal protocol retries automatically)
+const originalConsoleError = console.error;
+console.error = (...args: any[]) => {
+  const fullText = args.map((a) => (typeof a === 'object' ? (a?.stack || String(a)) : String(a))).join(' ');
+  if (
+    fullText.includes('Failed to decrypt message with any known session') ||
+    fullText.includes('Bad MAC Error') ||
+    fullText.includes('No matching sessions found for message') ||
+    fullText.includes('Session error:Error: Bad MAC')
+  ) {
+    return;
+  }
+  originalConsoleError.apply(console, args);
+};
+
 // Single-instance process lock to prevent duplicate WhatsApp socket conflict 440 loops
 const pidFile = path.resolve('./data/bot.pid');
 if (fs.existsSync(pidFile)) {

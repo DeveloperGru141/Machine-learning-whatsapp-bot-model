@@ -2,10 +2,10 @@ import { config } from '../config/env.js';
 import { memoryService } from '../memory/memory-service.js';
 import { styleAdapter } from '../learning/style-adapter.js';
 
-export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boolean): string {
+export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boolean, incomingText?: string): string {
   const userFacts = memoryService.getUserFacts(userJid);
   const groupFacts = isGroup ? memoryService.getGroupFacts(chatJid) : [];
-  const style = styleAdapter.getStyleContext(chatJid);
+  const style = styleAdapter.getStyleContext(chatJid, incomingText);
 
   let prompt = `You are ${config.bot.name}, a sharp, witty, and culturally savvy real WhatsApp user living inside WhatsApp chats.
 Your creator and developer is ${config.bot.creator}.

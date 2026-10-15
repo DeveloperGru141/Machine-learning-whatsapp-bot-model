@@ -109,13 +109,12 @@ export class AgentHarness {
             analyticsEngine.trackEvent('message_sent', { length: message.content.length }, context.chatJid, context.senderJid);
 
             // Record this interaction as a fine-tuning pair for continuous ML training
-            try {
-              const systemPrompt = messages[0]?.content || '';
-              db.prepare(`
-                INSERT INTO fine_tuning_pairs (system_prompt, user_message, assistant_response, tools_invoked, created_at)
-                VALUES (?, ?, ?, ?, ?)
-              `).run(systemPrompt, userMessage, message.content, '[]', Date.now());
-            } catch {}
+            this.recordFineTuningPair(
+              messages[0]?.content || '',
+              userMessage,
+              message.content,
+              Array.from(executedTools)
+            );
           }
           break;
         }
@@ -140,6 +139,12 @@ export class AgentHarness {
             console.log(`[AgentHarness] 💬 Bot replied via direct fallback to ${context.senderName}: "${fallbackText.slice(0, 100)}..."`);
             await context.replyText(fallbackText);
             chatLogger.logOutboundMessage(context.chatJid, fallbackText);
+            this.recordFineTuningPair(
+              messages[0]?.content || '',
+              userMessage,
+              fallbackText,
+              []
+            );
             break;
           }
         } catch (fbErr: any) {
@@ -154,6 +159,60 @@ export class AgentHarness {
     try {
       await context.sock.sendPresenceUpdate('paused', context.chatJid);
     } catch {}
+  }
+
+  /**
+   * Continuous learning guardrail:
+   * Only persists high-quality, authentic interactions into the fine-tuning database.
+   * Discards error messages, robotic clichés, and emoji spam.
+   */
+  private recordFineTuningPair(
+    systemPrompt: string,
+    userMessage: string,
+    assistantResponse: string,
+    tools: string[]
+  ): void {
+    try {
+      const trimmed = assistantResponse.trim();
+      // Guardrail 1: Minimum length requirement
+      if (trimmed.length < 5) return;
+
+      // Guardrail 2: Block error strings, robotic clichés, or generic fallbacks
+      const lower = trimmed.toLowerCase();
+      if (
+        lower.includes('network slow') ||
+        lower.includes('abeg try again') ||
+        lower.includes('as an ai') ||
+        lower.includes('i am an ai') ||
+        lower.includes('i am a language model') ||
+        lower.includes('i apologize') ||
+        lower.includes('rate limit') ||
+        lower.includes('an error occurred')
+      ) {
+        return;
+      }
+
+      // Guardrail 3: Block emoji spam (no more than 2 emojis)
+      const emojiRegex = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu;
+      const emojiCount = (trimmed.match(emojiRegex) || []).length;
+      if (emojiCount > 2) return;
+
+      // Guardrail 4: Valid user message
+      if (!userMessage || userMessage.trim().length < 2) return;
+
+      db.prepare(`
+        INSERT INTO fine_tuning_pairs (system_prompt, user_message, assistant_response, tools_invoked, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(
+        systemPrompt || '',
+        userMessage.trim(),
+        trimmed,
+        JSON.stringify(tools),
+        Date.now()
+      );
+    } catch (err: any) {
+      // Non-critical logging
+    }
   }
 }
 
