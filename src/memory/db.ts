@@ -96,6 +96,31 @@ export function initDatabase() {
       tools_invoked TEXT,
       created_at INTEGER NOT NULL
     );
+
+    -- Persistent Per-User Memory & Preferences
+    CREATE TABLE IF NOT EXISTS user_profiles (
+      user_jid TEXT PRIMARY KEY,
+      display_name TEXT,
+      preferred_language TEXT DEFAULT 'en',
+      personality_notes TEXT DEFAULT '',
+      first_seen INTEGER NOT NULL,
+      last_seen INTEGER NOT NULL,
+      total_messages INTEGER DEFAULT 0,
+      is_owner INTEGER DEFAULT 0
+    );
+
+    -- Conversation Summaries: Compact history rollups for context window management
+    CREATE TABLE IF NOT EXISTS conversation_summaries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_jid TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      messages_covered INTEGER NOT NULL,
+      from_timestamp INTEGER NOT NULL,
+      to_timestamp INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_conversation_summaries_chat ON conversation_summaries(chat_jid, to_timestamp);
   `);
 }
 

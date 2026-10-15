@@ -24,6 +24,39 @@ export class PluginRegistry {
     console.log(`[PluginRegistry] Loaded plugin: ${plugin.name} (${plugin.tools?.length || 0} tools)`);
   }
 
+  public async unregisterPlugin(pluginName: string): Promise<boolean> {
+    const plugin = this.plugins.get(pluginName);
+    if (!plugin) {
+      return false;
+    }
+
+    if (plugin.onUnload) {
+      try {
+        await plugin.onUnload();
+      } catch (err) {
+        console.error(`[PluginRegistry] Error unloading plugin ${plugin.name}:`, err);
+      }
+    }
+
+    if (plugin.tools) {
+      for (const tool of plugin.tools) {
+        this.tools.delete(tool.name);
+      }
+    }
+
+    this.plugins.delete(pluginName);
+    console.log(`[PluginRegistry] Unregistered plugin: ${pluginName}`);
+    return true;
+  }
+
+  public getPlugin(name: string): IPlugin | undefined {
+    return this.plugins.get(name);
+  }
+
+  public getAllPlugins(): IPlugin[] {
+    return Array.from(this.plugins.values());
+  }
+
   public getTool(name: string): BotTool | undefined {
     return this.tools.get(name);
   }

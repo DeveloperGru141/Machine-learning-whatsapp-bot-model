@@ -9,8 +9,7 @@ sessions/
 *.session.json
 
 # Local Data & SQLite DB
-data/*.sqlite
-data/*.sqlite-journal
+data/*.sqlite*
 data/temp/
 
 # Environment Variables

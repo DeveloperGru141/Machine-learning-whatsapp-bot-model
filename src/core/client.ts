@@ -24,6 +24,14 @@ import { analyzeImageBuffer } from './vision.js';
 import { synthesizeVoiceNote } from './tts.js';
 import { requestQueue } from './queue.js';
 import { groupAdminPlugin } from '../plugins/group-admin/admin-plugin.js';
+import { setupGroupWelcome } from '../plugins/group-admin/welcome.js';
+import { messageReactor } from './reactions.js';
+import { antiSpamFilter } from './anti-spam.js';
+import { healthMonitor } from './health-monitor.js';
+import { analyticsEngine } from './analytics.js';
+import { userRateLimiter } from './rate-limiter.js';
+import { userProfileManager } from '../memory/user-profiles.js';
+import { setSchedulerSocket } from '../plugins/scheduler/scheduler-plugin.js';
 
 export class WhatsAppClient {
   private sock: WASocket | null = null;
@@ -46,6 +54,10 @@ export class WhatsAppClient {
       generateHighQualityLinkPreview: true,
       browser: ['Ubuntu', 'Chrome', '20.0.04'],
     });
+
+    // Initialize group welcome listener and scheduler background socket
+    setupGroupWelcome(this.sock);
+    setSchedulerSocket(this.sock);
 
     // Save auth credentials whenever updated
     this.sock.ev.on('creds.update', saveCreds);
@@ -93,6 +105,7 @@ export class WhatsAppClient {
       }
 
       if (connection === 'close') {
+        healthMonitor.setConnectionStatus(false);
         const shouldReconnect =
           (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
         console.log(
@@ -107,6 +120,10 @@ export class WhatsAppClient {
           console.log('[WhatsAppClient] Logged out. Delete sessions/ to re-authenticate.');
         }
       } else if (connection === 'open') {
+        healthMonitor.setConnectionStatus(true);
+        const ownerJid = config.bot.owners[0] || '';
+        healthMonitor.startMonitoring(this.sock!, ownerJid);
+        analyticsEngine.startPeriodicReports(this.sock!, ownerJid);
         console.log('✅ [WhatsAppClient] Connection established successfully!');
       }
     });
@@ -119,7 +136,7 @@ export class WhatsAppClient {
         const normalized = normalizeMessage(msg);
         if (!normalized) continue;
 
-        // 1. Passive Continuous Learning: Log EVERY message in all chats
+        // 1. Passive Continuous Learning & Analytics: Log EVERY message in all chats
         chatLogger.logMessage({
           chatJid: normalized.chatJid,
           senderJid: normalized.senderJid,
@@ -130,6 +147,13 @@ export class WhatsAppClient {
           stickerFilename: normalized.stickerFilename,
           timestamp: Number(msg.messageTimestamp) * 1000 || Date.now(),
         });
+
+        // Record message health and analytics
+        healthMonitor.recordMessage();
+        analyticsEngine.trackEvent('message', { type: normalized.contentType }, normalized.chatJid, normalized.senderJid);
+
+        // Persistent User Profile Tracking across all chats
+        userProfileManager.upsertProfile(normalized.senderJid, normalized.senderName);
 
         // Harvest incoming sticker if present to expand sticker catalog autonomously
         if (normalized.contentType === 'sticker') {
@@ -151,6 +175,19 @@ export class WhatsAppClient {
           if (wasLinkDeleted) continue;
         }
 
+        // Passive Anti-Spam Moderation (frequency, repetition, flood checks)
+        const spamStatus = await antiSpamFilter.checkMessage(
+          normalized.senderJid,
+          normalized.chatJid,
+          normalized.text || '',
+          this.sock,
+          msg
+        );
+        if (spamStatus.isSpam) {
+          analyticsEngine.trackEvent('spam_blocked', { action: spamStatus.action }, normalized.chatJid, normalized.senderJid);
+          continue;
+        }
+
         // 2. Trigger Evaluation (DM vs Group @mention/quote)
         const botJid = this.sock?.user?.id || '';
         const { shouldRespond, cleanedText } = shouldRespondToMessage(
@@ -160,6 +197,20 @@ export class WhatsAppClient {
         );
 
         if (!shouldRespond) continue;
+
+        // Per-User Token Rate Limiter (protect against spamming bot reasoning loop)
+        const limitStatus = userRateLimiter.checkLimit(normalized.senderJid);
+        if (!limitStatus.allowed) {
+          console.warn(`[UserRateLimiter] User ${normalized.senderJid} throttled. Reset in ${limitStatus.resetInSeconds}s`);
+          await OutboundSender.replyText(
+            this.sock!,
+            normalized.chatJid,
+            `⏳ Slow down! You have reached your message quota. Please wait ${limitStatus.resetInSeconds}s before sending another request.`,
+            msg
+          );
+          continue;
+        }
+        userRateLimiter.consumeToken(normalized.senderJid);
 
         let promptText = cleanedText;
         const isIncomingVoiceNote = normalized.contentType === 'audio';
@@ -188,6 +239,8 @@ export class WhatsAppClient {
           } catch (err: any) {
             console.error('[WhatsAppClient] Image vision processing error:', err.message);
           }
+        } else if (normalized.contentType === 'document') {
+          promptText = `[User sent or quoted a document: "${normalized.text}"]. Please use the read_document tool to read, inspect, and answer or summarize based on this file.`;
         }
 
         if (!promptText) continue;
@@ -195,6 +248,12 @@ export class WhatsAppClient {
         console.log(
           `[Incoming Trigger] From: ${normalized.senderName} (${normalized.chatJid}): "${promptText.slice(0, 80)}..."`
         );
+
+        // Contextual Message Reactions when tagged in group
+        if (messageReactor.shouldReact(promptText, normalized.isGroup)) {
+          const emoji = messageReactor.getReactionEmoji(promptText);
+          messageReactor.reactToMessage(this.sock!, msg, emoji).catch(() => {});
+        }
 
         // 3. Build Execution Context
         const sock = this.sock!;
@@ -236,6 +295,8 @@ export class WhatsAppClient {
               await agentHarness.handleMessage(promptText, context);
             } catch (err: any) {
               console.error('[WhatsAppClient] Error in agent handler:', err.message);
+              healthMonitor.recordError(err);
+              analyticsEngine.trackEvent('error', { error: err.message }, normalized.chatJid, normalized.senderJid);
             }
           },
         });

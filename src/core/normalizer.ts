@@ -6,7 +6,7 @@ export interface NormalizedMessage {
   senderName: string;
   isGroup: boolean;
   text: string;
-  contentType: 'text' | 'sticker' | 'image' | 'audio';
+  contentType: 'text' | 'sticker' | 'image' | 'audio' | 'document' | 'video';
   stickerFilename?: string;
   raw: proto.IWebMessageInfo;
 }
@@ -20,7 +20,7 @@ export function normalizeMessage(msg: proto.IWebMessageInfo): NormalizedMessage 
   const senderName = msg.pushName || senderJid.split('@')[0];
 
   let text = '';
-  let contentType: 'text' | 'sticker' | 'image' | 'audio' = 'text';
+  let contentType: 'text' | 'sticker' | 'image' | 'audio' | 'document' | 'video' = 'text';
 
   const m = msg.message;
   if (m.conversation) {
@@ -36,6 +36,23 @@ export function normalizeMessage(msg: proto.IWebMessageInfo): NormalizedMessage 
     contentType = 'sticker';
   } else if (m.audioMessage) {
     contentType = 'audio';
+  } else if (m.videoMessage?.caption) {
+    text = m.videoMessage.caption;
+    contentType = 'video';
+  } else if (m.videoMessage) {
+    contentType = 'video';
+  } else if (m.documentMessage?.caption) {
+    text = m.documentMessage.caption;
+    contentType = 'document';
+  } else if (m.documentMessage) {
+    text = m.documentMessage.fileName || '[Document]';
+    contentType = 'document';
+  } else if (m.documentWithCaptionMessage?.message?.documentMessage?.caption) {
+    text = m.documentWithCaptionMessage.message.documentMessage.caption;
+    contentType = 'document';
+  } else if (m.documentWithCaptionMessage?.message?.documentMessage) {
+    text = m.documentWithCaptionMessage.message.documentMessage.fileName || '[Document]';
+    contentType = 'document';
   }
 
   return {

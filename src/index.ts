@@ -8,6 +8,11 @@ import { datasetExporterPlugin } from './learning/dataset-exporter.js';
 import { webSearchPlugin } from './plugins/web-search/search-plugin.js';
 import { videoDownloaderPlugin } from './plugins/video-downloader/video-plugin.js';
 import { groupAdminPlugin } from './plugins/group-admin/admin-plugin.js';
+import { documentReaderPlugin } from './plugins/document-reader/document-plugin.js';
+import { schedulerPlugin } from './plugins/scheduler/scheduler-plugin.js';
+import { linkSummarizerPlugin } from './plugins/link-summarizer/link-plugin.js';
+import { conversationExportPlugin } from './plugins/export/export-plugin.js';
+import { reloadPluginsTool } from './plugins/hot-reload.js';
 import { whatsAppClient } from './core/client.js';
 
 async function bootstrap() {
@@ -25,6 +30,16 @@ async function bootstrap() {
   await pluginRegistry.registerPlugin(audioDownloaderPlugin);
   await pluginRegistry.registerPlugin(videoDownloaderPlugin);
   await pluginRegistry.registerPlugin(groupAdminPlugin);
+  await pluginRegistry.registerPlugin(documentReaderPlugin);
+  await pluginRegistry.registerPlugin(schedulerPlugin);
+  await pluginRegistry.registerPlugin(linkSummarizerPlugin);
+  await pluginRegistry.registerPlugin(conversationExportPlugin);
+  await pluginRegistry.registerPlugin({
+    name: 'SystemAdmin',
+    version: '1.0.0',
+    description: 'System administration and plugin hot-reloading',
+    tools: [reloadPluginsTool],
+  });
   await pluginRegistry.registerPlugin(memoryPlugin);
   await pluginRegistry.registerPlugin(datasetExporterPlugin);
   await pluginRegistry.registerPlugin(webSearchPlugin);

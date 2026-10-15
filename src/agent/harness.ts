@@ -1,10 +1,10 @@
 import { groq } from './groq.js';
 import { config } from '../config/env.js';
-import { buildSystemPrompt } from './prompt.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { ExecutionContext } from '../plugins/types.js';
-import { chatLogger } from '../memory/chat-logger.js';
 import { db } from '../memory/db.js';
+import { contextManager } from '../core/context-manager.js';
+import { analyticsEngine } from '../core/analytics.js';
 
 export class AgentHarness {
   public async handleMessage(
@@ -23,28 +23,15 @@ export class AgentHarness {
       await context.sock.sendPresenceUpdate('composing', context.chatJid);
     } catch {}
 
-    const systemPrompt = buildSystemPrompt(
-      context.senderJid,
+    // Token-budgeted context assembly (system prompt, user profiles, older summaries, recent history)
+    const { messages, tokenBudgetUsed } = contextManager.buildManagedContext(
       context.chatJid,
-      context.isGroup
+      context.senderJid,
+      context.isGroup,
+      `${context.senderName}: ${userMessage}`
     );
 
-    // Retrieve recent conversation history for multi-turn context
-    const recentHistory = chatLogger.getRecentChatHistory(context.chatJid, 8);
-    const messages: any[] = [{ role: 'system', content: systemPrompt }];
-
-    for (const h of recentHistory) {
-      messages.push({
-        role: 'user',
-        content: `${h.sender_name}: ${h.message_text || '[Media]'}`,
-      });
-    }
-
-    // Append the current active prompt
-    messages.push({
-      role: 'user',
-      content: `${context.senderName}: ${userMessage}`,
-    });
+    console.log(`[AgentHarness] Managed context built with ~${tokenBudgetUsed} estimated tokens.`);
 
     const tools = pluginRegistry.getGroqToolDefinitions();
     let currentIteration = 0;
@@ -83,6 +70,7 @@ export class AgentHarness {
             }
 
             console.log(`[Agent] Calling tool: ${toolName}`, toolArgs);
+            analyticsEngine.trackEvent('tool_call', toolName, context.chatJid, context.senderJid);
             const toolResult = await pluginRegistry.executeTool(
               toolName,
               toolArgs,
@@ -99,9 +87,11 @@ export class AgentHarness {
           // Final text reply from the LLM
           if (message.content) {
             await context.replyText(message.content);
+            analyticsEngine.trackEvent('message_sent', { length: message.content.length }, context.chatJid, context.senderJid);
 
             // Record this interaction as a fine-tuning pair for continuous ML training
             try {
+              const systemPrompt = messages[0]?.content || '';
               db.prepare(`
                 INSERT INTO fine_tuning_pairs (system_prompt, user_message, assistant_response, tools_invoked, created_at)
                 VALUES (?, ?, ?, ?, ?)

@@ -5,7 +5,7 @@ export interface LogMessageInput {
   senderJid: string;
   senderName: string;
   isGroup: boolean;
-  contentType: 'text' | 'sticker' | 'image' | 'audio';
+  contentType: 'text' | 'sticker' | 'image' | 'audio' | 'document' | 'video' | string;
   messageText?: string;
   stickerFilename?: string;
   timestamp: number;
