@@ -8,7 +8,15 @@ export class OutboundSender {
     text: string,
     quoted?: proto.IWebMessageInfo
   ): Promise<any> {
-    return await sock.sendMessage(chatJid, { text }, { quoted });
+    try {
+      return await sock.sendMessage(chatJid, { text }, { quoted });
+    } catch (err: any) {
+      if (quoted) {
+        console.warn(`[OutboundSender] Reply with quoted failed (${err.message}), retrying direct text...`);
+        return await sock.sendMessage(chatJid, { text });
+      }
+      throw err;
+    }
   }
 
   public static async sendSticker(

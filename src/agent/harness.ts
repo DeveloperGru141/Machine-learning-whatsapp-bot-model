@@ -5,6 +5,7 @@ import { ExecutionContext } from '../plugins/types.js';
 import { db } from '../memory/db.js';
 import { contextManager } from '../core/context-manager.js';
 import { analyticsEngine } from '../core/analytics.js';
+import { chatLogger } from '../memory/chat-logger.js';
 
 export class AgentHarness {
   public async handleMessage(
@@ -33,7 +34,11 @@ export class AgentHarness {
 
     console.log(`[AgentHarness] Managed context built with ~${tokenBudgetUsed} estimated tokens.`);
 
-    const tools = pluginRegistry.getGroqToolDefinitions();
+    // Fast-path detection: Check if message is casual dialogue that doesn't need tool invocation
+    const isToolCandidate = this.requiresTools(userMessage);
+    const allTools = pluginRegistry.getGroqToolDefinitions();
+    const tools = isToolCandidate ? allTools : [];
+
     let currentIteration = 0;
     const maxIterations = 2; // Strict limit: 1 iteration for tool call, 1 iteration for final text response
     const executedTools = new Set<string>();
@@ -95,7 +100,11 @@ export class AgentHarness {
         } else {
           // Final text reply from the LLM
           if (message.content) {
+            console.log(`[AgentHarness] 💬 Bot replied to ${context.senderName}: "${message.content.slice(0, 100)}..."`);
             await context.replyText(message.content);
+
+            // Log outbound message in chat_logs so future turns have complete back-and-forth context
+            chatLogger.logOutboundMessage(context.chatJid, message.content);
             analyticsEngine.trackEvent('message_sent', { length: message.content.length }, context.chatJid, context.senderJid);
 
             // Record this interaction as a fine-tuning pair for continuous ML training
@@ -119,6 +128,45 @@ export class AgentHarness {
     try {
       await context.sock.sendPresenceUpdate('paused', context.chatJid);
     } catch {}
+  }
+
+  /**
+   * Fast-path classifier: determines if a message requires invoking tools.
+   * Casual dialogue, greetings, bot identity inquiries, and banter bypass tool overhead (<600ms latency).
+   */
+  private requiresTools(text: string): boolean {
+    const lower = (text || '').toLowerCase().trim();
+
+    // 1. Explicit URLs
+    if (/https?:\/\//i.test(lower)) return true;
+
+    // 2. Factual / real-time / price lookups
+    if (/\b(price|crypto|stock|btc|eth|sol|bitcoin|ethereum|weather|news|match|score|scoreline|search|lookup|google)\b/i.test(lower)) {
+      return true;
+    }
+
+    // 3. Media & downloader commands
+    if (/\b(download|video|reel|tiktok|mp4|audio|song|music|mp3|voice note)\b/i.test(lower)) {
+      return true;
+    }
+
+    // 4. Scheduler / Reminders
+    if (/\b(remind|reminder|schedule|timer|alarm)\b/i.test(lower)) {
+      return true;
+    }
+
+    // 5. Document & PDF reading
+    if (/\b(read|summarize|pdf|docx?|document|attached file)\b/i.test(lower)) {
+      return true;
+    }
+
+    // 6. Admin, moderation, contact management
+    if (/\b(tag all|tagall|kick|group mode|mute group|unmute group|save contact|get contact|contact card|vcf|generate image|draw|picture of)\b/i.test(lower)) {
+      return true;
+    }
+
+    // Casual chat, greetings, creator queries, banter do NOT need tools
+    return false;
   }
 }
 

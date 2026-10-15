@@ -4,6 +4,7 @@ import {
   insertScheduledTask,
   getPendingTasks,
   markTaskFired,
+  markTaskFailed,
   ScheduledTask,
 } from './scheduler-db.js';
 
@@ -94,6 +95,7 @@ export class SchedulerPlugin implements IPlugin {
           console.log(`[Scheduler] Fired reminder #${task.id} to chat ${task.chat_jid}`);
         } catch (taskErr: any) {
           console.error(`[Scheduler] Error firing reminder #${task.id}:`, taskErr.message);
+          markTaskFailed(task.id);
         }
       }
     } catch (err: any) {

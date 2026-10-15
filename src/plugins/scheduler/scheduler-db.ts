@@ -45,6 +45,12 @@ const markTaskFiredStmt = db.prepare(`
   WHERE id = ?
 `);
 
+const markTaskFailedStmt = db.prepare(`
+  UPDATE scheduled_tasks
+  SET status = 'failed'
+  WHERE id = ?
+`);
+
 /**
  * Inserts a new scheduled task into the database.
  */
@@ -78,4 +84,11 @@ export function getPendingTasks(now: number = Date.now()): ScheduledTask[] {
  */
 export function markTaskFired(id: number): void {
   markTaskFiredStmt.run(id);
+}
+
+/**
+ * Marks a task as failed so it does not loop infinitely and block the socket.
+ */
+export function markTaskFailed(id: number): void {
+  markTaskFailedStmt.run(id);
 }

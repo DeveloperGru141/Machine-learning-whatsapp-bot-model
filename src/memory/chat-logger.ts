@@ -50,6 +50,23 @@ export class ChatLogger {
     }
   }
 
+  public logOutboundMessage(chatJid: string, text: string): void {
+    try {
+      this.insertLogStmt.run(
+        chatJid,
+        'bot',
+        'Nova',
+        chatJid.endsWith('@g.us') ? 1 : 0,
+        'text',
+        text,
+        null,
+        Date.now()
+      );
+    } catch (err) {
+      console.error('Failed to log outbound message:', err);
+    }
+  }
+
   private learnStickerPatternFromContext(chatJid: string, stickerFilename: string): void {
     try {
       const priorMessages = db.prepare(`

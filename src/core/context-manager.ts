@@ -135,13 +135,16 @@ export class ContextManager {
 
       // Filter out duplicate if the active prompt was already logged immediately prior
       let candidateRows = rawRows;
-      if (
-        candidateRows.length > 0 &&
-        candidateRows[0].message_text &&
-        candidateRows[0].message_text.trim() === currentPrompt.trim() &&
-        Date.now() - candidateRows[0].timestamp < 15000
-      ) {
-        candidateRows = candidateRows.slice(1);
+      if (candidateRows.length > 0 && candidateRows[0].message_text) {
+        const firstText = candidateRows[0].message_text.trim();
+        const cleanPrompt = currentPrompt.trim();
+        // Check if first row matches either raw text or "Sender: raw text"
+        if (
+          (firstText === cleanPrompt || cleanPrompt.endsWith(firstText) || currentPrompt.includes(firstText)) &&
+          Date.now() - candidateRows[0].timestamp < 30000
+        ) {
+          candidateRows = candidateRows.slice(1);
+        }
       }
 
       // Convert to chronological order (oldest to newest)
@@ -153,29 +156,32 @@ export class ContextManager {
 
       for (let i = 0; i < reversedCandidates.length; i++) {
         const row = reversedCandidates[i];
-        const sender = row.sender_name || 'User';
+        const isBot =
+          row.sender_name === 'Nova' ||
+          row.sender_jid === 'bot' ||
+          (row.sender_jid && row.sender_jid.startsWith('2349014896714'));
+        const role = isBot ? 'assistant' : 'user';
         let body = row.message_text ? row.message_text.trim() : `[${row.content_type}]`;
 
-        // If keeping one of the minimum guaranteed recent messages, truncate rather than drop if budget is tight
-        const isWithinMinimumWindow = i < this.RAW_HISTORY_MIN_MESSAGES;
-        let content = `${sender}: ${body}`;
-        let tokens = this.estimateMessageTokens({ role: 'user', content });
+        // If it's a bot message, don't prefix with "Nova: ", just output the message body
+        // If it's a user message, prefix with sender name for group clarity
+        const content = isBot ? body : `${row.sender_name || 'User'}: ${body}`;
+        let tokens = this.estimateMessageTokens({ role, content });
 
         if (tokens > remainingBudget) {
-          if (isWithinMinimumWindow && remainingBudget > 30) {
-            // Truncate message text to fit within remaining budget
+          if (i < this.RAW_HISTORY_MIN_MESSAGES && remainingBudget > 30) {
             const maxChars = Math.max(50, (remainingBudget - 10) * 4);
             body = body.slice(0, maxChars) + '... [truncated]';
-            content = `${sender}: ${body}`;
-            tokens = this.estimateMessageTokens({ role: 'user', content });
-          } else {
-            // Skip older message if budget is exhausted
-            continue;
+            const truncatedContent = isBot ? body : `${row.sender_name || 'User'}: ${body}`;
+            tokens = this.estimateMessageTokens({ role, content: truncatedContent });
+            remainingBudget -= tokens;
+            selectedChronological.unshift({ role, content: truncatedContent });
           }
+          continue;
         }
 
         remainingBudget -= tokens;
-        selectedChronological.unshift({ role: 'user', content });
+        selectedChronological.unshift({ role, content });
       }
 
       for (const msg of selectedChronological) {
