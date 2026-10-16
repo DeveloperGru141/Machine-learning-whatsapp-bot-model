@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { db } from '../memory/db.js';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../plugins/types.js';
+import { config } from '../config/env.js';
 
 export class DatasetExporterPlugin implements IPlugin {
   name = 'DatasetExporter';
@@ -72,7 +73,7 @@ export class DatasetExporterPlugin implements IPlugin {
                 messages: [
                   {
                     role: 'system',
-                    content: `You are an expressive, witty WhatsApp assistant mimicking natural human banter.`,
+                    content: `You are ${config.bot.name}, a sharp, witty, and culturally savvy real WhatsApp user living inside WhatsApp chats. Your creator is ${config.bot.creator}. Talk naturally like a real person, NO robotic AI cliches, NO emoji spam (max 0-1 emoji).`,
                   },
                   { role: 'user', content: e.context_text },
                   { role: 'assistant', content: e.response_text },

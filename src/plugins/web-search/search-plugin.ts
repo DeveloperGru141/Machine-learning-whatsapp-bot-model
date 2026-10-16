@@ -109,7 +109,7 @@ export class WebSearchPlugin implements IPlugin {
                 console.log(`[WebSearch] Found ${snippets.length} web snippet(s) for "${rawQuery}"`);
                 return {
                   success: true,
-                  message: `Live Web Search Results for "${rawQuery}":\n` + snippets.map((s, i) => `${i + 1}. ${s}`).join('\n\n'),
+                  message: `Live Web Search Results for "${rawQuery}":\n` + snippets.map((s, i) => `${i + 1}. ${s}`).join('\n\n') + '\n\n[Search complete. Provide direct concise answer now.]',
                   data: snippets,
                 };
               }

@@ -14,7 +14,8 @@ interface MessageRow {
 
 export class PatternMiner {
   private laughterRegex = /\b(lol|lmao|lmfao|rofl|haha|hahaha|hehe|kikiki|lwkmd|dead|💀|😂|🤣)\b/i;
-  private emojiRegex = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu;
+  private emojiRegex =
+    /(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0F|\p{Emoji_Modifier})?)*/gu;
 
   /**
    * Evaluates a newly received message in the context of recent chat turns
@@ -34,8 +35,14 @@ export class PatternMiner {
       const current = history[history.length - 1];
       const previous = history[history.length - 2];
 
-      // 1. Detect High-Humor / Banter Pattern
-      if (current.content_type === 'text' && current.message_text && this.laughterRegex.test(current.message_text)) {
+      // 1. Detect High-Humor / Banter Pattern (Learn only from human users, never bot replies)
+      if (
+        current.sender_jid !== 'bot' &&
+        current.sender_jid !== 'Forgelabs assistant' &&
+        current.content_type === 'text' &&
+        current.message_text &&
+        this.laughterRegex.test(current.message_text)
+      ) {
         if (previous.content_type === 'text' && previous.message_text) {
           this.recordDialogueExemplar(chatJid, previous.message_text, current.message_text, 'humor');
         }
@@ -49,10 +56,33 @@ export class PatternMiner {
   }
 
   private recordDialogueExemplar(chatJid: string, contextText: string, responseText: string, vibe: string): void {
+    if (!contextText || !responseText) return;
+    const trimmedContext = contextText.trim();
+    const trimmedResponse = responseText.trim();
+    if (trimmedContext.length < 2 || trimmedResponse.length < 3) return;
+
+    // Enforce strict max 0-1 emoji policy
+    const emojiCount = (trimmedResponse.match(this.emojiRegex) || []).length;
+    if (emojiCount > 1) return;
+
+    // Guard against robotic clichés or outdated names
+    const lower = trimmedResponse.toLowerCase();
+    if (
+      lower.includes('as an ai') ||
+      lower.includes('how can i help') ||
+      lower.includes('i am an ai') ||
+      lower.includes('feel free to ask') ||
+      lower.includes('certainly!') ||
+      lower.includes('sure thing!') ||
+      lower.includes('nova')
+    ) {
+      return;
+    }
+
     db.prepare(`
       INSERT INTO dialogue_exemplars (chat_jid, context_text, response_text, response_type, sticker_filename, vibe_classification, quality_score, created_at)
       VALUES (?, ?, ?, 'text', NULL, ?, 1.0, ?)
-    `).run(chatJid, contextText, responseText, vibe, Date.now());
+    `).run(chatJid, trimmedContext, trimmedResponse, vibe, Date.now());
   }
 
   /**

@@ -68,7 +68,7 @@ export class ImageGenPlugin implements IPlugin {
 
                 if (base64Data) {
                   const imageBuffer = Buffer.from(base64Data, 'base64');
-                  const caption = args.caption || `🎨 "${args.prompt}" (Nano Banana)`;
+                  const caption = args.caption || `🎨 "${args.prompt}"`;
                   await ctx.sendImage(imageBuffer, caption);
 
                   console.log(`[ImageGen] ✅ Nano Banana image successfully generated (${imageBuffer.length} bytes) and sent!`);

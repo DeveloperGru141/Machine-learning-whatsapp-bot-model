@@ -1,4 +1,5 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
+import { transcodeToOggOpus } from '../../core/tts.js';
 
 export class AudioDownloaderPlugin implements IPlugin {
   name = 'AudioDownloader';
@@ -25,8 +26,23 @@ export class AudioDownloaderPlugin implements IPlugin {
       },
       execute: async (args: { url: string; asVoiceNote?: boolean }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
-          console.log(`[AudioDownloader] Downloading audio from: ${args.url}`);
-          const res = await fetch(args.url);
+          const rawUrl = (args.url || '').trim();
+          let targetUrl = rawUrl;
+          if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+            targetUrl = `https://${targetUrl}`;
+          }
+
+          try {
+            const parsed = new URL(targetUrl);
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+              return { success: false, message: 'Invalid audio URL. Only HTTP and HTTPS links are supported.' };
+            }
+          } catch {
+            return { success: false, message: 'Invalid URL provided.' };
+          }
+
+          console.log(`[AudioDownloader] Downloading audio from: ${targetUrl}`);
+          const res = await fetch(targetUrl, { signal: AbortSignal.timeout(30000) });
           if (!res.ok) {
             return {
               success: false,
@@ -35,7 +51,11 @@ export class AudioDownloaderPlugin implements IPlugin {
           }
 
           const arrayBuffer = await res.arrayBuffer();
-          const buffer = Buffer.from(arrayBuffer);
+          let buffer: any = Buffer.from(arrayBuffer);
+
+          if (args.asVoiceNote) {
+            buffer = await transcodeToOggOpus(buffer);
+          }
 
           await ctx.sendAudio(buffer, !!args.asVoiceNote);
 

@@ -94,6 +94,71 @@ export class ChatLogger {
     `).all(chatJid, limit) as unknown as Array<{ sender_name: string; message_text: string; content_type: string }>;
     return rows.reverse();
   }
+
+  /**
+   * Updates the message_text of the most recent message of a given content_type in a chat (e.g. after transcribing audio).
+   */
+  public updateLatestMessageText(chatJid: string, contentType: string, text: string): void {
+    try {
+      db.prepare(`
+        UPDATE chat_logs
+        SET message_text = ?
+        WHERE id = (
+          SELECT id FROM chat_logs
+          WHERE chat_jid = ? AND content_type = ? AND sender_jid != 'bot'
+          ORDER BY id DESC LIMIT 1
+        )
+      `).run(text, chatJid, contentType);
+    } catch (err) {
+      console.error('Failed to update latest message text:', err);
+    }
+  }
+
+  /**
+   * Checks if the bot has already replied to this chat after a given message timestamp.
+   * Uses both timestamp and row ID ordering to stay immune to minor clock skew between WhatsApp servers and local time.
+   */
+  public hasBotRepliedAfter(chatJid: string, timestamp: number): boolean {
+    try {
+      const row = db.prepare(`
+        SELECT id FROM chat_logs
+        WHERE chat_jid = ?
+          AND sender_jid = 'bot'
+          AND (
+            timestamp >= ?
+            OR (
+              ? > 0
+              AND id > COALESCE(
+                (SELECT MAX(id) FROM chat_logs WHERE chat_jid = ? AND sender_jid != 'bot' AND timestamp <= ?),
+                0
+              )
+            )
+          )
+          AND COALESCE(message_text, '') NOT LIKE 'network slow small%'
+        LIMIT 1
+      `).get(chatJid, timestamp, timestamp, chatJid, timestamp);
+      return !!row;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Checks if the most recent message in the chat was from a user (unreplied).
+   */
+  public isLastMessageFromUser(chatJid: string): boolean {
+    try {
+      const row = db.prepare(`
+        SELECT sender_jid FROM chat_logs
+        WHERE chat_jid = ?
+          AND NOT (sender_jid = 'bot' AND COALESCE(message_text, '') LIKE 'network slow small%')
+        ORDER BY id DESC LIMIT 1
+      `).get(chatJid) as { sender_jid: string } | undefined;
+      return !!row && row.sender_jid !== 'bot';
+    } catch {
+      return false;
+    }
+  }
 }
 
 export const chatLogger = new ChatLogger();

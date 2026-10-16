@@ -7,6 +7,7 @@ import {
   markTaskFailed,
   ScheduledTask,
 } from './scheduler-db.js';
+import { chatLogger } from '../../memory/chat-logger.js';
 
 let activeSocket: WASocket | null = null;
 
@@ -91,6 +92,7 @@ export class SchedulerPlugin implements IPlugin {
             mentions: [mentionJid],
           });
 
+          chatLogger.logOutboundMessage(task.chat_jid, reminderBody);
           markTaskFired(task.id);
           console.log(`[Scheduler] Fired reminder #${task.id} to chat ${task.chat_jid}`);
         } catch (taskErr: any) {

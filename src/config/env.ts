@@ -7,7 +7,7 @@ dotenv.config({ override: true });
 const envSchema = z.object({
   GROQ_API_KEY: z.string().min(1, 'GROQ_API_KEY is required for the agentic harness'),
   GROQ_MODEL: z.string().default('openai/gpt-oss-120b'),
-  GROQ_TEMPERATURE: z.coerce.number().default(1),
+  GROQ_TEMPERATURE: z.coerce.number().default(0.7),
   GROQ_MAX_TOKENS: z.coerce.number().default(2048),
   GROQ_TOP_P: z.coerce.number().default(1),
   GROQ_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('low'),
@@ -31,6 +31,38 @@ if (!parsed.success) {
   console.warn('⚠️ Environment warning: Some variables are not set. Check .env');
 }
 
+/**
+ * Normalizes phone numbers to international digits (e.g. Nigerian 08108574293 -> 2348108574293).
+ * Preserves @lid JIDs if passed.
+ */
+export function normalizePhoneNumber(raw: string): string {
+  if (!raw) return '';
+  const trimmed = raw.trim();
+  if (trimmed.endsWith('@lid')) {
+    return `${trimmed.split('@')[0].split(':')[0]}@lid`;
+  }
+  let digits = trimmed.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+  if (digits.startsWith('0') && digits.length === 11 && /^0[789][01]\d{8}$/.test(digits)) {
+    digits = '234' + digits.slice(1);
+  }
+  return digits;
+}
+
+const rawOwners = (process.env.BOT_OWNERS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const normalizedOwners = Array.from(
+  new Set(
+    rawOwners.flatMap((o) => {
+      const norm = normalizePhoneNumber(o);
+      const rawDigits = o.replace(/[^0-9]/g, '');
+      return [norm, rawDigits].filter(Boolean);
+    })
+  )
+);
+
 export const config = {
   groq: {
     apiKey: process.env.GROQ_API_KEY || '',
@@ -45,9 +77,9 @@ export const config = {
     creator: process.env.BOT_CREATOR || 'ADEMOLA',
     prefix: process.env.BOT_PREFIX || '',
     voice: process.env.BOT_VOICE || 'en-NG-AbeoNeural',
-    owners: (process.env.BOT_OWNERS || '').split(',').map((s) => s.trim()).filter(Boolean),
+    owners: normalizedOwners,
     pairingMethod: (process.env.PAIRING_METHOD as 'code' | 'qr') || 'code',
-    pairingPhoneNumber: process.env.PAIRING_PHONE_NUMBER || '',
+    pairingPhoneNumber: normalizePhoneNumber(process.env.PAIRING_PHONE_NUMBER || ''),
   },
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',
@@ -58,3 +90,4 @@ export const config = {
     temp: path.resolve('./data/temp'),
   },
 };
+

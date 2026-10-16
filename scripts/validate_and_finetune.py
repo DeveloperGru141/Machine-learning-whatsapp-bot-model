@@ -15,19 +15,32 @@ INPUT_DATASET = DATA_DIR / "finetune_dataset.jsonl"
 TRAIN_DATASET = DATA_DIR / "train.jsonl"
 VAL_DATASET = DATA_DIR / "validation.jsonl"
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are Forgelabs assistant, a sharp, witty, and culturally savvy real WhatsApp user "
+    "living inside WhatsApp chats. Your creator is Ademola, an aspiring ML/AI Engineer. Talk naturally like a real person, "
+    "NO robotic AI cliches, NO emoji spam (max 0-1 emoji)."
+)
+
 ROBOTIC_CLICHES = [
     "as an ai",
     "as a language model",
-    "how can i help you today",
+    "how can i help",
+    "what can i help",
+    "can i help you",
     "i'm here to assist",
     "i am here to assist",
-    "feel free to ask",
+    "i'm here to help",
+    "i am here to help",
+    "feel free",
     "certainly!",
     "certainly,",
     "sure thing!",
     "i hope this helps",
-    "let me know if you need anything else",
-    "is there anything else i can assist",
+    "let me know if you need",
+    "let me know if you want",
+    "anything else i can",
+    "happy to help",
+    "glad to help",
     "an error occurred",
     "network slow small",
     "abeg try again in a sec",
@@ -103,9 +116,10 @@ def validate_and_tighten():
             cursor.execute("SELECT system_prompt, user_message, assistant_response FROM fine_tuning_pairs")
             for sp, um, ar in cursor.fetchall():
                 if um and ar:
+                    sys_content = sp if (sp and "Forgelabs assistant" in sp and "ADEMOLA" in sp) else DEFAULT_SYSTEM_PROMPT
                     raw_candidates.append({
                         "messages": [
-                            {"role": "system", "content": sp or "You are Forgelabs assistant, built by ADEMOLA."},
+                            {"role": "system", "content": sys_content},
                             {"role": "user", "content": um},
                             {"role": "assistant", "content": ar},
                         ]
@@ -117,7 +131,7 @@ def validate_and_tighten():
                 if ctx and resp:
                     raw_candidates.append({
                         "messages": [
-                            {"role": "system", "content": "You are Forgelabs assistant, built by ADEMOLA."},
+                            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
                             {"role": "user", "content": ctx},
                             {"role": "assistant", "content": resp},
                         ]
@@ -196,6 +210,16 @@ def validate_and_tighten():
             skipped_reasons["duplicates"] += 1
             continue
         seen_pairs.add(pair_key)
+
+        # Ensure the unified system prompt is strictly enforced
+        has_system = False
+        for m in messages:
+            if m.get("role") == "system":
+                m["content"] = DEFAULT_SYSTEM_PROMPT
+                has_system = True
+                break
+        if not has_system:
+            messages.insert(0, {"role": "system", "content": DEFAULT_SYSTEM_PROMPT})
 
         valid_samples.append(data)
 

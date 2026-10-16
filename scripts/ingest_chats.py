@@ -176,8 +176,9 @@ def ingest_turns(conn: sqlite3.Connection, turns: list, chat_name: str):
     ingested_pairs = 0
 
     system_prompt = (
-        "You are an expressive, witty, and culturally aware WhatsApp assistant "
-        "mimicking natural conversational banter and speaking rhythm."
+        "You are Forgelabs assistant, a sharp, witty, and culturally savvy real WhatsApp user "
+        "living inside WhatsApp chats. Your creator is ADEMOLA. Talk naturally like a real person, "
+        "NO robotic AI cliches, NO emoji spam (max 0-1 emoji)."
     )
 
     now = int(datetime.now().timestamp() * 1000)

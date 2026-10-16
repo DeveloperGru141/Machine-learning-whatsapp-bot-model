@@ -1,5 +1,7 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { config } from '../../config/env.js';
+import { userProfileManager } from '../../memory/user-profiles.js';
+import { chatLogger } from '../../memory/chat-logger.js';
 
 export class GroupAdminPlugin implements IPlugin {
   name = 'GroupAdminSuite';
@@ -12,10 +14,17 @@ export class GroupAdminPlugin implements IPlugin {
   private async isBotAdmin(sock: any, groupJid: string): Promise<boolean> {
     try {
       const meta = await sock.groupMetadata(groupJid);
-      const botNumber = (sock.user?.id || '').split(':')[0] + '@s.whatsapp.net';
-      const botParticipant = meta.participants.find(
-        (p: any) => p.id === sock.user?.id || p.id === botNumber
-      );
+      const botNumber = sock.user?.id ? `${sock.user.id.split(':')[0].split('@')[0]}@s.whatsapp.net` : '';
+      const botLid = sock.user?.lid ? `${sock.user.lid.split(':')[0].split('@')[0]}@lid` : '';
+      const botParticipant = meta.participants.find((p: any) => {
+        const pId = p.id ? `${p.id.split(':')[0].split('@')[0]}@${p.id.split('@')[1] || 's.whatsapp.net'}` : '';
+        const pLid = p.lid ? `${p.lid.split(':')[0].split('@')[0]}@lid` : '';
+        return (
+          p.id === sock.user?.id ||
+          (botNumber && pId === botNumber) ||
+          (botLid && (pId === botLid || pLid === botLid))
+        );
+      });
       return botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
     } catch {
       return false;
@@ -26,12 +35,16 @@ export class GroupAdminPlugin implements IPlugin {
    * Helper to verify if the requesting user is an admin or bot owner
    */
   private async isUserAdmin(sock: any, groupJid: string, senderJid: string): Promise<boolean> {
-    const rawNumber = senderJid.split('@')[0];
-    if (config.bot.owners.includes(rawNumber)) return true;
+    if (userProfileManager.isOwner(senderJid)) return true;
 
     try {
       const meta = await sock.groupMetadata(groupJid);
-      const user = meta.participants.find((p: any) => p.id === senderJid);
+      const normSender = `${senderJid.split(':')[0].split('@')[0]}@${senderJid.split('@')[1] || 's.whatsapp.net'}`;
+      const user = meta.participants.find((p: any) => {
+        const pId = p.id ? `${p.id.split(':')[0].split('@')[0]}@${p.id.split('@')[1] || 's.whatsapp.net'}` : '';
+        const pLid = p.lid ? `${p.lid.split(':')[0].split('@')[0]}@lid` : '';
+        return p.id === senderJid || pId === normSender || pLid === normSender;
+      });
       return user?.admin === 'admin' || user?.admin === 'superadmin';
     } catch {
       return false;
@@ -96,11 +109,13 @@ export class GroupAdminPlugin implements IPlugin {
           const mentions = meta.participants.map((p: any) => p.id);
           const header = `📢 *GROUP ANNOUNCEMENT*\n\n${args.announcement}\n\n`;
           const mentionTags = mentions.map((m: any) => `@${m.split('@')[0]}`).join(' ');
+          const fullText = header + mentionTags;
 
           await ctx.sock.sendMessage(ctx.chatJid, {
-            text: header + mentionTags,
+            text: fullText,
             mentions,
           });
+          chatLogger.logOutboundMessage(ctx.chatJid, fullText);
 
           return { success: true, message: `Successfully tagged ${mentions.length} members with the announcement.` };
         } catch (err: any) {
@@ -140,8 +155,10 @@ export class GroupAdminPlugin implements IPlugin {
           return { success: false, message: 'Permission denied: Only group admins can request to remove members.' };
         }
 
-        const cleanNumber = args.phone_number.replace(/[^0-9]/g, '');
-        const targetJid = cleanNumber.includes('@') ? cleanNumber : `${cleanNumber}@s.whatsapp.net`;
+        const cleanNumber = args.phone_number.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+        const targetJid = args.phone_number.endsWith('@lid')
+          ? `${cleanNumber}@lid`
+          : `${cleanNumber}@s.whatsapp.net`;
 
         try {
           await ctx.sock.groupParticipantsUpdate(ctx.chatJid, [targetJid], 'remove');

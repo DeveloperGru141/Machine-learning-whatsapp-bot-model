@@ -1,4 +1,5 @@
 import { config } from '../config/env.js';
+import { userProfileManager } from '../memory/user-profiles.js';
 
 export interface UserSpamStats {
   count: number;
@@ -90,8 +91,8 @@ export class AntiSpamFilter {
     }
 
     // Exempt bot owners from spam filters
-    const rawNumber = senderJid.split('@')[0];
-    if (config.bot.owners.includes(rawNumber)) {
+    const rawNumber = senderJid.split('@')[0].split(':')[0];
+    if (userProfileManager.isOwner(senderJid) || config.bot.owners.includes(rawNumber)) {
       return { isSpam: false, action: 'none' };
     }
 
@@ -229,15 +230,15 @@ export class AntiSpamFilter {
   private cleanupOldCounters(): void {
     const now = Date.now();
     for (const [jid, stats] of this.userStats.entries()) {
-      if (now - stats.firstSeen > 60000) {
-        stats.count = 0;
-        stats.firstSeen = now;
-        stats.repeatCount = 0;
-        stats.lastText = '';
-      }
       // Remove inactive users after 15 minutes to prevent memory leak
       if (now - stats.firstSeen > 900000) {
         this.userStats.delete(jid);
+        continue;
+      }
+      if (stats.count > 0 && now - stats.firstSeen > 60000) {
+        stats.count = 0;
+        stats.repeatCount = 0;
+        stats.lastText = '';
       }
     }
   }

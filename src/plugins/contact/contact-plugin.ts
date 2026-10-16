@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { contactService } from '../../memory/contact-service.js';
+import { whatsAppClient } from '../../core/client.js';
 import { config } from '../../config/env.js';
 
 export class ContactPlugin implements IPlugin {
@@ -133,7 +134,20 @@ export class ContactPlugin implements IPlugin {
             targetName = saved?.custom_name || saved?.display_name || ctx.senderName;
           }
 
-          const cleanPhone = contactService.extractPhoneNumber(targetPhone);
+          let cleanPhone = contactService.extractPhoneNumber(targetPhone);
+          const isLid = ctx.senderJid.endsWith('@lid') || (targetPhone && targetPhone.endsWith('@lid')) || cleanPhone.length > 13;
+          if (isLid) {
+            const saved = contactService.getContact(ctx.senderJid);
+            if (saved && saved.phone_number && !saved.jid.endsWith('@lid') && saved.phone_number.length <= 13) {
+              cleanPhone = saved.phone_number;
+            } else {
+              return {
+                success: false,
+                message: 'No phone number available to create a contact card for this user.',
+              };
+            }
+          }
+
           const finalName = targetName?.trim() || `User +${cleanPhone}`;
 
           await ctx.sendContact(finalName, cleanPhone);
@@ -207,6 +221,30 @@ export class ContactPlugin implements IPlugin {
         } catch (err: any) {
           console.error('[ContactPlugin] Error exporting contacts:', err);
           return { success: false, message: `Failed to export contacts: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'reply_unreplied_messages',
+      description:
+        'Scans the bot address book, active sessions, and chat logs to find and reply to any unreplied direct messages or unaddressed contacts.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const result = await whatsAppClient.replyUnrepliedMessages();
+          return {
+            success: true,
+            message: result.summary,
+            data: result,
+          };
+        } catch (err: any) {
+          return {
+            success: false,
+            message: `Failed to process unreplied messages: ${err.message}`,
+          };
         }
       },
     },

@@ -9,21 +9,10 @@ export class RequestQueue {
   private queue: QueueTask[] = [];
   private runningCount = 0;
   private maxConcurrency = 3;
-  private userLastRequest: Map<string, number> = new Map();
-  private userCooldownMs = 1500; // 1.5s cooldown per user to prevent flood
+  private activeChats: Set<string> = new Set();
 
   public enqueue(task: QueueTask): boolean {
-    const now = Date.now();
-    const last = this.userLastRequest.get(task.senderJid) || 0;
-
-    // Reject flood bursts from same user within cooldown window
-    if (now - last < this.userCooldownMs) {
-      console.warn(`[RequestQueue] Throttling burst request from ${task.senderJid}`);
-      return false;
-    }
-    this.userLastRequest.set(task.senderJid, now);
-
-    // Shed tasks if queue is overloaded (max 50 waiting)
+    // Shed tasks only if queue is severely overloaded (max 50 waiting)
     if (this.queue.length >= 50) {
       console.warn(`[RequestQueue] Queue capacity exceeded. Dropping oldest non-priority request.`);
       this.queue.shift();
@@ -39,10 +28,17 @@ export class RequestQueue {
       return;
     }
 
-    const task = this.queue.shift();
+    // Find the first task whose chat is not currently being processed
+    const taskIndex = this.queue.findIndex((t) => !this.activeChats.has(t.chatJid));
+    if (taskIndex === -1) {
+      return;
+    }
+
+    const [task] = this.queue.splice(taskIndex, 1);
     if (!task) return;
 
     this.runningCount++;
+    this.activeChats.add(task.chatJid);
 
     try {
       // 45-second timeout safeguard per task
@@ -56,6 +52,7 @@ export class RequestQueue {
       console.error(`[RequestQueue] Error executing task ${task.id}:`, err.message);
     } finally {
       this.runningCount--;
+      this.activeChats.delete(task.chatJid);
       // Process next item in queue
       setImmediate(() => this.processNext());
     }
@@ -70,3 +67,4 @@ export class RequestQueue {
 }
 
 export const requestQueue = new RequestQueue();
+

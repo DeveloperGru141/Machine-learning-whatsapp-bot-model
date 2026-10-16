@@ -133,17 +133,17 @@ export class ContextManager {
         sender_jid: string;
       }>;
 
-      // Filter out duplicate if the active prompt was already logged immediately prior
-      let candidateRows = rawRows;
-      if (candidateRows.length > 0 && candidateRows[0].message_text) {
-        const firstText = candidateRows[0].message_text.trim();
-        const cleanPrompt = currentPrompt.trim();
-        // Check if first row matches either raw text or "Sender: raw text"
-        if (
-          (firstText === cleanPrompt || cleanPrompt.endsWith(firstText) || currentPrompt.includes(firstText)) &&
-          Date.now() - candidateRows[0].timestamp < 30000
-        ) {
-          candidateRows = candidateRows.slice(1);
+      // Filter out duplicate if the active prompt was already logged in recent history
+      let candidateRows = [...rawRows];
+      const cleanPrompt = currentPrompt.trim();
+      for (let i = 0; i < Math.min(3, candidateRows.length); i++) {
+        const row = candidateRows[i];
+        if (row.sender_jid !== 'bot' && row.message_text) {
+          const rowText = row.message_text.trim();
+          if (rowText === cleanPrompt || cleanPrompt.endsWith(rowText) || currentPrompt.includes(rowText)) {
+            candidateRows.splice(i, 1);
+            break;
+          }
         }
       }
 
@@ -160,13 +160,15 @@ export class ContextManager {
           row.sender_name === config.bot.name ||
           row.sender_name === 'Forgelabs assistant' ||
           row.sender_name === 'Forgelabs Assistant' ||
-          row.sender_name === 'Nova' ||
           row.sender_jid === 'bot' ||
-          (row.sender_jid && row.sender_jid.startsWith('2349014896714'));
+          (row.sender_jid &&
+            (row.sender_jid.startsWith('2349014896714') ||
+              row.sender_jid.startsWith('271614570692796') ||
+              (config.bot.pairingPhoneNumber && row.sender_jid.startsWith(config.bot.pairingPhoneNumber))));
         const role = isBot ? 'assistant' : 'user';
         let body = row.message_text ? row.message_text.trim() : `[${row.content_type}]`;
 
-        // If it's a bot message, don't prefix with "Nova: ", just output the message body
+        // If it's a bot message, don't prefix with sender name, just output the message body
         // If it's a user message, prefix with sender name for group clarity
         const content = isBot ? body : `${row.sender_name || 'User'}: ${body}`;
         let tokens = this.estimateMessageTokens({ role, content });
@@ -331,17 +333,32 @@ export class ContextManager {
         `[ContextManager] Summarizing ${messagesCovered} messages for chat ${chatJid}...`
       );
 
-      const response = await groq.chat.completions.create({
-        model: config.groq.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userContent },
-        ],
-        temperature: 0.2,
-        max_completion_tokens: 300,
-      });
+      const candidateModels = [
+        config.groq.model,
+        'openai/gpt-oss-20b',
+        'qwen/qwen3.8-27b',
+      ].filter((m, i, arr) => arr.indexOf(m) === i);
 
-      const summaryText = response.choices[0]?.message?.content?.trim();
+      let summaryText: string | undefined;
+      for (const model of candidateModels) {
+        try {
+          const response = await groq.chat.completions.create({
+            model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userContent },
+            ],
+            temperature: 0.2,
+            max_completion_tokens: 500,
+            reasoning_effort: 'low',
+          } as any);
+          summaryText = response.choices[0]?.message?.content?.trim();
+          if (summaryText) break;
+        } catch (err: any) {
+          console.warn(`[ContextManager] Summarizer model ${model} failed (${err?.status || err?.message}), trying next fallback...`);
+        }
+      }
+
       if (!summaryText) {
         console.warn(`[ContextManager] Summarizer returned empty response for chat ${chatJid}.`);
         return null;

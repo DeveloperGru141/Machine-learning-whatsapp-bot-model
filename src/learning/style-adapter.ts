@@ -14,10 +14,10 @@ export class StyleAdapter {
     if (!text) return null;
     const lower = text.toLowerCase().trim();
 
-    if (/\b(ademola|creator|developer|who built|who made|who coded|who owns)\b/i.test(lower)) {
+    if (/\b(ademola|creator|developer|who built|who made|who coded|who owns|who created|who trained|who programmed|who runs|who is behind)\b/i.test(lower)) {
       return 'creator';
     }
-    if (/\b(who are you|what are you|your name|forgelabs|are you chatgpt|what is this bot|what can you do)\b/i.test(lower)) {
+    if (/\b(who are you|what are you|your name|forgelabs|nova|are you nova|are you chatgpt|what is this bot|what can you do)\b/i.test(lower)) {
       return 'identity';
     }
     if (/^(hi|hello|hey|yo|sup|good morning|gm|good afternoon|good evening|howdy)\b/i.test(lower)) {

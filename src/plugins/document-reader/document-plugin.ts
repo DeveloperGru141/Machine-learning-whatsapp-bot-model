@@ -2,6 +2,7 @@ import zlib from 'node:zlib';
 import { downloadMediaMessage, proto } from '@whiskeysockets/baileys';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { config } from '../../config/env.js';
+import { unwrapMessage } from '../../core/normalizer.js';
 
 /**
  * Decodes standard PDF literal string escape sequences
@@ -30,7 +31,7 @@ function unescapePdfText(str: string): string {
  * Uses regex-based stream chunk extraction, zlib decompression of FlateDecode streams,
  * and text extraction from PDF text blocks (Tj, TJ operators).
  */
-function extractTextFromPdf(buffer: Buffer): string {
+export function extractTextFromPdf(buffer: Buffer): string {
   const textChunks: string[] = [];
   const rawLatin = buffer.toString('latin1');
 
@@ -136,8 +137,42 @@ function extractTextFromPdf(buffer: Buffer): string {
 /**
  * Extracts plain text from DOCX (zipped XML) without external packages
  */
-function extractTextFromDocx(buffer: Buffer): string {
+export function extractTextFromDocx(buffer: Buffer): string {
   try {
+    // 1. Primary parser: Central Directory (handles standard zips, streaming writers, and data descriptors)
+    const eocdSig = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+    const eocdOffset = buffer.lastIndexOf(eocdSig);
+    if (eocdOffset !== -1 && eocdOffset + 22 <= buffer.length) {
+      const cdOffset = buffer.readUInt32LE(eocdOffset + 16);
+      let cdPos = cdOffset;
+      while (cdPos < eocdOffset && cdPos + 46 <= buffer.length) {
+        if (buffer.readUInt32LE(cdPos) !== 0x02014b50) break;
+        const method = buffer.readUInt16LE(cdPos + 10);
+        const compSize = buffer.readUInt32LE(cdPos + 20);
+        const fnLen = buffer.readUInt16LE(cdPos + 28);
+        const extraLen = buffer.readUInt16LE(cdPos + 30);
+        const commentLen = buffer.readUInt16LE(cdPos + 32);
+        const localHeaderOffset = buffer.readUInt32LE(cdPos + 42);
+        const filename = buffer.toString('utf8', cdPos + 46, cdPos + 46 + fnLen);
+
+        if (filename === 'word/document.xml') {
+          if (localHeaderOffset + 30 <= buffer.length && buffer.readUInt32LE(localHeaderOffset) === 0x04034b50) {
+            const locFnLen = buffer.readUInt16LE(localHeaderOffset + 26);
+            const locExtraLen = buffer.readUInt16LE(localHeaderOffset + 28);
+            const dataOffset = localHeaderOffset + 30 + locFnLen + locExtraLen;
+            const compData = buffer.subarray(dataOffset, dataOffset + compSize);
+            const decomp = method === 8 ? zlib.inflateRawSync(compData) : compData;
+            const xml = decomp.toString('utf8');
+            const textMatches = xml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g) || [];
+            const clean = textMatches.map((m) => m.replace(/<[^>]+>/g, '')).join(' ');
+            if (clean.trim()) return clean.trim();
+          }
+        }
+        cdPos += 46 + fnLen + extraLen + commentLen;
+      }
+    }
+
+    // 2. Secondary fallback: sequential local header scanning
     let offset = 0;
     while (offset < buffer.length - 30) {
       if (buffer.readUInt32LE(offset) !== 0x04034b50) {
@@ -151,7 +186,7 @@ function extractTextFromDocx(buffer: Buffer): string {
       const filename = buffer.toString('utf8', offset + 30, offset + 30 + fnLen);
       const dataOffset = offset + 30 + fnLen + extraLen;
 
-      if (filename === 'word/document.xml') {
+      if (filename === 'word/document.xml' && compSize > 0) {
         const compData = buffer.subarray(dataOffset, dataOffset + compSize);
         const decomp = method === 8 ? zlib.inflateRawSync(compData) : compData;
         const xml = decomp.toString('utf8');
@@ -159,7 +194,7 @@ function extractTextFromDocx(buffer: Buffer): string {
         const clean = textMatches.map((m) => m.replace(/<[^>]+>/g, '')).join(' ');
         if (clean.trim()) return clean.trim();
       }
-      offset = dataOffset + compSize;
+      offset = dataOffset + Math.max(1, compSize);
     }
   } catch {
     // If ZIP decompression fails, fallback to regex search
@@ -195,44 +230,39 @@ export class DocumentReaderPlugin implements IPlugin {
       execute: async (args: { query?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
           const raw = ctx.rawMessage;
+          if (!raw) {
+            return {
+              success: false,
+              message:
+                'No document detected. Please send a document (PDF, TXT, CSV, DOCX) or reply directly to a document message with your request.',
+            };
+          }
+
+          const unwrappedRaw = unwrapMessage(raw.message);
           const contextInfo =
+            unwrappedRaw?.extendedTextMessage?.contextInfo ||
             raw.message?.extendedTextMessage?.contextInfo ||
-            raw.message?.documentMessage?.contextInfo ||
-            raw.message?.documentWithCaptionMessage?.message?.documentMessage?.contextInfo;
+            unwrappedRaw?.documentMessage?.contextInfo ||
+            (raw.message as any)?.documentMessage?.contextInfo;
 
           let targetMessage: any = null;
           let docMessage: any = null;
 
           // Check if quoted message is a document
-          if (contextInfo?.quotedMessage?.documentMessage) {
+          const unwrappedQuoted = unwrapMessage(contextInfo?.quotedMessage);
+          if (unwrappedQuoted?.documentMessage) {
             targetMessage = {
               key: {
                 remoteJid: ctx.chatJid,
-                id: contextInfo.stanzaId,
-                participant: contextInfo.participant,
+                id: contextInfo?.stanzaId,
+                participant: contextInfo?.participant,
               },
-              message: contextInfo.quotedMessage,
+              message: contextInfo?.quotedMessage,
             };
-            docMessage = contextInfo.quotedMessage.documentMessage;
-          } else if (contextInfo?.quotedMessage?.documentWithCaptionMessage?.message?.documentMessage) {
-            targetMessage = {
-              key: {
-                remoteJid: ctx.chatJid,
-                id: contextInfo.stanzaId,
-                participant: contextInfo.participant,
-              },
-              message: contextInfo.quotedMessage.documentWithCaptionMessage.message,
-            };
-            docMessage = contextInfo.quotedMessage.documentWithCaptionMessage.message.documentMessage;
-          } else if (raw.message?.documentMessage) {
+            docMessage = unwrappedQuoted.documentMessage;
+          } else if (unwrappedRaw?.documentMessage) {
             targetMessage = raw;
-            docMessage = raw.message.documentMessage;
-          } else if (raw.message?.documentWithCaptionMessage?.message?.documentMessage) {
-            targetMessage = {
-              key: raw.key,
-              message: raw.message.documentWithCaptionMessage.message,
-            };
-            docMessage = raw.message.documentWithCaptionMessage.message.documentMessage;
+            docMessage = unwrappedRaw.documentMessage;
           }
 
           if (!targetMessage || !docMessage) {

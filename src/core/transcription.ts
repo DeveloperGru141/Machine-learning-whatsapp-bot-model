@@ -11,6 +11,11 @@ export async function transcribeAudioBuffer(audioBuffer: Buffer): Promise<string
     const blob = new Blob([audioBuffer], { type: 'audio/ogg' });
     formData.append('file', blob, 'voicenote.ogg');
     formData.append('model', 'whisper-large-v3-turbo');
+    formData.append('language', 'en');
+    formData.append(
+      'prompt',
+      'WhatsApp voice note in English or Nigerian English. Common words: how far, wetin dey sup, abeg, omo, bro, guy, Ademola, Forgelabs, voice note, send back a voice note.'
+    );
     formData.append('response_format', 'json');
 
     const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {

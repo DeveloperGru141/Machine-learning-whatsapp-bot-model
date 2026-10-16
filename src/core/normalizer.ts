@@ -14,7 +14,7 @@ export interface NormalizedMessage {
 /**
  * Recursively unwraps WhatsApp message wrappers (ephemeral, viewOnce, documentWithCaption, etc.)
  */
-function unwrapMessage(msg: proto.IMessage | undefined | null): proto.IMessage | undefined | null {
+export function unwrapMessage(msg: proto.IMessage | undefined | null): proto.IMessage | undefined | null {
   if (!msg) return null;
   let m: any = extractMessageContent(msg) || msg;
 
@@ -23,6 +23,7 @@ function unwrapMessage(msg: proto.IMessage | undefined | null): proto.IMessage |
     m?.ephemeralMessage?.message ||
     m?.viewOnceMessage?.message ||
     m?.viewOnceMessageV2?.message ||
+    m?.viewOnceMessageV2Extension?.message ||
     m?.documentWithCaptionMessage?.message ||
     m?.protocolMessage?.editedMessage
   ) {
@@ -30,6 +31,7 @@ function unwrapMessage(msg: proto.IMessage | undefined | null): proto.IMessage |
       m.ephemeralMessage?.message ||
       m.viewOnceMessage?.message ||
       m.viewOnceMessageV2?.message ||
+      m.viewOnceMessageV2Extension?.message ||
       m.documentWithCaptionMessage?.message ||
       m.protocolMessage?.editedMessage;
     m = extractMessageContent(next) || next;
@@ -52,36 +54,66 @@ export function normalizeMessage(msg: proto.IWebMessageInfo): NormalizedMessage 
   const m: any = unwrapMessage(msg.message);
   if (!m) return null;
 
+  // Ignore reactions, protocol updates, polls without text, and status broadcasts
+  if (m.reactionMessage || m.protocolMessage || m.pollUpdateMessage) {
+    return null;
+  }
+
+  let hasContent = false;
+
   if (m.conversation) {
     text = m.conversation;
+    hasContent = true;
   } else if (m.extendedTextMessage?.text) {
     text = m.extendedTextMessage.text;
+    hasContent = true;
   } else if (m.imageMessage?.caption) {
     text = m.imageMessage.caption;
     contentType = 'image';
+    hasContent = true;
   } else if (m.imageMessage) {
     contentType = 'image';
+    hasContent = true;
   } else if (m.stickerMessage) {
     contentType = 'sticker';
+    hasContent = true;
   } else if (m.audioMessage) {
     contentType = 'audio';
+    hasContent = true;
   } else if (m.videoMessage?.caption) {
     text = m.videoMessage.caption;
     contentType = 'video';
+    hasContent = true;
   } else if (m.videoMessage) {
     contentType = 'video';
+    hasContent = true;
   } else if (m.documentMessage?.caption) {
     text = m.documentMessage.caption;
     contentType = 'document';
+    hasContent = true;
   } else if (m.documentMessage) {
     text = m.documentMessage.fileName || '[Document]';
     contentType = 'document';
+    hasContent = true;
   } else if (m.interactiveResponseMessage?.body?.text) {
     text = m.interactiveResponseMessage.body.text;
+    hasContent = true;
   } else if (m.buttonsResponseMessage?.selectedButtonId) {
     text = m.buttonsResponseMessage.selectedButtonId;
+    hasContent = true;
   } else if (m.templateButtonReplyMessage?.selectedId) {
     text = m.templateButtonReplyMessage.selectedId;
+    hasContent = true;
+  } else if (m.contactMessage?.displayName) {
+    text = `[Contact: ${m.contactMessage.displayName}]`;
+    hasContent = true;
+  } else if (m.locationMessage) {
+    text = `[Location: ${m.locationMessage.name || m.locationMessage.address || 'Shared Location'}]`;
+    hasContent = true;
+  }
+
+  if (!hasContent) {
+    return null;
   }
 
   return {

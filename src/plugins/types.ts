@@ -6,7 +6,7 @@ export interface ExecutionContext {
   senderJid: string;
   senderName: string;
   isGroup: boolean;
-  rawMessage: proto.IWebMessageInfo;
+  rawMessage?: proto.IWebMessageInfo;
   replyText: (text: string) => Promise<any>;
   sendSticker?: (bufferOrPath: Buffer | string) => Promise<any>;
   sendImage: (bufferOrUrl: Buffer | string, caption?: string) => Promise<any>;

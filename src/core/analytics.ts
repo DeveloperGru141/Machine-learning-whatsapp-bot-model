@@ -80,7 +80,7 @@ export class AnalyticsEngine {
         .prepare(
           `SELECT COALESCE(sender_name, sender_jid) as name, COUNT(*) as count
            FROM chat_logs
-           WHERE timestamp >= ? AND sender_jid IS NOT NULL AND sender_jid != ''
+           WHERE timestamp >= ? AND sender_jid IS NOT NULL AND sender_jid != '' AND sender_jid != 'bot'
            GROUP BY sender_jid
            ORDER BY count DESC
            LIMIT 5`
@@ -94,7 +94,7 @@ export class AnalyticsEngine {
           .prepare(
             `SELECT sender_jid as name, COUNT(*) as count
              FROM analytics_events
-             WHERE timestamp >= ? AND sender_jid IS NOT NULL AND sender_jid != ''
+             WHERE timestamp >= ? AND sender_jid IS NOT NULL AND sender_jid != '' AND sender_jid != 'bot'
              GROUP BY sender_jid
              ORDER BY count DESC
              LIMIT 5`
@@ -195,10 +195,18 @@ export class AnalyticsEngine {
       clearInterval(this.reportInterval);
     }
 
-    const cleanOwner = (ownerJid || '').trim();
+    let cleanOwner = (ownerJid || '').trim();
     if (!cleanOwner) {
       console.warn('[AnalyticsEngine] No valid ownerJid provided. Periodic reports will not be sent.');
       return;
+    }
+
+    if (!cleanOwner.includes('@')) {
+      let digits = cleanOwner.replace(/[^0-9]/g, '');
+      if (digits.startsWith('0') && digits.length === 11 && /^0[789][01]\d{8}$/.test(digits)) {
+        digits = '234' + digits.slice(1);
+      }
+      cleanOwner = digits;
     }
 
     const targetJid = cleanOwner.includes('@') ? cleanOwner : `${cleanOwner}@s.whatsapp.net`;

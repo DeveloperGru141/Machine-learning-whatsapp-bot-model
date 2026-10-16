@@ -1,4 +1,5 @@
 import type { proto } from '@whiskeysockets/baileys';
+import { unwrapMessage } from './normalizer.js';
 
 export interface TriggerCheckResult {
   shouldRespond: boolean;
@@ -8,7 +9,8 @@ export interface TriggerCheckResult {
 export function shouldRespondToMessage(
   msg: proto.IWebMessageInfo,
   botJid: string,
-  rawText: string
+  rawText: string,
+  botLid?: string
 ): TriggerCheckResult {
   // Never respond to our own outbound messages
   if (msg.key.fromMe) {
@@ -22,25 +24,52 @@ export function shouldRespondToMessage(
     return { shouldRespond: true, cleanedText: rawText.trim() };
   }
 
-  // Normalize bot JID without device suffix (e.g. 12345678@s.whatsapp.net)
-  const botNumber = botJid.split(':')[0] + '@s.whatsapp.net';
+  // Normalize bot identifiers across standard phone number and LID formats
+  const cleanPhoneId = (botJid || '').split(':')[0].split('@')[0];
+  const cleanLidId = (botLid || '').split(':')[0].split('@')[0];
+
+  const botPhoneStandard = cleanPhoneId ? `${cleanPhoneId}@s.whatsapp.net` : '';
+  const botPhoneLid = cleanPhoneId ? `${cleanPhoneId}@lid` : '';
+  const botLidStandard = cleanLidId ? `${cleanLidId}@lid` : '';
+
+  const isBotMatch = (jid?: string | null): boolean => {
+    if (!jid) return false;
+    const cleanTarget = jid.split(':')[0];
+    const targetId = cleanTarget.split('@')[0];
+
+    if (botJid && cleanTarget === botJid.split(':')[0]) return true;
+    if (botLid && cleanTarget === botLid.split(':')[0]) return true;
+    if (botPhoneStandard && cleanTarget === botPhoneStandard) return true;
+    if (botPhoneLid && cleanTarget === botPhoneLid) return true;
+    if (botLidStandard && cleanTarget === botLidStandard) return true;
+
+    if (cleanPhoneId && (targetId === cleanPhoneId || cleanTarget.startsWith(`${cleanPhoneId}@`))) return true;
+    if (cleanLidId && (targetId === cleanLidId || cleanTarget.startsWith(`${cleanLidId}@`))) return true;
+
+    return false;
+  };
+
+  // Unwrap any ephemeral / viewOnce / documentWithCaption wrapper so group mentions & quotes work in all group types
+  const m: any = unwrapMessage(msg.message) || msg.message;
 
   // Check 1: Was the bot @mentioned?
   const contextInfo =
+    m?.extendedTextMessage?.contextInfo ||
+    m?.imageMessage?.contextInfo ||
+    m?.videoMessage?.contextInfo ||
+    m?.documentMessage?.contextInfo ||
+    m?.audioMessage?.contextInfo ||
+    m?.stickerMessage?.contextInfo ||
     msg.message?.extendedTextMessage?.contextInfo ||
     msg.message?.imageMessage?.contextInfo ||
     msg.message?.videoMessage?.contextInfo;
 
-  const mentionedJidList = contextInfo?.mentionedJid || [];
-  const isMentioned = mentionedJidList.some(
-    (jid) => jid === botJid || jid === botNumber
-  );
+  const mentionedJidList: string[] = contextInfo?.mentionedJid || [];
+  const isMentioned = mentionedJidList.some((jid: string) => isBotMatch(jid));
 
   // Check 2: Was a message sent by the bot quoted / replied to?
   const quotedParticipant = contextInfo?.participant;
-  const isQuoted =
-    quotedParticipant &&
-    (quotedParticipant === botJid || quotedParticipant === botNumber);
+  const isQuoted = isBotMatch(quotedParticipant);
 
   if (isMentioned || isQuoted) {
     // Remove the @bot mention tag from the text for cleaner LLM reasoning

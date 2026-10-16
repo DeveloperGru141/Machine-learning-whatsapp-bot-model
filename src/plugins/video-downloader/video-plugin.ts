@@ -6,6 +6,11 @@ import crypto from 'crypto';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { config } from '../../config/env.js';
 
+let ffmpegPath: string = '';
+try {
+  ffmpegPath = require('ffmpeg-static') || '';
+} catch {}
+
 const execAsync = promisify(exec);
 
 export class VideoDownloaderPlugin implements IPlugin {
@@ -34,6 +39,17 @@ export class VideoDownloaderPlugin implements IPlugin {
       execute: async (args: { url: string; caption?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
           console.log(`[VideoDownloader] Downloading social video from: ${args.url}`);
+          const rawUrl = (args.url || '').trim();
+          try {
+            const parsed = new URL(rawUrl);
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+              return { success: false, message: 'Invalid video URL. Only HTTP and HTTPS links are supported.' };
+            }
+          } catch {
+            return { success: false, message: 'Invalid URL provided.' };
+          }
+
+          const sanitizedUrl = rawUrl.replace(/"/g, '');
           const tempDir = config.paths.temp;
           if (!fs.existsSync(tempDir)) {
             fs.mkdirSync(tempDir, { recursive: true });
@@ -43,7 +59,8 @@ export class VideoDownloaderPlugin implements IPlugin {
           const outputPattern = path.join(tempDir, `vid_${fileId}.%(ext)s`);
 
           // Download using yt-dlp with max 60MB limit for WhatsApp compatibility
-          const cmd = `python -m yt_dlp -f "best[ext=mp4][filesize<60M]/best[filesize<60M]/best" --no-playlist -o "${outputPattern}" "${args.url}"`;
+          const ffArg = ffmpegPath ? `--ffmpeg-location "${ffmpegPath}"` : '';
+          const cmd = `python -m yt_dlp ${ffArg} -f "best/bestvideo+bestaudio" --recode-video mp4 --max-filesize 60M --no-playlist -o "${outputPattern}" "${sanitizedUrl}"`;
           
           await execAsync(cmd);
 
@@ -59,7 +76,7 @@ export class VideoDownloaderPlugin implements IPlugin {
           const videoPath = path.join(tempDir, files[0]);
           const videoBuffer = fs.readFileSync(videoPath);
 
-          await ctx.sendVideo(videoBuffer, args.caption || '🎬 Here is your video!');
+          await ctx.sendVideo(videoBuffer, args.caption || undefined);
 
           // Cleanup temp file
           try {

@@ -1,5 +1,5 @@
 import { db } from './db.js';
-import { config } from '../config/env.js';
+import { config, normalizePhoneNumber } from '../config/env.js';
 
 export interface UserProfile {
   user_jid: string;
@@ -20,8 +20,11 @@ export class UserProfileManager {
   public isOwner(userJid: string): boolean {
     if (!userJid) return false;
 
-    const normalizedJid = userJid.split(':')[0].split('@')[0] + '@s.whatsapp.net';
-    const digitsOnly = userJid.replace(/[^0-9]/g, '');
+    const normalizedDigits = normalizePhoneNumber(userJid);
+    const normalizedJid = userJid.endsWith('@lid')
+      ? `${userJid.split('@')[0].split(':')[0]}@lid`
+      : `${normalizedDigits}@s.whatsapp.net`;
+    const digitsOnly = userJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
     // 1. Check SQLite user_profiles table
     try {
@@ -42,8 +45,12 @@ export class UserProfileManager {
         if (!owner) return false;
         const cleanOwner = owner.trim();
         if (cleanOwner === userJid || cleanOwner === normalizedJid) return true;
+        const ownerNorm = normalizePhoneNumber(cleanOwner);
         const ownerDigits = cleanOwner.replace(/[^0-9]/g, '');
-        return Boolean(ownerDigits && digitsOnly && ownerDigits === digitsOnly);
+        return Boolean(
+          (ownerNorm && normalizedDigits && ownerNorm === normalizedDigits) ||
+          (ownerDigits && digitsOnly && ownerDigits === digitsOnly)
+        );
       });
       if (isConfigOwner) return true;
     }
@@ -88,7 +95,13 @@ export class UserProfileManager {
    */
   public upsertProfile(userJid: string, senderName?: string): UserProfile {
     const now = Date.now();
-    const cleanName = senderName?.trim() || null;
+    const trimmed = senderName?.trim() || '';
+    const isGenericOrDigits =
+      !trimmed ||
+      trimmed.startsWith('User +') ||
+      /^\+?\d+$/.test(trimmed) ||
+      ['user', 'unknown', 'friend'].includes(trimmed.toLowerCase());
+    const cleanName = isGenericOrDigits ? null : trimmed;
     const isOwnerFlag = this.isOwner(userJid) ? 1 : 0;
 
     try {

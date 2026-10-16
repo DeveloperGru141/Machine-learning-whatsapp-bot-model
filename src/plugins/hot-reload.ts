@@ -4,6 +4,7 @@ import { pathToFileURL } from 'url';
 import { PluginRegistry, pluginRegistry } from './registry.js';
 import { BotTool, ExecutionContext, IPlugin, ToolResult } from './types.js';
 import { config } from '../config/env.js';
+import { userProfileManager } from '../memory/user-profiles.js';
 
 export class PluginHotReloader {
   private pluginPaths: Map<string, string> = new Map([
@@ -11,10 +12,15 @@ export class PluginHotReloader {
     ['AudioDownloader', 'src/plugins/audio-downloader/audio-plugin.ts'],
     ['VideoDownloader', 'src/plugins/video-downloader/video-plugin.ts'],
     ['GroupAdminSuite', 'src/plugins/group-admin/admin-plugin.ts'],
+    ['DocumentReader', 'src/plugins/document-reader/document-plugin.ts'],
+    ['Scheduler', 'src/plugins/scheduler/scheduler-plugin.ts'],
+    ['LinkSummarizer', 'src/plugins/link-summarizer/link-plugin.ts'],
+    ['ConversationExport', 'src/plugins/export/export-plugin.ts'],
+    ['ContactManager', 'src/plugins/contact/contact-plugin.ts'],
     ['MemoryRecall', 'src/plugins/memory-search/memory-plugin.ts'],
     ['DatasetExporter', 'src/learning/dataset-exporter.ts'],
     ['WebSearch', 'src/plugins/web-search/search-plugin.ts'],
-    ['ConversationExport', 'src/plugins/export/export-plugin.ts'],
+    ['VoiceNotePlugin', 'src/plugins/voice-note/voice-plugin.ts'],
   ]);
 
   /**
@@ -32,26 +38,47 @@ export class PluginHotReloader {
   }
 
   /**
-   * Resolves physical file path prioritizing compiled .js or source .ts
+   * Resolves physical file path prioritizing compiled dist/.js when running from dist/ or source .ts under tsx
    */
   private resolveModuleFile(relOrAbsPath: string): string {
-    const cwd = process.cwd();
-    const candidate = path.isAbsolute(relOrAbsPath)
-      ? relOrAbsPath
-      : path.resolve(cwd, relOrAbsPath);
+    const projectRoot = path.resolve(__dirname, '../..');
+    const isRunningFromDist = typeof __filename === 'string' && __filename.endsWith('.js');
+    const normalizedRel = relOrAbsPath.replace(/\\/g, '/');
 
-    if (fs.existsSync(candidate)) return candidate;
+    const roots = [projectRoot, process.cwd()];
+    for (const root of roots) {
+      if (isRunningFromDist && normalizedRel.startsWith('src/') && normalizedRel.endsWith('.ts')) {
+        const distRel = 'dist/' + normalizedRel.slice(4, -3) + '.js';
+        const distCandidate = path.resolve(root, distRel);
+        if (fs.existsSync(distCandidate)) {
+          return distCandidate;
+        }
+      }
 
-    // Check with .js extension replaced by .ts or vice versa
-    if (candidate.endsWith('.js')) {
-      const tsCandidate = candidate.slice(0, -3) + '.ts';
-      if (fs.existsSync(tsCandidate)) return tsCandidate;
-    } else if (candidate.endsWith('.ts')) {
-      const jsCandidate = candidate.slice(0, -3) + '.js';
-      if (fs.existsSync(jsCandidate)) return jsCandidate;
+      const candidate = path.isAbsolute(relOrAbsPath)
+        ? relOrAbsPath
+        : path.resolve(root, relOrAbsPath);
+
+      if (fs.existsSync(candidate)) return candidate;
+
+      // Check dist/ equivalent if src/ path was given
+      if (normalizedRel.startsWith('src/') && normalizedRel.endsWith('.ts')) {
+        const distRel = 'dist/' + normalizedRel.slice(4, -3) + '.js';
+        const distCandidate = path.resolve(root, distRel);
+        if (fs.existsSync(distCandidate)) return distCandidate;
+      }
+
+      // Check with .js extension replaced by .ts or vice versa
+      if (candidate.endsWith('.js')) {
+        const tsCandidate = candidate.slice(0, -3) + '.ts';
+        if (fs.existsSync(tsCandidate)) return tsCandidate;
+      } else if (candidate.endsWith('.ts')) {
+        const jsCandidate = candidate.slice(0, -3) + '.js';
+        if (fs.existsSync(jsCandidate)) return jsCandidate;
+      }
     }
 
-    return candidate;
+    return path.resolve(projectRoot, relOrAbsPath);
   }
 
   /**
@@ -118,10 +145,28 @@ export class PluginHotReloader {
         }
       }
 
-      // 3. Cache-busted dynamic ESM import using file URL
+      // 3. Cache-busted dynamic ESM import using file URL (with automatic dist/ fallback)
+      let importedModule: any;
       const fileUrl = `${pathToFileURL(resolvedFile).href}?t=${Date.now()}`;
       console.log(`[PluginHotReloader] Re-importing module from ${fileUrl}`);
-      const importedModule = await import(fileUrl);
+      try {
+        importedModule = await import(fileUrl);
+      } catch (importErr: any) {
+        const normalizedTarget = targetPath.replace(/\\/g, '/');
+        const projectRoot = path.resolve(__dirname, '../..');
+        if (normalizedTarget.startsWith('src/') && normalizedTarget.endsWith('.ts')) {
+          const fallbackDist = path.resolve(projectRoot, 'dist/' + normalizedTarget.slice(4, -3) + '.js');
+          if (fs.existsSync(fallbackDist) && fallbackDist !== resolvedFile) {
+            const fallbackUrl = `${pathToFileURL(fallbackDist).href}?t=${Date.now()}`;
+            console.log(`[PluginHotReloader] Retrying import from compiled dist: ${fallbackUrl}`);
+            importedModule = await import(fallbackUrl);
+          } else {
+            throw importErr;
+          }
+        } else {
+          throw importErr;
+        }
+      }
 
       // 4. Find the exported IPlugin instance
       let newPluginInstance: IPlugin | undefined;
@@ -205,17 +250,13 @@ export const reloadPluginsTool: BotTool = {
       plugin_name: {
         type: 'string',
         description:
-          'The exact name of the plugin to reload (e.g., StickerEngine, GroupAdminSuite, WebSearch, ConversationExport). Leave empty or specify "list" to view all available plugins.',
+          'The exact name of the plugin to reload (e.g., WebSearch, GroupAdminSuite, DocumentReader, ConversationExport, ContactManager). Leave empty or specify "list" to view all available plugins.',
       },
     },
   },
   execute: async (args: { plugin_name?: string }, context: ExecutionContext): Promise<ToolResult> => {
     // 1. Verify owner authorization
-    const senderNumber = (context.senderJid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-    const isOwner = config.bot.owners.some((owner: string) => {
-      const cleanOwner = owner.replace(/[^0-9]/g, '');
-      return cleanOwner === senderNumber;
-    });
+    const isOwner = userProfileManager.isOwner(context.senderJid);
 
     if (!isOwner) {
       return {

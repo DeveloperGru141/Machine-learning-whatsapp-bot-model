@@ -15,6 +15,8 @@ export const db = new DatabaseSync(config.paths.database);
 export function initDatabase() {
   db.exec(`
     PRAGMA journal_mode = WAL;
+    PRAGMA busy_timeout = 10000;
+    PRAGMA synchronous = NORMAL;
 
     -- Raw chat message stream for pattern learning and context
     CREATE TABLE IF NOT EXISTS chat_logs (
@@ -132,6 +134,7 @@ export function initDatabase() {
       notes TEXT,
       tags TEXT DEFAULT '[]',
       is_auto_saved INTEGER DEFAULT 1,
+      is_introduced INTEGER DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -139,7 +142,29 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone_number);
     CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(display_name);
   `);
+
+  // Safe migration for existing databases
+  try {
+    db.exec(`ALTER TABLE contacts ADD COLUMN is_introduced INTEGER DEFAULT 0;`);
+  } catch {
+    // Column already exists
+  }
+
+  // Ensure contacts who already have bot replies in chat_logs are marked as introduced
+  try {
+    db.exec(`
+      UPDATE contacts
+      SET is_introduced = 1
+      WHERE is_introduced = 0
+        AND EXISTS (
+          SELECT 1 FROM chat_logs l
+          WHERE l.chat_jid = contacts.jid
+            AND l.sender_jid = 'bot'
+        );
+    `);
+  } catch {}
 }
 
 // Auto-initialize tables on module load
 initDatabase();
+

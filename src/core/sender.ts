@@ -73,12 +73,24 @@ export class OutboundSender {
       ? bufferOrUrl
       : { url: bufferOrUrl };
 
+    let mimetype = isVoiceNote ? 'audio/ogg; codecs=opus' : 'audio/mpeg';
+    if (Buffer.isBuffer(bufferOrUrl) && bufferOrUrl.length >= 4) {
+      const magic = bufferOrUrl.subarray(0, 4).toString('ascii');
+      if (magic === 'OggS') {
+        mimetype = 'audio/ogg; codecs=opus';
+      } else if (bufferOrUrl.length >= 12 && bufferOrUrl.subarray(4, 8).toString('ascii') === 'ftyp') {
+        mimetype = 'audio/mp4';
+      } else if (magic.startsWith('ID3') || bufferOrUrl[0] === 0xff) {
+        mimetype = 'audio/mpeg';
+      }
+    }
+
     try {
       return await sock.sendMessage(
         chatJid,
         {
           audio: content,
-          mimetype: isVoiceNote ? 'audio/ogg; codecs=opus' : 'audio/mp4',
+          mimetype,
           ptt: isVoiceNote,
         },
         { quoted }
@@ -88,7 +100,7 @@ export class OutboundSender {
         console.warn(`[OutboundSender] sendAudio with quoted failed (${err.message}), retrying directly...`);
         return await sock.sendMessage(chatJid, {
           audio: content,
-          mimetype: isVoiceNote ? 'audio/ogg; codecs=opus' : 'audio/mp4',
+          mimetype,
           ptt: isVoiceNote,
         });
       }

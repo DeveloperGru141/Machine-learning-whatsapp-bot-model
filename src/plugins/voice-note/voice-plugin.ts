@@ -1,5 +1,6 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { synthesizeVoiceNote } from '../../core/tts.js';
+import { chatLogger } from '../../memory/chat-logger.js';
 
 export class VoiceNotePlugin implements IPlugin {
   name = 'VoiceNotePlugin';
@@ -50,6 +51,7 @@ export class VoiceNotePlugin implements IPlugin {
 
           console.log(`[VoiceNotePlugin] Dispatching voice note (${audioBuffer.length} bytes) to ${ctx.chatJid}...`);
           await ctx.sendAudio(audioBuffer, true);
+          chatLogger.logOutboundMessage(ctx.chatJid, args.text);
 
           return {
             success: true,

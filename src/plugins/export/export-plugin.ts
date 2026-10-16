@@ -42,7 +42,7 @@ export const exportChatTool: BotTool = {
     const limit = Math.min(Math.max(Number(args.limit) || 100, 1), 1000);
 
     try {
-      // 1. Query the recent chat_logs for the current chatJid ordered by timestamp
+      // 1. Query the recent chat_logs for the current chatJid ordered chronologically by id
       const rows = db
         .prepare(`
           SELECT id, chat_jid, sender_jid, sender_name, is_group, content_type, message_text, sticker_filename, timestamp
@@ -50,10 +50,10 @@ export const exportChatTool: BotTool = {
             SELECT id, chat_jid, sender_jid, sender_name, is_group, content_type, message_text, sticker_filename, timestamp
             FROM chat_logs
             WHERE chat_jid = ?
-            ORDER BY timestamp DESC
+            ORDER BY id DESC
             LIMIT ?
           )
-          ORDER BY timestamp ASC
+          ORDER BY id ASC
         `)
         .all(ctx.chatJid, limit) as unknown as ChatLogRow[];
 
