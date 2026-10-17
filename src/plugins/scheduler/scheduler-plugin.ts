@@ -497,9 +497,9 @@ export class SchedulerPlugin implements IPlugin {
       console.log(`[Scheduler] Found ${dueTasks.length} due task(s) to process.`);
 
       for (const task of dueTasks) {
-        if (!socket) {
+        if (!socket || !socket.user?.id) {
           console.warn(
-            `[Scheduler] Task #${task.id} is due, but WhatsApp socket is not yet connected. Will retry in next cycle.`
+            `[Scheduler] Task #${task.id} is due, but WhatsApp socket is not yet authenticated/connected. Will retry in next cycle.`
           );
           continue;
         }

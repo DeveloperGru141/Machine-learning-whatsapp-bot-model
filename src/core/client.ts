@@ -208,8 +208,28 @@ export class WhatsAppClient {
         fs.mkdirSync(config.paths.sessions, { recursive: true });
       }
 
-      // Detect if PAIRING_PHONE_NUMBER changed vs existing session creds.json, or if previous pairing was incomplete
+      // Hydrate session files from SESSION_BUNDLE_BASE64 on cloud containers (Render) if sessions/creds.json is missing
       const credsFile = path.join(config.paths.sessions, 'creds.json');
+      if (!fs.existsSync(credsFile) && process.env.SESSION_BUNDLE_BASE64) {
+        try {
+          const zlib = await import('zlib');
+          const rawBuf = Buffer.from(process.env.SESSION_BUNDLE_BASE64, 'base64');
+          const bundleJson =
+            rawBuf[0] === 0x1f && rawBuf[1] === 0x8b
+              ? zlib.gunzipSync(rawBuf).toString('utf8')
+              : rawBuf.toString('utf8');
+          const filesMap = JSON.parse(bundleJson) as Record<string, string>;
+          for (const [fileName, fileContent] of Object.entries(filesMap)) {
+            const safeName = path.basename(fileName);
+            fs.writeFileSync(path.join(config.paths.sessions, safeName), fileContent, 'utf8');
+          }
+          console.log(`[WhatsAppClient] 🔑 Hydrated ${Object.keys(filesMap).length} session files from SESSION_BUNDLE_BASE64.`);
+        } catch (err: any) {
+          console.warn('[WhatsAppClient] Failed to hydrate SESSION_BUNDLE_BASE64:', err.message);
+        }
+      }
+
+      // Detect if PAIRING_PHONE_NUMBER changed vs existing session creds.json, or if previous pairing was incomplete
       if (fs.existsSync(credsFile)) {
         try {
           const rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
