@@ -1,4 +1,7 @@
 import { db } from '../memory/db.js';
+import { chatCleaner } from './chat-cleaner.js';
+import { reinforcementEngine } from './reinforcement.js';
+import { vectorStore } from './vector-store.js';
 
 interface MessageRow {
   id: number;
@@ -9,6 +12,7 @@ interface MessageRow {
   content_type: string;
   message_text: string | null;
   sticker_filename: string | null;
+  is_noise?: number;
   timestamp: number;
 }
 
@@ -23,10 +27,10 @@ export class PatternMiner {
    */
   public analyzeInteraction(chatJid: string): void {
     try {
-      // Get the last 4 messages in chronological order
+      // Get the last 4 clean, non-noise messages in chronological order
       const recent = db.prepare(`
         SELECT * FROM chat_logs
-        WHERE chat_jid = ?
+        WHERE chat_jid = ? AND is_noise = 0
         ORDER BY id DESC LIMIT 4
       `).all(chatJid) as unknown as MessageRow[];
 
@@ -34,6 +38,10 @@ export class PatternMiner {
       const history = recent.reverse();
       const current = history[history.length - 1];
       const previous = history[history.length - 2];
+
+      if (!current.message_text || chatCleaner.isNoise(current.message_text, current.content_type)) {
+        return;
+      }
 
       // 1. Detect High-Humor / Banter Pattern (Learn only from human users, never bot replies)
       if (
@@ -45,11 +53,22 @@ export class PatternMiner {
       ) {
         if (previous.content_type === 'text' && previous.message_text) {
           this.recordDialogueExemplar(chatJid, previous.message_text, current.message_text, 'humor');
+
+          // If in a group chat, index into local vector search space for future group banter retrieval
+          if (current.is_group) {
+            vectorStore.indexBanter(
+              chatJid,
+              current.sender_jid,
+              current.sender_name || 'Member',
+              current.message_text,
+              previous.message_text,
+              'humor'
+            );
+          }
         }
       }
 
-      // 2. Evaluate User Feedback to Bot Replies (Positive rewards vs Explicit disapproval)
-      // Note: If a user ignores or does not reply, it is NEVER marked as negative (silence is 100% neutral on WhatsApp).
+      // 2. Evaluate User Feedback & Direct Corrections to Bot Replies
       if (
         (previous.sender_jid === 'bot' || previous.sender_jid === 'Forgelabs assistant') &&
         current.sender_jid !== 'bot' &&
@@ -57,7 +76,12 @@ export class PatternMiner {
         current.content_type === 'text' &&
         current.message_text
       ) {
-        this.evaluateBotFeedback(chatJid, previous.message_text, current.message_text);
+        // Direct Reinforcement: Check if user is correcting a mistake or rebuking the bot
+        if (reinforcementEngine.isCorrection(current.message_text)) {
+          reinforcementEngine.handleCorrection(chatJid, current.sender_jid, current.message_text);
+        } else {
+          this.evaluateBotFeedback(chatJid, previous.message_text, current.message_text);
+        }
       }
 
       // 3. Periodically update Chat Style Profile (e.g. every few messages)

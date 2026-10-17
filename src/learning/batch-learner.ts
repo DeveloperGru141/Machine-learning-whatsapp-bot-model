@@ -73,16 +73,16 @@ export class BatchLearner {
 
       const lastId = checkpoint?.last_analyzed_log_id ?? 0;
 
-      // Fetch the last 20 messages in chronological order since last analysis
+      // Fetch the last 25 clean non-noise messages in chronological order since last analysis
       const logs = db.prepare(`
         SELECT id, sender_name, sender_jid, message_text, content_type, timestamp
         FROM chat_logs
-        WHERE chat_jid = ? AND id > ?
+        WHERE chat_jid = ? AND id > ? AND is_noise = 0
         ORDER BY id ASC LIMIT 25
       `).all(chatJid, lastId) as unknown as ChatLogRow[];
 
       if (logs.length < 5) {
-        // Not enough data yet to extract meaningful patterns
+        // Not enough clean data yet to extract meaningful patterns
         return false;
       }
 
@@ -93,13 +93,13 @@ export class BatchLearner {
       for (const log of logs) {
         if (log.id > maxLogId) maxLogId = log.id;
         const sender = log.sender_name || (log.sender_jid === 'bot' ? 'Forgelabs assistant' : 'User');
-        const text = log.message_text ? log.message_text.trim() : `[${log.content_type}]`;
-        if (text) {
+        const text = log.message_text ? log.message_text.trim() : '';
+        if (text && !text.startsWith('[') && text.length >= 2) {
           transcriptLines.push(`${sender}: ${text}`);
         }
       }
 
-      if (transcriptLines.length < 5) return false;
+      if (transcriptLines.length < 4) return false;
 
       const transcript = transcriptLines.join('\n');
       console.log(`[BatchLearner] 🧠 Processing batch of ${logs.length} exchanges for ${chatJid}...`);

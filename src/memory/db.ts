@@ -28,6 +28,7 @@ export function initDatabase() {
       content_type TEXT NOT NULL,
       message_text TEXT,
       sticker_filename TEXT,
+      is_noise INTEGER DEFAULT 0,
       timestamp INTEGER NOT NULL
     );
 
@@ -193,6 +194,34 @@ export function initDatabase() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_autonomous_actions_time ON autonomous_actions(timestamp);
+
+    -- Bot Corrections: Direct negative/positive reinforcement learned from user and owner feedback
+    CREATE TABLE IF NOT EXISTS bot_corrections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_jid TEXT NOT NULL,
+      user_jid TEXT NOT NULL,
+      bot_message_text TEXT NOT NULL,
+      correction_text TEXT NOT NULL,
+      learned_rule TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_bot_corrections_chat ON bot_corrections(chat_jid, created_at);
+
+    -- Group Banter Vectors: Dense subword vector embeddings for local semantic search of group banter
+    CREATE TABLE IF NOT EXISTS group_banter_vectors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_jid TEXT NOT NULL,
+      sender_jid TEXT NOT NULL,
+      sender_name TEXT NOT NULL,
+      message_text TEXT NOT NULL,
+      context_text TEXT,
+      vibe TEXT DEFAULT 'banter',
+      embedding TEXT NOT NULL,
+      timestamp INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_group_banter_chat ON group_banter_vectors(chat_jid);
   `);
 
   // Safe migration for existing databases
@@ -201,6 +230,16 @@ export function initDatabase() {
   } catch {
     // Column already exists
   }
+
+  try {
+    db.exec(`ALTER TABLE chat_logs ADD COLUMN is_noise INTEGER DEFAULT 0;`);
+  } catch {
+    // Column already exists
+  }
+
+  try {
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_chat_logs_clean ON chat_logs(chat_jid, is_noise, timestamp);`);
+  } catch {}
 
   // Ensure contacts who already have bot replies in chat_logs are marked as introduced
   try {
@@ -253,6 +292,18 @@ function cleanTrainingTablesAndSeedUnreplied(): void {
           ('230652813291679@lid', '230652813291679@lid', 'Marv', 0, 'text', 'So you really are alive', NULL, ?)
       `).run(now - 180_000, now - 120_000, now - 60_000);
     }
+
+    // Clean existing chat logs to flag noise
+    try {
+      const { chatCleaner } = require('../learning/chat-cleaner.js');
+      chatCleaner.cleanExistingLogs();
+    } catch {}
+
+    // Index historical group banter vectors for local semantic search
+    try {
+      const { vectorStore } = require('../learning/vector-store.js');
+      vectorStore.indexHistoricalBanter();
+    } catch {}
   } catch {}
 }
 

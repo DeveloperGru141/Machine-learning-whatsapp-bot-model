@@ -1,5 +1,6 @@
 import { db } from './db.js';
 import { config } from '../config/env.js';
+import { chatCleaner } from '../learning/chat-cleaner.js';
 
 export interface LogMessageInput {
   chatJid: string;
@@ -14,8 +15,8 @@ export interface LogMessageInput {
 
 export class ChatLogger {
   private insertLogStmt = db.prepare(`
-    INSERT INTO chat_logs (chat_jid, sender_jid, sender_name, is_group, content_type, message_text, sticker_filename, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO chat_logs (chat_jid, sender_jid, sender_name, is_group, content_type, message_text, sticker_filename, is_noise, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   private updateStickerPatternStmt = db.prepare(`
@@ -31,14 +32,18 @@ export class ChatLogger {
 
   public logMessage(input: LogMessageInput): void {
     try {
+      const sanitizedText = input.messageText ? chatCleaner.sanitizeText(input.messageText) : null;
+      const isNoise = chatCleaner.isNoise(sanitizedText, input.contentType) ? 1 : 0;
+
       this.insertLogStmt.run(
         input.chatJid,
         input.senderJid,
         input.senderName,
         input.isGroup ? 1 : 0,
         input.contentType,
-        input.messageText ?? null,
+        sanitizedText,
         input.stickerFilename ?? null,
+        isNoise,
         input.timestamp
       );
 
@@ -61,6 +66,7 @@ export class ChatLogger {
         'text',
         text,
         null,
+        0,
         Date.now()
       );
     } catch (err) {

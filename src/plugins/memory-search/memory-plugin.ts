@@ -2,6 +2,7 @@ import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { memoryService } from '../../memory/memory-service.js';
 import { db, getRecentAutonomousActions } from '../../memory/db.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
+import { vectorStore } from '../../learning/vector-store.js';
 
 export class MemoryPlugin implements IPlugin {
   name = 'MemoryRecall';
@@ -211,6 +212,59 @@ export class MemoryPlugin implements IPlugin {
           };
         } catch (err: any) {
           return { success: false, message: `Failed to retrieve autonomous actions: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'search_group_banter',
+      description:
+        'Uses local semantic vector search to recall past group jokes, funny quotes, inside jokes, roasts, and memorable banter from this group or across WhatsApp groups.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Topic, inside joke, nickname, quote, or phrase to search past banter vectors for.',
+          },
+          all_groups: {
+            type: 'boolean',
+            description: 'If true, searches banter across all known WhatsApp groups; otherwise searches this group only.',
+          },
+        },
+        required: ['query'],
+      },
+      execute: async (args: { query: string; all_groups?: boolean }, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const targetChat = args.all_groups ? undefined : ctx.isGroup ? ctx.chatJid : undefined;
+          const results = vectorStore.searchBanter(args.query, targetChat, 4);
+
+          if (results.length === 0) {
+            return {
+              success: true,
+              message: `No past group banter found matching "${args.query}".`,
+              data: [],
+            };
+          }
+
+          const formatted = results
+            .map(
+              (r, idx) =>
+                `${idx + 1}. [${r.senderName}] (${r.timeAgoStr}): "${r.messageText}"${
+                  r.contextText ? ` (Context: "${r.contextText}")` : ''
+                }`
+            )
+            .join('\n');
+
+          return {
+            success: true,
+            message: `Found ${results.length} memorable banter moments from group history:\n${formatted}`,
+            data: results,
+          };
+        } catch (err: any) {
+          return {
+            success: false,
+            message: `Error searching group banter vectors: ${err.message}`,
+          };
         }
       },
     },

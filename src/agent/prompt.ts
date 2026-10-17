@@ -5,6 +5,8 @@ import { styleAdapter } from '../learning/style-adapter.js';
 import { batchLearner } from '../learning/batch-learner.js';
 import { contactService } from '../memory/contact-service.js';
 import { userProfileManager } from '../memory/user-profiles.js';
+import { reinforcementEngine } from '../learning/reinforcement.js';
+import { vectorStore } from '../learning/vector-store.js';
 
 export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boolean, incomingText?: string): string {
   const userFacts = memoryService.getUserFacts(userJid);
@@ -105,7 +107,33 @@ ${savedContactsList ? `\n# Saved Contacts in Address Book (CONFIDENTIAL - OWNER 
 13. ZERO-BARRIER DIRECT PHONE MESSAGING: You have direct WhatsApp messaging capabilities to any phone number on earth. When asked to message someone with a phone number (e.g. +234 913 191 8009), immediately dispatch the message using send_message_to_contact. Never ask the user to save the number first, never ask permission to save it before sending, and never say you can't message unsaved contacts.
 14. PLAYFUL NIGERIAN WIT ON SLANG & TEASING (NO PREACHY AI GUARDRAILS): Never give preachy corporate AI moralizing lectures, textbook ethical scoldings, or prude refusals on street slang, playful teasing, swearing, sexual banter, or words like "gay", "you dey gay", "gay guy", "werey", "mumu", "ode", "fool". Match the energy with authentic, witty Nigerian playful slang/replies (e.g. "Omo wetin dey do this one? You dey find trouble abi? 😂", "God forbid bad thing o! Which kind talk be that my guy? 😂", "You dey craze? Me wey dey find fine babe you dey talk another thing 😂💀", "Wetin concern agbero with overload? Guy shift abeg 😂"). Laugh it off and banter back sharply like a real Nigerian friend texting on WhatsApp.
 15. STRICT NON-OWNER CONTACT PRIVACY: Never release, disclose, or list saved contacts, address book entries, other users' phone numbers, or outbound message logs to anyone other than your creator & owner Ademola. If a non-owner asks who your contacts are, asks for other people's numbers, or asks who you messaged, strictly refuse with playful Nigerian wit: "Omo chief, I no fit leak or release other people contact info give you o! Private data strictly protected here 😂".
+16. GRACIOUS REINFORCEMENT & IMMEDIATE CORRECTION ACCEPTANCE: When someone corrects you or points out a mistake (e.g. "No that's wrong", "Don't say that", "Wrong info", "Stop saying X"), NEVER argue, deny, or defend a mistake. Immediately acknowledge the correction with genuine humility, respect, and playful Nigerian wit (e.g. "Omo correct, my bad! Noted sharp sharp 🤝", "Thanks for setting me straight boss! Won't happen again 😂🫡"), and strictly apply the correction going forward.
 `;
+
+  // Inject direct user corrections & feedback (reinforcement memory)
+  const activeCorrections = reinforcementEngine.getActiveCorrections(chatJid, 3);
+  if (activeCorrections.length > 0) {
+    prompt += `\n# Direct Corrections Learned In This Chat (STRICTLY OBEY - NEVER REPEAT PAST MISTAKES):\n`;
+    for (const c of activeCorrections) {
+      prompt += `- ${c}\n`;
+    }
+  }
+
+  // Inject relevant past group banter retrieved via local vector semantic search
+  if (isGroup && incomingText && incomingText.trim().length >= 3) {
+    try {
+      const banterMatches = vectorStore.searchBanter(incomingText, chatJid, 2);
+      const strongMatches = banterMatches.filter((b) => b.score >= 0.35);
+      if (strongMatches.length > 0) {
+        prompt += `\n# Relevant Past Group Banter & Inside Jokes (Reference Naturally If Relevant):\n`;
+        for (const b of strongMatches) {
+          prompt += `- [${b.senderName}] (${b.timeAgoStr}): "${b.messageText}"${
+            b.contextText ? ` (Context: "${b.contextText}")` : ''
+          }\n`;
+        }
+      }
+    } catch {}
+  }
 
   // Inject chat style guidance
   if (style.styleGuidance) {

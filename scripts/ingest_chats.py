@@ -37,9 +37,19 @@ SYSTEM_MESSAGE_PATTERNS = [
     r"added you",
     r"changed the group description",
     r"changed the subject",
+    r"waiting for this message",
+    r"view once",
+    r"\b(otp|verification code|security code|use code|sms code)\b",
+    r"^\s*\d{4,8}\s*$",
+    r"\b(credit alert|debit alert|acct no|available bal)\b",
+    r"^[!./#$]\w+",
+    r"\bforward this to\b",
+    r"click (?:here|this link) to (?:win|claim)",
 ]
 
 def is_system_message(text: str) -> bool:
+    if not text or len(text.strip()) < 2:
+        return True
     for pat in SYSTEM_MESSAGE_PATTERNS:
         if re.search(pat, text, re.IGNORECASE):
             return True
