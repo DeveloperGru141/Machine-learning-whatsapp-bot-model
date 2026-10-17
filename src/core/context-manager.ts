@@ -1,8 +1,9 @@
 import { db } from '../memory/db.js';
 import { config } from '../config/env.js';
-import { groq } from '../agent/groq.js';
+import { llmClient } from '../agent/llm-client.js';
 import { buildSystemPrompt } from '../agent/prompt.js';
 import { userProfileManager } from '../memory/user-profiles.js';
+import { contactService } from '../memory/contact-service.js';
 
 export interface ManagedContextResult {
   messages: any[];
@@ -10,8 +11,8 @@ export interface ManagedContextResult {
 }
 
 export class ContextManager {
-  private readonly TOTAL_CONTEXT_BUDGET = 6000;
-  private readonly RAW_HISTORY_MIN_MESSAGES = 8;
+  private readonly TOTAL_CONTEXT_BUDGET = 2000;
+  private readonly RAW_HISTORY_MIN_MESSAGES = 4;
   private activeSummarizations = new Set<string>();
 
   /**
@@ -119,12 +120,12 @@ export class ContextManager {
     const rawMessages: Array<{ role: string; content: string }> = [];
 
     try {
-      // Fetch up to 25 recent chat logs
+      // Fetch up to 8 recent chat logs to keep context crisp and conserve daily token quota
       const rawRows = db.prepare(`
         SELECT sender_name, message_text, content_type, timestamp, sender_jid
         FROM chat_logs
         WHERE chat_jid = ?
-        ORDER BY id DESC LIMIT 25
+        ORDER BY id DESC LIMIT 8
       `).all(chatJid) as Array<{
         sender_name: string | null;
         message_text: string | null;
@@ -169,15 +170,20 @@ export class ContextManager {
         let body = row.message_text ? row.message_text.trim() : `[${row.content_type}]`;
 
         // If it's a bot message, don't prefix with sender name, just output the message body
-        // If it's a user message, prefix with sender name for group clarity
-        const content = isBot ? body : `${row.sender_name || 'User'}: ${body}`;
+        // If it's a user message, resolve friendly name (e.g. Hardez instead of decorative unicode)
+        const cleanSender =
+          contactService.getContact(row.sender_jid)?.custom_name ||
+          contactService.extractFriendlyFirstName(row.sender_name) ||
+          row.sender_name ||
+          'User';
+        const content = isBot ? body : `${cleanSender}: ${body}`;
         let tokens = this.estimateMessageTokens({ role, content });
 
         if (tokens > remainingBudget) {
           if (i < this.RAW_HISTORY_MIN_MESSAGES && remainingBudget > 30) {
             const maxChars = Math.max(50, (remainingBudget - 10) * 4);
             body = body.slice(0, maxChars) + '... [truncated]';
-            const truncatedContent = isBot ? body : `${row.sender_name || 'User'}: ${body}`;
+            const truncatedContent = isBot ? body : `${cleanSender}: ${body}`;
             tokens = this.estimateMessageTokens({ role, content: truncatedContent });
             remainingBudget -= tokens;
             selectedChronological.unshift({ role, content: truncatedContent });
@@ -263,8 +269,9 @@ export class ContextManager {
       return null;
     }
 
-    if (!config.groq.apiKey) {
-      console.warn('[ContextManager] Skipping summarization: GROQ_API_KEY is not configured.');
+    const hasKey = config.groq.apiKey || config.gemini.apiKey || config.openrouter.apiKey;
+    if (!hasKey) {
+      console.warn('[ContextManager] Skipping summarization: No LLM API key configured.');
       return null;
     }
 
@@ -333,30 +340,28 @@ export class ContextManager {
         `[ContextManager] Summarizing ${messagesCovered} messages for chat ${chatJid}...`
       );
 
-      const candidateModels = [
-        config.groq.model,
-        'openai/gpt-oss-20b',
-        'qwen/qwen3.8-27b',
-      ].filter((m, i, arr) => arr.indexOf(m) === i);
-
       let summaryText: string | undefined;
-      for (const model of candidateModels) {
-        try {
-          const response = await groq.chat.completions.create({
-            model,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userContent },
-            ],
-            temperature: 0.2,
-            max_completion_tokens: 500,
-            reasoning_effort: 'low',
-          } as any);
-          summaryText = response.choices[0]?.message?.content?.trim();
-          if (summaryText) break;
-        } catch (err: any) {
-          console.warn(`[ContextManager] Summarizer model ${model} failed (${err?.status || err?.message}), trying next fallback...`);
-        }
+      try {
+        const response = config.gemini.apiKey
+          ? await llmClient.callGeminiInternal({
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userContent },
+              ],
+              temperature: 0.2,
+              max_tokens: 250,
+            })
+          : await llmClient.chatCompletion({
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userContent },
+              ],
+              temperature: 0.2,
+              max_tokens: 300,
+            });
+        summaryText = response.choices[0]?.message?.content?.trim() || undefined;
+      } catch (err: any) {
+        console.warn(`[ContextManager] Summarizer failed: ${err?.message || err}`);
       }
 
       if (!summaryText) {

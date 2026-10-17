@@ -58,11 +58,23 @@ export class VideoDownloaderPlugin implements IPlugin {
           const fileId = crypto.randomBytes(6).toString('hex');
           const outputPattern = path.join(tempDir, `vid_${fileId}.%(ext)s`);
 
-          // Download using yt-dlp with max 60MB limit for WhatsApp compatibility
+          // Download using yt-dlp with max 60MB limit for WhatsApp compatibility (Linux/Windows cross-platform)
           const ffArg = ffmpegPath ? `--ffmpeg-location "${ffmpegPath}"` : '';
-          const cmd = `python -m yt_dlp ${ffArg} -f "best/bestvideo+bestaudio" --recode-video mp4 --max-filesize 60M --no-playlist -o "${outputPattern}" "${sanitizedUrl}"`;
-          
-          await execAsync(cmd);
+          const ytRunners = ['yt-dlp', 'python3 -m yt_dlp', 'python -m yt_dlp'];
+          let lastDlErr: any = null;
+          for (const runner of ytRunners) {
+            try {
+              const cmd = `${runner} ${ffArg} -f "best/bestvideo+bestaudio" --recode-video mp4 --max-filesize 60M --no-playlist -o "${outputPattern}" "${sanitizedUrl}"`;
+              await execAsync(cmd, { timeout: 45_000 });
+              lastDlErr = null;
+              break;
+            } catch (e: any) {
+              lastDlErr = e;
+            }
+          }
+          if (lastDlErr) {
+            throw lastDlErr;
+          }
 
           // Find the generated file
           const files = fs.readdirSync(tempDir).filter((f) => f.startsWith(`vid_${fileId}`));

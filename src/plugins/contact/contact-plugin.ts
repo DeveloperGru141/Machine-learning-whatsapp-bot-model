@@ -4,6 +4,10 @@ import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { contactService } from '../../memory/contact-service.js';
 import { whatsAppClient } from '../../core/client.js';
 import { config } from '../../config/env.js';
+import { db } from '../../memory/db.js';
+import { chatLogger } from '../../memory/chat-logger.js';
+import { OutboundSender } from '../../core/sender.js';
+import { userProfileManager } from '../../memory/user-profiles.js';
 
 export class ContactPlugin implements IPlugin {
   name = 'ContactManager';
@@ -95,6 +99,60 @@ export class ContactPlugin implements IPlugin {
           };
         } catch (err: any) {
           return { success: false, message: `Error searching contacts: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'list_contacts',
+      description:
+        'Lists saved contacts in the bot address book with names, phone numbers, and notes. Useful when the user asks who is in contacts, asks for a list of contacts, or wants to see saved people.',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: {
+            type: 'number',
+            description: 'Optional maximum number of contacts to list (default 25).',
+          },
+          filter: {
+            type: 'string',
+            description: 'Optional keyword to filter contacts by name or note.',
+          },
+        },
+      },
+      execute: async (args: { limit?: number; filter?: string }): Promise<ToolResult> => {
+        try {
+          const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
+          let contacts = contactService.getAllContacts(limit);
+          if (args.filter) {
+            const f = args.filter.toLowerCase();
+            contacts = contacts.filter(
+              (c) =>
+                (c.custom_name && c.custom_name.toLowerCase().includes(f)) ||
+                (c.display_name && c.display_name.toLowerCase().includes(f)) ||
+                (c.notes && c.notes.toLowerCase().includes(f)) ||
+                c.phone_number.includes(f)
+            );
+          }
+          if (contacts.length === 0) {
+            return {
+              success: true,
+              message: args.filter
+                ? `No contacts found matching "${args.filter}".`
+                : 'No contacts found in address book.',
+              data: [],
+            };
+          }
+          const formatted = contacts.map(
+            (c, idx) =>
+              `${idx + 1}. *${c.custom_name || c.display_name}* (+${c.phone_number})${c.notes ? ` - ${c.notes}` : ''}`
+          );
+          return {
+            success: true,
+            message: `📇 *Address Book Contacts (${contacts.length}):*\n\n${formatted.join('\n')}`,
+            data: contacts,
+          };
+        } catch (err: any) {
+          return { success: false, message: `Failed to list contacts: ${err.message}` };
         }
       },
     },
@@ -244,6 +302,145 @@ export class ContactPlugin implements IPlugin {
           return {
             success: false,
             message: `Failed to process unreplied messages: ${err.message}`,
+          };
+        }
+      },
+    },
+    {
+      name: 'send_message_to_contact',
+      description:
+        'Sends a direct WhatsApp text message to someone in the bot address book or to any phone number. Use this tool whenever a user asks to message someone, text someone, relay a message to a contact, or tell a person something.',
+      parameters: {
+        type: 'object',
+        properties: {
+          recipient: {
+            type: 'string',
+            description:
+              'The name of the contact in the address book (e.g. "Micah", "David") or their phone number with country code (e.g. "+2349126433601", "09126433601").',
+          },
+          message: {
+            type: 'string',
+            description: 'The exact text message to send to the recipient.',
+          },
+        },
+        required: ['recipient', 'message'],
+      },
+      execute: async (
+        args: { recipient: string; message: string },
+        ctx: ExecutionContext
+      ): Promise<ToolResult> => {
+        try {
+          if (!args.recipient || !args.message) {
+            return {
+              success: false,
+              message: 'Both recipient and message are required to send a message.',
+            };
+          }
+
+          let targetJid = '';
+          let targetName = args.recipient.trim();
+          let targetPhone = '';
+
+          // 1. Check if recipient is directly a phone number
+          const cleanDigits = contactService.extractPhoneNumber(args.recipient);
+          if (cleanDigits && cleanDigits.length >= 7 && cleanDigits.length <= 15) {
+            targetPhone = cleanDigits;
+            targetJid = `${cleanDigits}@s.whatsapp.net`;
+            const saved = contactService.getContact(cleanDigits);
+            if (saved) {
+              targetName = saved.custom_name || saved.display_name || cleanDigits;
+            }
+          } else {
+            // 2. Look up in contactService by name or nickname
+            const saved = contactService.getContact(args.recipient);
+            if (saved) {
+              targetName = saved.custom_name || saved.display_name || args.recipient;
+              targetPhone = saved.phone_number;
+              if (saved.phone_number && saved.phone_number.length <= 15 && !saved.phone_number.startsWith('0')) {
+                targetJid = `${saved.phone_number}@s.whatsapp.net`;
+              } else {
+                targetJid = saved.jid;
+              }
+            } else {
+              // 3. Fallback search in SQLite contacts table
+              const row = db.prepare(`
+                SELECT * FROM contacts
+                WHERE display_name LIKE ? OR custom_name LIKE ? OR notes LIKE ?
+                ORDER BY CASE WHEN jid LIKE '%@s.whatsapp.net' THEN 0 ELSE 1 END
+                LIMIT 1
+              `).get(`%${args.recipient}%`, `%${args.recipient}%`, `%${args.recipient}%`) as any;
+
+              if (row) {
+                targetName = row.custom_name || row.display_name || args.recipient;
+                targetPhone = row.phone_number;
+                if (row.phone_number && row.phone_number.length <= 15) {
+                  targetJid = `${row.phone_number}@s.whatsapp.net`;
+                } else {
+                  targetJid = row.jid;
+                }
+              }
+            }
+          }
+
+          if (!targetJid) {
+            return {
+              success: false,
+              message: `Could not find a contact matching "${args.recipient}" in the address book. Please specify their phone number so I can send the message.`,
+            };
+          }
+
+          // Pre-validate on WhatsApp to prevent USync 428 connection closure
+          const lookupTarget = targetPhone || cleanDigits || targetJid.split('@')[0];
+          try {
+            if (ctx.sock?.onWhatsApp) {
+              const onWa = await ctx.sock.onWhatsApp(lookupTarget);
+              if (onWa && onWa.length > 0 && !onWa[0]?.exists) {
+                return {
+                  success: false,
+                  message: `The number +${lookupTarget} is not registered on WhatsApp.`,
+                };
+              }
+              if (onWa && onWa[0]?.jid) {
+                targetJid = onWa[0].jid;
+              }
+            }
+          } catch (waErr: any) {
+            console.warn(`[ContactPlugin] onWhatsApp check warning for ${lookupTarget}:`, waErr.message);
+          }
+
+          console.log(`[ContactPlugin] 📨 Sending outbound message to ${targetName} (${targetJid}): "${args.message.slice(0, 60)}..."`);
+
+          // Send message through OutboundSender with anti-ban protections and human delays
+          const isOwner = userProfileManager.isOwner(ctx.senderJid);
+          const sent = await OutboundSender.replyText(ctx.sock, targetJid, args.message.trim(), undefined, isOwner);
+          if (!sent) {
+            return {
+              success: false,
+              message: `Cannot message ${targetName} (${targetJid}): WhatsApp Anti-Ban policy blocks cold messaging contacts who have never messaged the bot first.`,
+            };
+          }
+
+          // Log the message into chat_logs so conversation history is recorded
+          chatLogger.logMessage({
+            chatJid: targetJid,
+            senderJid: 'bot',
+            senderName: config.bot.name,
+            isGroup: targetJid.endsWith('@g.us'),
+            contentType: 'text',
+            messageText: args.message.trim(),
+            timestamp: Date.now(),
+          });
+
+          return {
+            success: true,
+            message: `Message sent successfully to ${targetName} (+${targetPhone || targetJid.split('@')[0]})! Content: "${args.message.trim()}"`,
+            data: { recipient: targetName, targetJid, message: args.message.trim() },
+          };
+        } catch (err: any) {
+          console.error('[ContactPlugin] Error sending message to contact:', err);
+          return {
+            success: false,
+            message: `Failed to send message to "${args.recipient}": ${err.message}`,
           };
         }
       },

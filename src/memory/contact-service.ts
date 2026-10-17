@@ -101,9 +101,20 @@ export class ContactService {
    */
   public extractFriendlyFirstName(rawName?: string | null): string {
     if (!rawName) return '';
-    const stripped = rawName
+    // 1. Strip emojis
+    const noEmojis = rawName
       .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}\p{Emoji_Modifier}\u{FE0F}\u{200D}]/gu, '')
       .trim();
+
+    // 2. Normalize stylized unicode (mathematical script, gothic, fullwidth, circled) to plain Latin
+    const normalized = noEmojis
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[øØ]/g, 'o')
+      .replace(/[^a-zA-Z0-9\s._-]/g, '')
+      .trim();
+
+    const stripped = normalized || noEmojis;
     if (
       !stripped ||
       stripped.startsWith('User +') ||
@@ -113,6 +124,9 @@ export class ContactService {
       return '';
     }
     const parts = stripped.split(/\s+/);
+    if (/^hardez/i.test(parts[0])) {
+      return 'Hardez';
+    }
     if (parts.length > 1 && /^(dr|mr|mrs|ms|prof|chief|engr)\.?$/i.test(parts[0])) {
       return `${parts[0]} ${parts[1]}`;
     }

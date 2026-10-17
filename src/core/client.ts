@@ -4,6 +4,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   WASocket,
   proto,
+  Browsers,
 } from '@whiskeysockets/baileys';
 import { db } from '../memory/db.js';
 import pino from 'pino';
@@ -15,11 +16,12 @@ import readline from 'readline';
 import { config } from '../config/env.js';
 import { normalizeMessage } from './normalizer.js';
 import { shouldRespondToMessage } from './filter.js';
-import { OutboundSender } from './sender.js';
+import { OutboundSender, setActiveSocketGetter } from './sender.js';
 import { chatLogger } from '../memory/chat-logger.js';
 import { agentHarness } from '../agent/harness.js';
 import { ExecutionContext } from '../plugins/types.js';
 import { patternMiner } from '../learning/pattern-miner.js';
+import { batchLearner } from '../learning/batch-learner.js';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { transcribeAudioBuffer } from './transcription.js';
 import { analyzeImageBuffer } from './vision.js';
@@ -35,6 +37,8 @@ import { userRateLimiter } from './rate-limiter.js';
 import { userProfileManager } from '../memory/user-profiles.js';
 import { contactService } from '../memory/contact-service.js';
 import { setSchedulerSocket } from '../plugins/scheduler/scheduler-plugin.js';
+import { setEngagementSocket } from '../plugins/engagement/engagement-plugin.js';
+import { antiBanEngine } from '../security/anti-ban.js';
 
 /**
  * Normalizes a phone number for Baileys pairing code generation.
@@ -59,24 +63,35 @@ export class WhatsAppClient {
   private unrepliedDebounceTimer: NodeJS.Timeout | null = null;
   private isScanningUnreplied = false;
   private pairingRequested = false;
+  private latestPairingCode: string | null = null;
+  private attemptedCatchupKeys: Set<string> = new Set();
   private messageStore: Map<string, any> = new Map();
+
+  public getLatestPairingCode(): string | null {
+    return this.latestPairingCode;
+  }
+
+  public async requestFreshPairingCode(): Promise<string | null> {
+    if (!this.sock || this.sock.authState?.creds?.registered) {
+      return null;
+    }
+    const cleanNumber = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '09014896714');
+    if (!cleanNumber) return null;
+    try {
+      const code = await this.sock.requestPairingCode(cleanNumber);
+      this.latestPairingCode = code;
+      console.log(`\n📱 [WhatsAppClient] FRESH PAIRING CODE FOR +${cleanNumber}: ${code}\n`);
+      return code;
+    } catch (err: any) {
+      console.warn(`[WhatsAppClient] Could not request fresh pairing code:`, err.message);
+      return this.latestPairingCode;
+    }
+  }
 
   private startKeepAlive(): void {
     this.stopKeepAlive();
-    // Active presence ping every 45s keeps the WebSocket tunnel alive through cloud firewalls, NATs, and proxies
-    this.keepAliveInterval = setInterval(async () => {
-      if (this.sock && this.sock.user) {
-        try {
-          await this.sock.sendPresenceUpdate('available');
-        } catch {
-          // Socket might be temporarily reconnecting or busy
-        }
-      }
-    }, 45 * 1000);
-
-    if (this.keepAliveInterval.unref) {
-      this.keepAliveInterval.unref();
-    }
+    // Keep-alive is handled natively by Baileys keepAliveIntervalMs (iq ping frames).
+    // Manual presence updates are avoided to prevent WhatsApp stream terminations.
   }
 
   private stopKeepAlive(): void {
@@ -86,18 +101,37 @@ export class WhatsAppClient {
     }
   }
 
+  /**
+   * Starts the human-paced background contact replies cycle for users who previously DM'd the bot.
+   * - Waits 45s after connection opens so live traffic settles first.
+   * - Scans every 15 minutes (skipping quiet hours 11:30 PM - 7:00 AM).
+   * - Replies to max 3 unreplied DMs per cycle with 22s-36s human pauses between contacts.
+   */
   private startUnrepliedScanner(): void {
     this.stopUnrepliedScanner();
-    // Continuous 3-minute scan ensures bot always goes through its contact list
-    this.unrepliedScanInterval = setInterval(() => {
-      this.replyUnrepliedMessages().catch((err) => {
-        console.error('[WhatsAppClient] Periodic unreplied scan error:', err.message);
-      });
-    }, 3 * 60 * 1000);
 
-    if (this.unrepliedScanInterval.unref) {
-      this.unrepliedScanInterval.unref();
-    }
+    const runCycleIfActive = async () => {
+      const hour = new Date().getHours();
+      if (hour >= 23 || hour < 7) {
+        return; // Respect quiet sleeping hours
+      }
+      if (!this.isSocketOpen()) return;
+      try {
+        await this.replyUnrepliedMessages(3);
+      } catch (err: any) {
+        console.warn('[WhatsAppClient] Unreplied catch-up cycle warning:', err.message);
+      }
+    };
+
+    this.unrepliedDebounceTimer = setTimeout(() => {
+      runCycleIfActive();
+    }, 45_000);
+    if (this.unrepliedDebounceTimer.unref) this.unrepliedDebounceTimer.unref();
+
+    this.unrepliedScanInterval = setInterval(() => {
+      runCycleIfActive();
+    }, 15 * 60 * 1000);
+    if (this.unrepliedScanInterval.unref) this.unrepliedScanInterval.unref();
   }
 
   private stopUnrepliedScanner(): void {
@@ -111,6 +145,14 @@ export class WhatsAppClient {
     }
   }
 
+  public getSocket(): WASocket | null {
+    return this.sock;
+  }
+
+  public isSocketOpen(): boolean {
+    return Boolean(this.sock && (this.sock as any).ws?.isOpen);
+  }
+
   public async start(): Promise<void> {
     if (this.isConnecting) {
       console.log('[WhatsAppClient] Connection attempt already in progress, skipping duplicate invocation.');
@@ -121,6 +163,30 @@ export class WhatsAppClient {
     try {
       if (!fs.existsSync(config.paths.sessions)) {
         fs.mkdirSync(config.paths.sessions, { recursive: true });
+      }
+
+      // Detect if PAIRING_PHONE_NUMBER changed vs existing session creds.json
+      const credsFile = path.join(config.paths.sessions, 'creds.json');
+      if (fs.existsSync(credsFile) && config.bot.pairingPhoneNumber) {
+        try {
+          const rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
+          const existingPhone = (rawCreds?.me?.id || '').split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
+          const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber);
+          if (existingPhone && targetPhone && existingPhone !== targetPhone) {
+            console.log(
+              `[WhatsAppClient] 🔄 Default bot number changed (+${existingPhone} -> +${targetPhone}). Archiving previous session and preparing fresh pairing for +${targetPhone}...`
+            );
+            const backupDir = path.resolve(`./sessions_prev_${existingPhone}`);
+            try {
+              if (fs.existsSync(backupDir)) fs.rmSync(backupDir, { recursive: true, force: true });
+              fs.cpSync(config.paths.sessions, backupDir, { recursive: true });
+            } catch {}
+            fs.rmSync(config.paths.sessions, { recursive: true, force: true });
+            fs.mkdirSync(config.paths.sessions, { recursive: true });
+            this.pairingRequested = false;
+            this.latestPairingCode = null;
+          }
+        } catch {}
       }
 
       // Detach any previous listeners from prior socket instance
@@ -150,14 +216,14 @@ export class WhatsAppClient {
         auth: state,
         printQRInTerminal: false,
         generateHighQualityLinkPreview: true,
-        browser: ['Ubuntu', 'Chrome', '20.0.04'],
-        keepAliveIntervalMs: 25_000,
-        connectTimeoutMs: 60_000,
-        defaultQueryTimeoutMs: 60_000,
-        retryRequestDelayMs: 2000,
+        browser: Browsers.ubuntu('Chrome'),
+        keepAliveIntervalMs: 30_000,
+        connectTimeoutMs: 20_000,
+        defaultQueryTimeoutMs: 15_000,
+        retryRequestDelayMs: 500,
         maxMsgRetryCount: 5,
         syncFullHistory: false,
-        markOnlineOnConnect: true,
+        markOnlineOnConnect: false,
         msgRetryCounterCache,
         getMessage: async (key) => {
           if (key.id) {
@@ -169,8 +235,10 @@ export class WhatsAppClient {
       });
 
       // Initialize group welcome listener and scheduler background socket
+      setActiveSocketGetter(() => this.sock);
       setupGroupWelcome(this.sock);
       setSchedulerSocket(this.sock);
+      setEngagementSocket(this.sock);
 
       // Save auth credentials whenever updated
       this.sock.ev.on('creds.update', saveCreds);
@@ -182,7 +250,7 @@ export class WhatsAppClient {
           if (this.sock?.authState?.creds?.registered) return;
 
           let phoneNumber = config.bot.pairingPhoneNumber;
-          if (!phoneNumber) {
+          if (!phoneNumber && process.stdin.isTTY) {
             const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
             phoneNumber = await new Promise<string>((resolve) => {
               rl.question('\n📱 Enter your WhatsApp phone number with country code (e.g. 09014896714 or 2349014896714): ', (answer) => {
@@ -190,6 +258,12 @@ export class WhatsAppClient {
                 resolve(answer.trim());
               });
             });
+          } else if (!phoneNumber) {
+            console.warn(
+              '⚠️ [WhatsAppClient] Headless server mode detected without PAIRING_PHONE_NUMBER or existing session. Set PAIRING_PHONE_NUMBER in .env or copy ./sessions to the server.'
+            );
+            this.pairingRequested = false;
+            return;
           }
 
           const cleanNumber = formatPhoneNumberForPairing(phoneNumber);
@@ -201,6 +275,7 @@ export class WhatsAppClient {
                 retries++;
                 console.log(`[WhatsAppClient] Requesting pairing code for +${cleanNumber} (Attempt ${retries}/${maxRetries})...`);
                 const code = await this.sock.requestPairingCode(cleanNumber);
+                this.latestPairingCode = code;
                 console.log('\n======================================================');
                 console.log(`📱 YOUR WHATSAPP PAIRING CODE: ${code}`);
                 console.log('------------------------------------------------------');
@@ -237,10 +312,16 @@ export class WhatsAppClient {
           this.stopKeepAlive();
           healthMonitor.setConnectionStatus(false);
           const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+          const errorMsg = (lastDisconnect?.error as any)?.message || (lastDisconnect?.error as any)?.output?.payload?.message || '';
+          const isStreamConflict = errorMsg.includes('conflict') || errorMsg.includes('Stream Errored');
+          const isRegistered = Boolean(this.sock?.authState?.creds?.registered);
+          // If socket was never registered, 401 or 408 is simply an expired pairing code, not a device logout
+          const shouldReconnect = isRegistered
+            ? (statusCode !== DisconnectReason.loggedOut || isStreamConflict)
+            : true;
 
           console.log(
-            `[WhatsAppClient] Connection closed (statusCode: ${statusCode}, reason: ${lastDisconnect?.error?.message || 'unknown'}). Reconnecting: ${shouldReconnect}`
+            `[WhatsAppClient] Connection closed (statusCode: ${statusCode}, reason: ${errorMsg || 'unknown'}). Registered: ${isRegistered}. Reconnecting: ${shouldReconnect}`
           );
 
           this.stopUnrepliedScanner();
@@ -250,10 +331,30 @@ export class WhatsAppClient {
             return;
           }
 
-          // Fast immediate restart on DisconnectReason.restartRequired (515)
-          if (statusCode === DisconnectReason.restartRequired) {
-            console.log('[WhatsAppClient] Session restart required by WhatsApp server (code 515). Reconnecting in 1s...');
-            setTimeout(() => this.start(), 1000);
+          // If unlinked pairing attempt expired or hit 401, wipe partial creds to request a fresh code on next loop
+          if (!isRegistered && (statusCode === DisconnectReason.loggedOut || statusCode === 408)) {
+            console.log('[WhatsAppClient] Pairing attempt timed out or closed. Clearing stale credentials to generate fresh pairing code...');
+            try {
+              if (fs.existsSync(config.paths.sessions)) {
+                fs.rmSync(config.paths.sessions, { recursive: true, force: true });
+              }
+            } catch {}
+            this.pairingRequested = false;
+          }
+
+          // Fast instant reconnect for common socket resets (428 Connection Terminated, 408 ECONNRESET/Connection Lost, 515 restartRequired)
+          if (
+            statusCode === DisconnectReason.restartRequired ||
+            statusCode === DisconnectReason.connectionClosed ||
+            statusCode === DisconnectReason.connectionLost ||
+            statusCode === 428 ||
+            statusCode === 408 ||
+            errorMsg.includes('Connection Terminated') ||
+            errorMsg.includes('ECONNRESET') ||
+            errorMsg.includes('Connection Closed')
+          ) {
+            console.log(`[WhatsAppClient] Transient socket reset (code: ${statusCode}, reason: ${errorMsg || 'socket drop'}). Reconnecting in 800ms...`);
+            setTimeout(() => this.start(), 800);
             return;
           }
 
@@ -267,6 +368,7 @@ export class WhatsAppClient {
         } else if (connection === 'open') {
           this.reconnectAttempts = 0;
           this.pairingRequested = false;
+          this.latestPairingCode = null;
           healthMonitor.setConnectionStatus(true);
           this.startKeepAlive();
           this.startUnrepliedScanner();
@@ -274,14 +376,7 @@ export class WhatsAppClient {
           const ownerJid = config.bot.owners[0] || '';
           healthMonitor.startMonitoring(this.sock!, ownerJid);
           analyticsEngine.startPeriodicReports(this.sock!, ownerJid);
-          console.log('✅ [WhatsAppClient] Connection established and server watchdog active!');
-
-          // Proactively scan contacts and chat history for unreplied messages after initial socket sync (4s)
-          setTimeout(() => {
-            this.replyUnrepliedMessages().catch((err) => {
-              console.error('[WhatsAppClient] Initial unreplied scan error:', err.message);
-            });
-          }, 4000);
+          console.log('✅ [WhatsAppClient] Connection established, contact replies cycle & server watchdog active!');
         }
       });
 
@@ -325,7 +420,7 @@ export class WhatsAppClient {
         }
       });
 
-      // Passively record new contacts synced from phonebook and debounce unreplied check
+      // Passively record new contacts synced from phonebook
       this.sock.ev.on('contacts.upsert', (contacts) => {
         try {
           for (const c of contacts) {
@@ -333,42 +428,23 @@ export class WhatsAppClient {
               contactService.autoSaveContact(c.id, c.name || c.notify);
             }
           }
-
-          if (this.unrepliedDebounceTimer) clearTimeout(this.unrepliedDebounceTimer);
-          this.unrepliedDebounceTimer = setTimeout(() => {
-            this.replyUnrepliedMessages().catch(() => {});
-          }, 3000);
         } catch {}
       });
 
-      // Immediately greet and introduce self to any new group the bot is added to or joins
-      this.sock.ev.on('chats.upsert', async (newChats) => {
-        try {
-          for (const chat of newChats) {
-            if (chat.id && chat.id.endsWith('@g.us')) {
-              const hasReplied = chatLogger.hasBotRepliedAfter(chat.id, 0);
-              if (!hasReplied && this.sock) {
-                console.log(`[WhatsAppClient] 🚀 New group detected via chats.upsert: ${chat.id}. Greeting and introducing bot...`);
-                const groupIntro = `Hi everyone! I'm ${config.bot.name}, built by Ademola (an aspiring ML/AI Engineer). Excited to be here! Tag me with @mention or reply to my messages if you need quick answers, live web searches, video downloads, or reminders.`;
-                await OutboundSender.replyText(this.sock, chat.id, groupIntro);
-                chatLogger.logOutboundMessage(chat.id, groupIntro);
-              }
-            }
-          }
-        } catch (err: any) {
-          console.error('[WhatsAppClient] Error in chats.upsert handler:', err?.message || err);
+      // Passively track new chats without sending unsolicited messages
+      this.sock.ev.on('chats.upsert', async (_newChats) => {
+        // Passive observation only — zero unsolicited group outreach
+      });
+
+      // Message handler
+      this.sock.ev.on('messages.upsert', async (m) => {
+        for (const msg of m.messages) {
+          await this.processIncomingMessage(msg);
         }
       });
     } finally {
       this.isConnecting = false;
     }
-
-    // Message handler
-    this.sock.ev.on('messages.upsert', async (m) => {
-      for (const msg of m.messages) {
-        await this.processIncomingMessage(msg);
-      }
-    });
   }
 
   /**
@@ -384,14 +460,29 @@ export class WhatsAppClient {
       }
     }
 
-    // Ignore messages sent by ourselves
-    if (msg.key?.fromMe) return;
+    const msgTime = Number(msg.messageTimestamp) * 1000;
+    const effectiveMsgTime = msgTime ? Math.min(msgTime, Date.now()) : Date.now();
+
+    // Ignore messages sent by ourselves for agent trigger, but passively log outbound replies
+    if (msg.key?.fromMe) {
+      const normalized = normalizeMessage(msg);
+      if (normalized && (normalized.text || normalized.contentType)) {
+        chatLogger.logMessage({
+          chatJid: normalized.chatJid,
+          senderJid: 'bot',
+          senderName: config.bot.name,
+          isGroup: normalized.isGroup,
+          contentType: normalized.contentType,
+          messageText: normalized.text,
+          stickerFilename: normalized.stickerFilename,
+          timestamp: effectiveMsgTime,
+        });
+      }
+      return;
+    }
 
     const normalized = normalizeMessage(msg);
     if (!normalized) return;
-
-    const msgTime = Number(msg.messageTimestamp) * 1000;
-    const effectiveMsgTime = msgTime ? Math.min(msgTime, Date.now()) : Date.now();
 
     // 1. Passive Continuous Learning & Analytics: Log EVERY message in all chats
     chatLogger.logMessage({
@@ -415,24 +506,14 @@ export class WhatsAppClient {
     // Automatic Contact Saving: passively record and index all contacts
     const contactSaveStatus = contactService.autoSaveContact(normalized.senderJid, normalized.senderName);
 
-    // Continuous ML Pattern Mining
-    patternMiner.analyzeInteraction(normalized.chatJid);
+    // Continuous ML Batch Learning: buffers 20 exchanges before a single compression API call
+    batchLearner.recordExchange(normalized.chatJid, normalized.senderJid);
 
     // Historical Backlog Evaluation:
-    // In groups: skip backlog older than 2 minutes to prevent spamming groups on reconnect
-    if (normalized.isGroup && msgTime && Date.now() - msgTime > 120_000) {
+    // Strictly ignore any message older than 2 minutes for both DMs and groups
+    // so the bot NEVER responds to historical messages from when it was offline or during history sync.
+    if (msgTime && Date.now() - msgTime > 120_000) {
       return;
-    }
-
-    // In DMs: if older than 2 minutes, check if already answered or if older than 24 hours
-    if (!normalized.isGroup && msgTime && Date.now() - msgTime > 120_000) {
-      if (Date.now() - msgTime > 24 * 60 * 60 * 1000) {
-        return;
-      }
-      if (chatLogger.hasBotRepliedAfter(normalized.chatJid, effectiveMsgTime)) {
-        return;
-      }
-      console.log(`[WhatsAppClient] Answering backlog DM from ${normalized.senderName} (${normalized.chatJid})...`);
     }
 
     // Passive Group Admin: Check and delete unauthorized group invite links
@@ -490,36 +571,9 @@ export class WhatsAppClient {
     }
     userRateLimiter.consumeToken(normalized.senderJid);
 
-    // First-Message Contact Auto-Save & Self-Introduction
+    // Passive Contact Introduction Tracking (no unsolicited canned message)
     if (!normalized.isGroup && contactSaveStatus.needsIntroduction) {
       contactService.markIntroduced(normalized.senderJid);
-      const firstName = contactService.extractFriendlyFirstName(normalized.senderName);
-
-      const isSimpleGreeting =
-        normalized.contentType === 'text' &&
-        /^(hi+|hello+|hey+|yo+|sup|how\s*far|good\s*(morning|afternoon|evening|day)|greetings|hola|waddup|what'?s\s*up)[!.,?\s]*$/i.test(
-          (cleanedText || '').trim()
-        );
-
-      const introGreeting = firstName ? `Hi ${firstName}!` : `Hi!`;
-      const introText = isSimpleGreeting
-        ? `${introGreeting} I'm ${config.bot.name}, pleased to meet you. Save my contact as ${config.bot.name} — I've saved yours already. How far, how's everything going?`
-        : `${introGreeting} I'm ${config.bot.name}, pleased to meet you. Save my contact as ${config.bot.name} — I've saved yours already.`;
-
-      try {
-        console.log(`[WhatsAppClient] 🤝 Sending first-message self-introduction to ${normalized.senderName} (${normalized.chatJid})`);
-        if (this.sock) {
-          await OutboundSender.replyText(this.sock, normalized.chatJid, introText, msg);
-        }
-        chatLogger.logOutboundMessage(normalized.chatJid, introText);
-      } catch (introErr: any) {
-        console.error('[WhatsAppClient] Error sending self-introduction:', introErr.message);
-      }
-
-      // If their first message was only a simple greeting ("Hi"/"Hello"), the self-introduction already greeted them warmly!
-      if (isSimpleGreeting) {
-        return;
-      }
     }
 
     let promptText = cleanedText;
@@ -582,40 +636,36 @@ export class WhatsAppClient {
     const sock = this.sock;
     if (!sock) return;
 
+    const savedContact = contactService.getContact(normalized.senderJid);
+    const effectiveSenderName =
+      savedContact?.custom_name ||
+      contactService.extractFriendlyFirstName(normalized.senderName) ||
+      normalized.senderName;
+
     const context: ExecutionContext = {
       sock,
       chatJid: normalized.chatJid,
       senderJid: normalized.senderJid,
-      senderName: normalized.senderName,
+      senderName: effectiveSenderName,
       isGroup: normalized.isGroup,
       rawMessage: msg,
       replyText: async (text: string) => {
+        const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
+
         // If user sent a voice note, respond with a synthesized AI voice note in the fine-tuned persona!
         if (isIncomingVoiceNote) {
           console.log(`[TTS] Synthesizing voice note reply to ${normalized.senderName}...`);
-          try {
-            await sock.sendPresenceUpdate('recording', normalized.chatJid);
-          } catch {}
+          await antiBanEngine.simulateTypingPresence(sock, normalized.chatJid, text, true);
           const vnBuffer = await synthesizeVoiceNote(text);
           if (vnBuffer) {
-            const res = await OutboundSender.sendAudio(sock, normalized.chatJid, vnBuffer, true, msg);
-            try {
-              await sock.sendPresenceUpdate('paused', normalized.chatJid);
-            } catch {}
+            const res = await OutboundSender.sendAudio(sock, normalized.chatJid, vnBuffer, true, safeQuoted);
             return res;
           }
         }
 
-        // Show typing presence right before sending for an authentic brief delay (250-800ms)
-        try {
-          await sock.sendPresenceUpdate('composing', normalized.chatJid);
-        } catch {}
-        const typingDelay = Math.min(800, Math.max(250, Math.floor(text.length * 6)));
-        await new Promise((r) => setTimeout(r, typingDelay));
-        const res = await OutboundSender.replyText(sock, normalized.chatJid, text, msg);
-        try {
-          await sock.sendPresenceUpdate('paused', normalized.chatJid);
-        } catch {}
+        // Simulate authentic human typing presence with natural delay & jitter
+        await antiBanEngine.simulateTypingPresence(sock, normalized.chatJid, text, false);
+        const res = await OutboundSender.replyText(sock, normalized.chatJid, text, safeQuoted);
         return res;
       },
       sendSticker: async () => false,
@@ -629,13 +679,19 @@ export class WhatsAppClient {
         OutboundSender.sendContact(sock, normalized.chatJid, displayName, phoneNumber, msg),
     };
 
-    // 4. Dispatch via Concurrency Queue (Anti-Crash & Rate Limiting)
+    // 4. Dispatch via Concurrency Queue (Anti-Crash & Human-Like Rate Limiting)
     requestQueue.enqueue({
       id: `${normalized.chatJid}_${msg.key.id || Date.now()}`,
       senderJid: normalized.senderJid,
       chatJid: normalized.chatJid,
       execute: async () => {
         try {
+          // Immediately broadcast typing indicator while AI computes response (only for standard JIDs, never @lid)
+          if (!normalized.chatJid.endsWith('@lid')) {
+            sock.sendPresenceUpdate('composing', normalized.chatJid).catch(() => {});
+          }
+          // Snappy processing delay (100ms-180ms)
+          await antiBanEngine.simulateReadingDelay((promptText || '').length);
           await agentHarness.handleMessage(promptText, context);
         } catch (err: any) {
           console.error('[WhatsAppClient] Error in agent handler:', err.message);
@@ -647,197 +703,195 @@ export class WhatsAppClient {
   }
 
   /**
-   * Scans all saved contacts, sessions, and chat logs to find and reply to any unreplied direct messages.
+   * Safely catches up on genuine unreplied 1-on-1 direct messages with human-like pacing.
+   * Strictly enforces:
+   * 1. Inbound-first rule: Recipient MUST have initiated a message in chat_logs.
+   * 2. Zero cold outreach: Contacts who have never messaged the bot are skipped.
+   * 3. Authentic human delays: Reading delay (1.2s-3.8s), typing presence simulation,
+   *    and 18s-35s pause between consecutive chats.
+   * 4. Batch cap: Processes a max of 5 chats per run to avoid spam flags.
    */
-  public async replyUnrepliedMessages(): Promise<{ repliedCount: number; summary: string }> {
-    if (!this.sock) {
-      return { repliedCount: 0, summary: 'WhatsApp socket is not connected.' };
-    }
+  public async replyUnrepliedMessages(batchLimit: number = 5): Promise<{ repliedCount: number; summary: string }> {
     if (this.isScanningUnreplied) {
-      return { repliedCount: 0, summary: 'Unreplied contact scan already in progress.' };
+      console.log('[WhatsAppClient] Unreplied catch-up is already running. Skipping concurrent run.');
+      return {
+        repliedCount: 0,
+        summary: 'Unreplied message catch-up is currently in progress. Please wait for the current run to finish.',
+      };
     }
+
+    if (!this.sock) {
+      console.warn('[WhatsAppClient] Cannot process unreplied messages: WhatsApp socket is disconnected.');
+      return {
+        repliedCount: 0,
+        summary: 'Cannot catch up on unreplied messages: Bot is currently disconnected from WhatsApp.',
+      };
+    }
+
     this.isScanningUnreplied = true;
+    console.log('[WhatsAppClient] 🔍 Checking for genuine unreplied 1-on-1 direct messages...');
 
     try {
-      const sock = this.sock;
-      const botJid = sock.user?.id || '';
-      const cleanBotId = (botJid || '').split(':')[0].split('@')[0];
-      let repliedCount = 0;
-      const details: string[] = [];
+      const candidates = contactService.getUnrepliedChats();
+      const ownPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '09014896714');
+      const ownSockDigits = (this.sock?.user?.id || '').split(':')[0].split('@')[0];
 
-      console.log('[WhatsAppClient] 🔍 Starting scan of contacts and chat logs for unreplied messages...');
-
-      // 1. Process active unreplied DMs found in chat_logs
-      const unrepliedChats = contactService.getUnrepliedChats();
-      for (const chat of unrepliedChats) {
-        // Exclude bot's own self messages
+      // Filter strictly for safety
+      const genuineChats = candidates.filter((chat) => {
+        // 1. Must not be group, broadcast, or the bot's own number
+        if (!chat.chatJid || chat.chatJid.endsWith('@g.us') || chat.chatJid.includes('broadcast')) {
+          return false;
+        }
+        const chatDigits = chat.chatJid.split('@')[0].split(':')[0];
         if (
-          chat.chatJid.includes(cleanBotId) ||
-          chat.senderJid.includes(cleanBotId) ||
-          chat.chatJid.startsWith('271614570692796')
+          chatDigits === ownPhone ||
+          chatDigits === ownSockDigits ||
+          chatDigits === '2349014896714' ||
+          chatDigits === '2347058967815'
         ) {
-          continue;
+          return false;
         }
 
-        // Check if message is within reasonable window (last 48 hours)
-        if (Date.now() - chat.timestamp > 48 * 60 * 60 * 1000) {
-          continue;
+        // 2. Skip if already attempted in this runtime session
+        const catchupKey = `${chat.chatJid}_${chat.timestamp}`;
+        if (this.attemptedCatchupKeys.has(catchupKey)) {
+          return false;
         }
 
-        // Skip if bot has already replied since then
-        if (chatLogger.hasBotRepliedAfter(chat.chatJid, chat.timestamp)) {
-          continue;
+        // 3. Must have at least one genuine inbound message from a human in chat_logs
+        const hasInbound = db
+          .prepare(`SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid != 'bot' LIMIT 1`)
+          .get(chat.chatJid);
+        if (!hasInbound) return false;
+
+        // 4. Confirm bot hasn't already replied after this timestamp
+        const laterBotReply = db
+          .prepare(`SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid = 'bot' AND timestamp >= ? LIMIT 1`)
+          .get(chat.chatJid, chat.timestamp);
+        if (laterBotReply) return false;
+
+        return true;
+      });
+
+      if (genuineChats.length === 0) {
+        console.log('[WhatsAppClient] ✅ No unreplied 1-on-1 DMs found. All conversations are up to date.');
+        return {
+          repliedCount: 0,
+          summary: 'All direct messages have been replied to! No unreplied conversations found.',
+        };
+      }
+
+      console.log(
+        `[WhatsAppClient] Found ${genuineChats.length} unreplied chat(s). Processing up to ${batchLimit} with human-like pacing...`
+      );
+
+      const toProcess = genuineChats.slice(0, batchLimit);
+      let repliedCount = 0;
+      const repliedNames: string[] = [];
+
+      for (let i = 0; i < toProcess.length; i++) {
+        const chat = toProcess[i];
+        if (!this.sock) {
+          console.warn('[WhatsAppClient] Socket lost during unreplied catch-up, aborting batch.');
+          break;
         }
 
-        console.log(`[WhatsAppClient] Answering unreplied message from ${chat.senderName} (${chat.chatJid}): "${chat.lastMessage}"`);
+        const catchupKey = `${chat.chatJid}_${chat.timestamp}`;
+        this.attemptedCatchupKeys.add(catchupKey);
 
-        // Auto-save and send self-introduction if this is the first time the bot replies to this contact
-        const saveStatus = contactService.autoSaveContact(chat.senderJid, chat.senderName);
-        if (saveStatus.needsIntroduction) {
-          contactService.markIntroduced(chat.senderJid);
-          const firstName = contactService.extractFriendlyFirstName(chat.senderName);
-          const introGreeting = firstName ? `Hi ${firstName}!` : `Hi!`;
-          const introText = `${introGreeting} I'm ${config.bot.name}, pleased to meet you. Save my contact as ${config.bot.name} — I've saved yours already.`;
+        console.log(
+          `[WhatsAppClient] [${i + 1}/${toProcess.length}] Preparing human-paced reply to ${chat.senderName} (${chat.chatJid}): "${chat.lastMessage.slice(0, 50)}"`
+        );
+
+        // 1. Online presence (only for standard JIDs, never @lid to prevent 428 disconnects)
+        if (!chat.chatJid.endsWith('@lid')) {
           try {
-            await OutboundSender.replyText(sock, chat.chatJid, introText);
-            chatLogger.logOutboundMessage(chat.chatJid, introText);
+            await this.sock.sendPresenceUpdate('available', chat.chatJid);
           } catch {}
         }
 
-        const isAudioChat = chat.contentType === 'audio' || chat.lastMessage.toLowerCase().includes('voice note');
+        // 2. Authentic human reading delay (1.5s - 3.5s) for catch-up cycle
+        const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.LIVETEST_RUNNER);
+        const catchupReadDelay = isTest ? 30 : Math.floor(1500 + Math.random() * 2000);
+        await new Promise((r) => setTimeout(r, catchupReadDelay));
+
+        // 3. Construct synthetic message for context
+        const syntheticMsg: proto.IWebMessageInfo = {
+          key: {
+            remoteJid: chat.chatJid,
+            fromMe: false,
+            id: `catchup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          },
+          messageTimestamp: Math.floor(chat.timestamp / 1000) || Math.floor(Date.now() / 1000),
+          pushName: chat.senderName,
+          message: {
+            conversation: chat.lastMessage,
+          },
+        };
+
+        const sock = this.sock;
+        const savedContact = contactService.getContact(chat.senderJid);
+        const effectiveSenderName =
+          savedContact?.custom_name ||
+          contactService.extractFriendlyFirstName(chat.senderName) ||
+          chat.senderName;
+
+        const isVoiceNote = chat.contentType === 'audio';
 
         const context: ExecutionContext = {
           sock,
           chatJid: chat.chatJid,
           senderJid: chat.senderJid,
-          senderName: chat.senderName,
+          senderName: effectiveSenderName,
           isGroup: false,
+          rawMessage: syntheticMsg,
           replyText: async (text: string) => {
-            if (isAudioChat) {
-              console.log(`[TTS] Synthesizing OGG Opus voice note reply to ${chat.senderName}...`);
-              try {
-                await sock.sendPresenceUpdate('recording', chat.chatJid);
-              } catch {}
+            if (isVoiceNote) {
+              await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, true);
               const vnBuffer = await synthesizeVoiceNote(text);
               if (vnBuffer) {
-                const res = await OutboundSender.sendAudio(sock, chat.chatJid, vnBuffer, true);
-                try {
-                  await sock.sendPresenceUpdate('paused', chat.chatJid);
-                } catch {}
-                return res;
+                return OutboundSender.sendAudio(sock, chat.chatJid, vnBuffer, true, undefined);
               }
             }
-            try {
-              await sock.sendPresenceUpdate('composing', chat.chatJid);
-            } catch {}
-            const typingDelay = Math.min(800, Math.max(250, Math.floor(text.length * 6)));
-            await new Promise((r) => setTimeout(r, typingDelay));
-            const res = await OutboundSender.replyText(sock, chat.chatJid, text);
-            try {
-              await sock.sendPresenceUpdate('paused', chat.chatJid);
-            } catch {}
-            return res;
+            await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, false);
+            return OutboundSender.replyText(sock, chat.chatJid, text, undefined);
           },
           sendSticker: async () => false,
           sendImage: (bufferOrUrl: Buffer | string, caption?: string) =>
-            OutboundSender.sendImage(sock, chat.chatJid, bufferOrUrl, caption),
-          sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) =>
-            OutboundSender.sendAudio(sock, chat.chatJid, bufferOrUrl, isVoiceNote),
+            OutboundSender.sendImage(sock, chat.chatJid, bufferOrUrl, caption, undefined),
+          sendAudio: (bufferOrUrl: Buffer | string, isVN?: boolean) =>
+            OutboundSender.sendAudio(sock, chat.chatJid, bufferOrUrl, isVN, undefined),
           sendVideo: (bufferOrUrl: Buffer | string, caption?: string) =>
-            OutboundSender.sendVideo(sock, chat.chatJid, bufferOrUrl, caption),
+            OutboundSender.sendVideo(sock, chat.chatJid, bufferOrUrl, caption, undefined),
           sendContact: (displayName: string, phoneNumber: string) =>
-            OutboundSender.sendContact(sock, chat.chatJid, displayName, phoneNumber),
+            OutboundSender.sendContact(sock, chat.chatJid, displayName, phoneNumber, undefined),
         };
 
-      try {
-        await agentHarness.handleMessage(chat.lastMessage, context);
-        repliedCount++;
-        details.push(`Replied to ${chat.senderName} (${chat.chatJid})`);
-        await new Promise((r) => setTimeout(r, 2000));
-      } catch (err: any) {
-        console.error(`[WhatsAppClient] Error replying to unreplied chat ${chat.chatJid}:`, err.message);
-      }
-    }
-
-    // 2. Process saved contacts who reached out (auto-saved or active session) with 0 bot replies
-    const uncontacted = contactService.getUncontactedContacts([cleanBotId, '271614570692796', '2349014896714']);
-    for (const c of uncontacted) {
-      if (c.jid.includes(cleanBotId) || c.jid.startsWith('271614570692796') || c.jid.includes('2349014896714')) {
-        continue;
-      }
-
-      const sessionFile = path.join(config.paths.sessions, `session-${c.phone_number}.0.json`);
-      const hasActiveSession = fs.existsSync(sessionFile);
-
-      // Double-check no bot message was logged
-      if (chatLogger.hasBotRepliedAfter(c.jid, 0)) continue;
-
-      const hasInbound = db.prepare(`SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid != 'bot' LIMIT 1`).get(c.jid);
-
-      // Contact reached out if they sent an inbound message or have an active encryption session
-      if (hasInbound || hasActiveSession) {
-
-        const firstName = contactService.extractFriendlyFirstName(c.custom_name || c.display_name);
-        console.log(`[WhatsAppClient] Sending self-introduction & follow-up to uncontacted contact: ${c.display_name} (${c.jid})`);
-
-        const greeting = `${firstName ? `Hi ${firstName}!` : 'Hi!'} I'm ${config.bot.name}, pleased to meet you. Save my contact as ${config.bot.name} — I've saved yours already. Saw you reached out earlier, how far?`;
-
         try {
-          await OutboundSender.replyText(sock, c.jid, greeting);
-          chatLogger.logOutboundMessage(c.jid, greeting);
-          contactService.markIntroduced(c.jid);
+          await agentHarness.handleMessage(chat.lastMessage, context);
           repliedCount++;
-          details.push(`Introduced & followed up with ${c.display_name} (${c.jid})`);
-          await new Promise((r) => setTimeout(r, 2000));
+          repliedNames.push(effectiveSenderName);
+          console.log(`[WhatsAppClient] ✅ Successfully caught up with ${effectiveSenderName}.`);
         } catch (err: any) {
-          console.error(`[WhatsAppClient] Error sending follow-up to ${c.jid}:`, err.message);
+          console.error(`[WhatsAppClient] Error replying to ${chat.senderName}:`, err.message);
+        }
+
+        // 4. Human inter-chat pause between different contacts (22s - 36s)
+        if (i < toProcess.length - 1) {
+          const interChatPause = isTest ? 100 : Math.floor(22000 + Math.random() * 14000);
+          console.log(
+            `[WhatsAppClient] ⏳ Human pacing: resting ${(interChatPause / 1000).toFixed(1)}s before replying to next chat...`
+          );
+          await new Promise((r) => setTimeout(r, interChatPause));
         }
       }
-    }
 
-    // 3. Scan sessions folder for external peers that initiated contact but were missed
-    try {
-      if (fs.existsSync(config.paths.sessions)) {
-        const sessionFiles = fs.readdirSync(config.paths.sessions);
-        for (const file of sessionFiles) {
-          const match = file.match(/^session-(\d+)\.0\.json$/);
-          if (match) {
-            const num = match[1];
-            if (num === cleanBotId || num.startsWith('271614570692796') || num === '2349014896714') {
-              continue;
-            }
-            const targetJid = num.length > 13 ? `${num}@lid` : `${num}@s.whatsapp.net`;
-            if (chatLogger.hasBotRepliedAfter(targetJid, 0)) {
-              continue;
-            }
-
-            console.log(`[WhatsAppClient] Sending self-introduction & follow-up to session peer ${targetJid}...`);
-            const followUp = `Hi! I'm ${config.bot.name}, pleased to meet you. Save my contact as ${config.bot.name} — I've saved yours already. Saw your message earlier, how far?`;
-
-            try {
-              await OutboundSender.replyText(sock, targetJid, followUp);
-              chatLogger.logOutboundMessage(targetJid, followUp);
-              contactService.autoSaveContact(targetJid, `User +${num}`);
-              contactService.markIntroduced(targetJid);
-              repliedCount++;
-              details.push(`Introduced & followed up with session peer (${targetJid})`);
-              await new Promise((r) => setTimeout(r, 2000));
-            } catch (err: any) {
-              console.warn(`[WhatsAppClient] Could not reach session peer ${targetJid}:`, err.message);
-            }
-          }
-        }
-      }
-    } catch (err: any) {
-      console.error('[WhatsAppClient] Error scanning session files:', err.message);
-    }
-
-      const summary = repliedCount > 0
-        ? `Checked contacts and successfully replied to ${repliedCount} unreplied message(s):\n${details.map(d => `• ${d}`).join('\n')}`
-        : 'Scanned all contacts and chat logs: all contacts are up to date with zero unreplied messages.';
-
-      console.log(`[WhatsAppClient] ${summary}`);
-      return { repliedCount, summary };
+      const summary = `Successfully replied to ${repliedCount} contact(s) with human-like pacing: ${repliedNames.join(', ') || 'None'}. Remaining unreplied: ${Math.max(0, genuineChats.length - repliedCount)}.`;
+      console.log(`[WhatsAppClient] 🏁 Unreplied catch-up complete: ${summary}`);
+      return {
+        repliedCount,
+        summary,
+      };
     } finally {
       this.isScanningUnreplied = false;
     }

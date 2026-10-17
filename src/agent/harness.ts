@@ -1,4 +1,4 @@
-import { groq } from './groq.js';
+import { llmClient } from './llm-client.js';
 import { config } from '../config/env.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { ExecutionContext } from '../plugins/types.js';
@@ -11,68 +11,30 @@ const EMOJI_SEQUENCE_REGEX =
   /(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0F|\p{Emoji_Modifier})?)*/gu;
 
 export class AgentHarness {
-  private modelCooldowns: Map<string, number> = new Map();
-
-  private async callGroq(params: any): Promise<any> {
-    const candidateModels = [
-      params.model || config.groq.model,
-      'openai/gpt-oss-20b',
-      'qwen/qwen3.8-27b',
-      'openai/gpt-oss-120b',
-    ].filter((m, i, arr) => arr.indexOf(m) === i);
-
-    // Prioritize models not currently in cooldown due to 429
-    const now = Date.now();
-    const sortedCandidates = [...candidateModels].sort((a, b) => {
-      const aCd = this.modelCooldowns.get(a) || 0;
-      const bCd = this.modelCooldowns.get(b) || 0;
-      if (aCd > now && bCd <= now) return 1;
-      if (bCd > now && aCd <= now) return -1;
-      return 0;
-    });
-
-    let lastError: any = null;
-    for (const model of sortedCandidates) {
-      try {
-        return await groq.chat.completions.create({
-          ...params,
-          model,
-        });
-      } catch (err: any) {
-        lastError = err;
-        if (
-          err?.status === 429 ||
-          err?.message?.includes('Rate limit') ||
-          err?.message?.includes('rate_limit_exceeded') ||
-          err?.message?.includes('TPD')
-        ) {
-          this.modelCooldowns.set(model, Date.now() + 60_000);
-          console.warn(`[AgentHarness] ⚠️ Model ${model} returned 429 rate limit (cooling down for 60s), switching to next model...`);
-          continue;
-        }
-        if (
-          err?.status === 400 ||
-          err?.status === 404 ||
-          (typeof err?.status === 'number' && err.status >= 500) ||
-          err?.message?.includes('tool_use_failed') ||
-          err?.message?.includes('model_not_found')
-        ) {
-          console.warn(`[AgentHarness] ⚠️ Model ${model} returned ${err?.status || 'error'}, switching to next fallback model...`);
-          continue;
-        }
-        throw err;
-      }
+  /**
+   * Conversational turns run through the active pinned model (DeepSeek V3 on OpenRouter or Qwen 3.8 on Groq)
+   * to ensure a single, consistent persona that strictly adheres to the learned exemplars and rules.
+   */
+  private async callLLM(params: any): Promise<any> {
+    const model = llmClient.getModel();
+    try {
+      return await llmClient.chatCompletion({ ...params, model });
+    } catch (err: any) {
+      console.warn(
+        `[AgentHarness] ⚠️ Model ${model} execution failed: ${String(err?.message || err).slice(0, 160)}`
+      );
+      throw err;
     }
-    throw lastError;
   }
 
   public async handleMessage(
     userMessage: string,
     context: ExecutionContext
   ): Promise<void> {
-    if (!config.groq.apiKey) {
+    const hasKey = config.groq.apiKey || config.gemini.apiKey || config.openrouter.apiKey;
+    if (!hasKey) {
       await context.replyText(
-        '⚠️ Groq API key is not configured. Please set GROQ_API_KEY in your .env file.'
+        '⚠️ No LLM API key (GROQ_API_KEY or GEMINI_API_KEY) is configured in your .env file.'
       );
       return;
     }
@@ -87,7 +49,7 @@ export class AgentHarness {
 
     console.log(`[AgentHarness] Managed context built with ~${tokenBudgetUsed} estimated tokens.`);
 
-    const tools = pluginRegistry.getGroqToolDefinitions();
+    const tools = pluginRegistry.getRelevantToolDefinitions(userMessage, context.isGroup);
     const executedTools = new Set<string>();
     const toolOutputs: string[] = [];
     let voiceNoteSentSuccessfully = false;
@@ -95,15 +57,10 @@ export class AgentHarness {
     try {
       const activeTools = tools.length > 0 ? (tools as any) : undefined;
 
-      const response = await this.callGroq({
-        model: config.groq.model,
+      const response = await this.callLLM({
         messages: messages,
         tools: activeTools,
         tool_choice: activeTools ? 'auto' : undefined,
-        temperature: config.groq.temperature,
-        max_completion_tokens: config.groq.maxTokens,
-        top_p: config.groq.topP,
-        reasoning_effort: config.groq.reasoningEffort as any,
       });
 
       const choice = response.choices[0];
@@ -160,12 +117,14 @@ export class AgentHarness {
           return;
         }
 
-        // Synthesize final natural WhatsApp response from the gathered tool results without re-triggering tool calls
-        const nowStr = new Date().toUTCString();
-        const synthesisSystem = `You are ${config.bot.name}, created by Ademola (${config.bot.creator}), an aspiring ML/AI Engineer. Current Date: ${nowStr}. Reply naturally like a real WhatsApp user chatting with a friend. Strictly max 0-1 emoji, zero robotic AI cliches. If asked about your creator, always mention Ademola is an aspiring ML/AI Engineer. Combine the live tool data below with your own knowledge to answer the user's question directly and confidently in 1-3 sentences. NEVER say "in the search results", "based on the search", or claim you cannot see something in the results—just answer directly like a knowledgeable friend.`;
+        // Synthesize final natural WhatsApp response from the gathered tool results without re-triggering tool calls.
+        // Reuse the FULL persona prompt (rules + learned dialogue exemplars + memories) so post-tool replies keep the trained voice.
+        const synthesisSystem = `${messages[0]?.content || ''}
+
+# Answering With Live Tool Data:
+Combine the live tool data in the user's last message with your own knowledge and answer directly and confidently in 1-3 sentences, in the same voice as the exemplars above. NEVER say "in the search results", "based on the search", or claim you cannot see something in the results. Just answer like a knowledgeable friend texting back.`;
         const historyContext = messages.slice(1, -1);
-        const synthesisRes = await this.callGroq({
-          model: config.groq.model,
+        const synthesisRes = await this.callLLM({
           messages: [
             { role: 'system', content: synthesisSystem },
             ...historyContext,
@@ -174,9 +133,8 @@ export class AgentHarness {
               content: `${context.senderName}: ${userMessage}\n\n[Live Tool Data]:\n${toolOutputs.join('\n\n')}`,
             },
           ],
-          temperature: config.groq.temperature,
-          max_completion_tokens: config.groq.maxTokens,
-          reasoning_effort: config.groq.reasoningEffort as any,
+          tools: undefined,
+          tool_choice: undefined,
         });
 
         const synthMsg = synthesisRes.choices[0]?.message;
@@ -215,19 +173,30 @@ export class AgentHarness {
     } catch (err: any) {
       console.error('[AgentHarness] Error in reasoning loop:', err.message || err);
 
+      const isSocketError =
+        err.message?.includes('Closed') ||
+        err.message?.includes('Terminated') ||
+        err.message?.includes('1006') ||
+        err.message?.includes('ECONNRESET') ||
+        err.message?.includes('timed out');
+
+      if (isSocketError) {
+        console.warn('[AgentHarness] Aborting reasoning fallback: socket is disconnected or task timed out.');
+        return;
+      }
+
       // Fail-safe fallback: Answer directly from pre-trained knowledge without tools
       try {
         console.log('[AgentHarness] Attempting fail-safe direct knowledge answer...');
-        const fallbackSystem = `You are ${config.bot.name}, created by Ademola (${config.bot.creator}), an aspiring ML/AI Engineer. Current Date: ${new Date().toUTCString()}. Reply naturally like a real WhatsApp user chatting with a friend. Max 0-1 emoji, zero robotic AI cliches. If asked about your creator, always mention Ademola is an aspiring ML/AI Engineer. Deliver a direct, crisp reply based on your knowledge.`;
-        const fallbackRes = await this.callGroq({
-          model: config.groq.model,
+        // Same pinned model, same persona prompt, just without tools (recovers from malformed tool calls)
+        const fallbackSystem = `${messages[0]?.content || ''}\n\nTools are unavailable for this turn. Deliver a direct, crisp reply from your own knowledge.`;
+        const fallbackRes = await this.callLLM({
           messages: [
             { role: 'system', content: fallbackSystem },
             { role: 'user', content: `${context.senderName}: ${userMessage}` },
           ],
-          temperature: config.groq.temperature,
-          max_completion_tokens: config.groq.maxTokens,
-          reasoning_effort: config.groq.reasoningEffort as any,
+          tools: undefined,
+          tool_choice: undefined,
         });
 
         const rawFallbackText = fallbackRes.choices[0]?.message?.content;
@@ -247,8 +216,6 @@ export class AgentHarness {
       } catch (fbErr: any) {
         console.error('[AgentHarness] Fallback also failed:', fbErr.message);
       }
-
-      await context.replyText('network slow small, abeg try again in a sec');
     } finally {
       try {
         await context.sock.sendPresenceUpdate('paused', context.chatJid);
@@ -335,15 +302,17 @@ export function sanitizeAssistantResponse(text: string): string {
   let cleaned = text.trim();
 
   // Strip robotic preamble clichés (peel chained preambles like "Sure thing! As an AI, ...")
-  const preambleRegex = /^(?:as an ai(?:\s+language\s+model)?|as a language model|certainly|sure thing|i'm here to assist(?:\s+you)?|i am here to assist(?:\s+you)?|i'm here to help|i am here to help|happy to help|glad to help|i am happy to help|i'm happy to help)[\s,.:;!-]+/i;
+  const preambleRegex =
+    /^(?:as an ai(?:\s+language\s+model)?|as a language model|certainly|sure thing|sure|of course|alright|no problem|i'd be happy to(?:\s+assist|\s+help)?|i would be happy to(?:\s+assist|\s+help)?|i'm here to assist(?:\s+you)?|i am here to assist(?:\s+you)?|i'm here to help|i am here to help|happy to help|glad to help|i am happy to help|i'm happy to help)[\s,.:;!-]+/i;
   while (preambleRegex.test(cleaned)) {
     cleaned = cleaned.replace(preambleRegex, '').trim();
   }
 
   // Strip trailing robotic closing clichés & assistant offers (preserving previous sentence punctuation)
   cleaned = cleaned
-    .replace(/(?:\s+)(?:(?:how|what)\s+can\s+i\s+(?:help|assist)\s+(?:you\s+)?(?:with|today)?\??|is there anything else i can assist (?:you with\??|with\??)|let me know if you (?:need|want) (?:anything|more|any)[^.!?]*[.!?]?|feel free to (?:ask|reach out)[^.!?]*[.!?]?|i hope this helps\.?)$/i, '')
-    .replace(/(?:\s+)(?:if you (?:ever )?hit a snag[^.!?]*[.!?]?|if you need a quick tool run[^.!?]*[.!?]?|anything specific you wanna dive into[^.!?]*\??|just let me know if you need anything[^.!?]*[.!?]?)$/i, '')
+    .replace(/(?:\s+)(?:(?:how|what)\s+can\s+i\s+(?:help|assist)\s+(?:you\s+)?(?:with|today)?\??|is there anything else i can assist (?:you with\??|with\??)|is there anything else i can do(?: for you)?\??|feel free to (?:ask|reach out)[^.!?]*[.!?]?|i hope this helps\.?)$/i, '')
+    .replace(/(?:\s+)(?:if you (?:ever )?hit a snag[^.!?]*[.!?]?|if you need a quick tool run[^.!?]*[.!?]?|anything specific you wanna dive into[^.!?]*\??|don't hesitate to (?:ask|reach out)[^.!?]*[.!?]?)$/i, '')
+    .replace(/(?:\s+)(?:(?:just\s+)?let\s+me\s+know[^.!?]*[.!?]?|anything (?:i|we) fit do for you\??|anything else you need sorted\??|anything you need sorted\??|maybe i can help\.?|i'm here(?:—|--|-|\s+)maybe i can help\.?|wetin you want make i do for you\??)$/i, '')
     .replace(/^(?:how can i help you today\??|what can i help you with\??|how can i assist you\??)$/i, '')
     .trim();
 

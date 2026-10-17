@@ -16,12 +16,15 @@ export class WebSearchPlugin implements IPlugin {
             type: 'string',
             description: 'The search query or keywords to look up on the web.',
           },
+          q: {
+            type: 'string',
+            description: 'Alternative search query parameter.',
+          },
         },
-        required: ['query'],
       },
-      execute: async (args: { query: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (args: { query?: string; q?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
-          const rawQuery = (args.query || '').trim();
+          const rawQuery = (args.query || args.q || '').trim();
           console.log(`[WebSearch] Performing web lookup: "${rawQuery}"`);
 
           // 1. Ultra-fast real-time crypto price lookup (<200ms)

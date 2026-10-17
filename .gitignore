@@ -6,6 +6,7 @@ dist/
 
 # WhatsApp Auth Sessions (DO NOT COMMIT)
 sessions/
+sessions_*/
 *.session.json
 
 # Local Data & SQLite DB

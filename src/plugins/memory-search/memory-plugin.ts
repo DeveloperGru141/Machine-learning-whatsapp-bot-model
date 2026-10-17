@@ -60,10 +60,17 @@ export class MemoryPlugin implements IPlugin {
         required: ['fact'],
       },
       execute: async (args: { fact: string; category?: string; isForGroup?: boolean }, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!args.fact || typeof args.fact !== 'string' || args.fact.trim().length === 0) {
+          return {
+            success: false,
+            message: 'No valid fact provided to remember.',
+          };
+        }
+
         if (args.isForGroup && ctx.isGroup) {
-          memoryService.saveGroupFact(ctx.chatJid, args.fact, args.fact);
+          memoryService.saveGroupFact(ctx.chatJid, args.fact.trim(), args.fact.trim());
         } else {
-          memoryService.saveUserFact(ctx.senderJid, args.fact, args.category || 'general');
+          memoryService.saveUserFact(ctx.senderJid, args.fact.trim(), args.category || 'general');
         }
 
         return {

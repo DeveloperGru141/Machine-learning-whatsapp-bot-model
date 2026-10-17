@@ -5,8 +5,14 @@ import path from 'path';
 dotenv.config({ override: true });
 
 const envSchema = z.object({
-  GROQ_API_KEY: z.string().min(1, 'GROQ_API_KEY is required for the agentic harness'),
-  GROQ_MODEL: z.string().default('openai/gpt-oss-120b'),
+  LLM_PROVIDER: z.enum(['gemini', 'openrouter', 'groq']).default('gemini'),
+  GEMINI_MODEL: z.string().default('gemini-3.5-flash-lite'),
+  OPENROUTER_API_KEY: z.string().optional(),
+  OPENROUTER_MODEL: z.string().default('deepseek/deepseek-chat'),
+  OPENROUTER_TEMPERATURE: z.coerce.number().default(0.7),
+  OPENROUTER_MAX_TOKENS: z.coerce.number().default(2048),
+  GROQ_API_KEY: z.string().optional().default(''),
+  GROQ_MODEL: z.string().default('qwen/qwen3.8-27b'),
   GROQ_TEMPERATURE: z.coerce.number().default(0.7),
   GROQ_MAX_TOKENS: z.coerce.number().default(2048),
   GROQ_TOP_P: z.coerce.number().default(1),
@@ -20,7 +26,7 @@ const envSchema = z.object({
     val.split(',').map((s) => s.trim()).filter(Boolean)
   ),
   PAIRING_METHOD: z.enum(['code', 'qr']).default('code'),
-  PAIRING_PHONE_NUMBER: z.string().default(''),
+  PAIRING_PHONE_NUMBER: z.string().default('09014896714'),
   SESSIONS_DIR: z.string().default('./sessions'),
   DATABASE_PATH: z.string().default('./data/bot.sqlite'),
 });
@@ -48,7 +54,7 @@ export function normalizePhoneNumber(raw: string): string {
   return digits;
 }
 
-const rawOwners = (process.env.BOT_OWNERS || '')
+const rawOwners = (process.env.BOT_OWNERS || '08108574293,2348108574293,102409552584830@lid')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
@@ -64,13 +70,27 @@ const normalizedOwners = Array.from(
 );
 
 export const config = {
+  llm: {
+    provider: (process.env.LLM_PROVIDER || 'groq') as 'gemini' | 'openrouter' | 'groq',
+  },
+  openrouter: {
+    apiKey: process.env.OPENROUTER_API_KEY || '',
+    model: process.env.OPENROUTER_MODEL || 'deepseek/deepseek-chat',
+    temperature: Number(process.env.OPENROUTER_TEMPERATURE ?? 0.7),
+    maxTokens: Number(process.env.OPENROUTER_MAX_TOKENS ?? 2048),
+  },
   groq: {
-    apiKey: process.env.GROQ_API_KEY || '',
-    model: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
+    apiKey: (process.env.GROQ_API_KEY || '').split(',')[0]?.trim() || '',
+    apiKeys: (process.env.GROQ_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean),
+    model: process.env.GROQ_MODEL || 'qwen/qwen3.8-27b',
     temperature: Number(process.env.GROQ_TEMPERATURE ?? 0.7),
-    maxTokens: Number(process.env.GROQ_MAX_TOKENS ?? 2048),
+    maxTokens: Number(process.env.GROQ_MAX_TOKENS ?? 512),
     topP: Number(process.env.GROQ_TOP_P ?? 1),
     reasoningEffort: process.env.GROQ_REASONING_EFFORT || 'low',
+  },
+  cerebras: {
+    apiKey: process.env.CEREBRAS_API_KEY || '',
+    model: process.env.CEREBRAS_MODEL || 'llama3.3-70b',
   },
   bot: {
     name: process.env.BOT_NAME || 'Forgelabs assistant',
@@ -79,10 +99,11 @@ export const config = {
     voice: process.env.BOT_VOICE || 'en-NG-AbeoNeural',
     owners: normalizedOwners,
     pairingMethod: (process.env.PAIRING_METHOD as 'code' | 'qr') || 'code',
-    pairingPhoneNumber: normalizePhoneNumber(process.env.PAIRING_PHONE_NUMBER || ''),
+    pairingPhoneNumber: normalizePhoneNumber(process.env.PAIRING_PHONE_NUMBER || '09014896714'),
   },
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',
+    model: process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
   },
   paths: {
     sessions: path.resolve(process.env.SESSIONS_DIR || './sessions'),

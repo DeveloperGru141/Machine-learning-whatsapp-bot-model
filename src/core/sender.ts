@@ -1,22 +1,102 @@
 import type { WASocket, proto } from '@whiskeysockets/baileys';
 import fs from 'fs';
+import { antiBanEngine } from '../security/anti-ban.js';
+import { chatLogger } from '../memory/chat-logger.js';
+
+let activeSocketGetter: (() => WASocket | null) | null = null;
+export function setActiveSocketGetter(getter: () => WASocket | null) {
+  activeSocketGetter = getter;
+}
 
 export class OutboundSender {
+  /**
+   * Verifies outbound safety with the Anti-Ban Engine before dispatching.
+   */
+  private static checkSafety(chatJid: string, quoted?: proto.IWebMessageInfo, isOwnerCommand?: boolean, isProactiveCheckIn?: boolean): boolean {
+    const isGroup = chatJid.endsWith('@g.us');
+    const check = antiBanEngine.canSendOutbound({
+      chatJid,
+      isGroup,
+      isReplyToInbound: Boolean(quoted),
+      isGroupMention: Boolean(quoted),
+      isOwnerCommand,
+      isProactiveCheckIn,
+    });
+
+    if (!check.allowed) {
+      console.warn(`[OutboundSender] 🛡️ Discarded outbound to ${chatJid}: ${check.reason}`);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Linked IDs (@lid) and messages with @lid remoteJid/participant do NOT support stanza quoting
+   * in WhatsApp multi-device. Passing quoted causes WhatsApp server to terminate the connection (428 Connection Terminated).
+   */
+  private static sanitizeQuoted(chatJid: string, quoted?: proto.IWebMessageInfo): proto.IWebMessageInfo | undefined {
+    if (!quoted) return undefined;
+    if (
+      chatJid.endsWith('@lid') ||
+      quoted.key?.remoteJid?.endsWith('@lid') ||
+      quoted.key?.participant?.endsWith('@lid')
+    ) {
+      return undefined;
+    }
+    return quoted;
+  }
+
   public static async replyText(
     sock: WASocket,
     chatJid: string,
     text: string,
-    quoted?: proto.IWebMessageInfo
+    quoted?: proto.IWebMessageInfo,
+    isOwnerCommand?: boolean,
+    isProactiveCheckIn?: boolean
   ): Promise<any> {
-    try {
-      return await sock.sendMessage(chatJid, { text }, { quoted });
-    } catch (err: any) {
-      if (quoted) {
-        console.warn(`[OutboundSender] Reply with quoted failed (${err.message}), retrying direct text...`);
-        return await sock.sendMessage(chatJid, { text });
+    if (!this.checkSafety(chatJid, quoted, isOwnerCommand, isProactiveCheckIn)) return null;
+
+    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
+
+    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+      let currentSock = sock || activeSocketGetter?.();
+      try {
+        const result = await currentSock.sendMessage(chatJid, { text }, { quoted: safeQuoted });
+        chatLogger.logOutboundMessage(chatJid, text);
+        return result;
+      } catch (err: any) {
+        if (safeQuoted) {
+          console.warn(`[OutboundSender] Reply with quoted failed (${err.message}), retrying direct text...`);
+          try {
+            const result = await currentSock.sendMessage(chatJid, { text });
+            chatLogger.logOutboundMessage(chatJid, text);
+            return result;
+          } catch (innerErr: any) {
+            err = innerErr;
+          }
+        }
+
+        // Self-Healing Outbound: If connection was dropped/closed, wait for socket to reconnect and retry once!
+        const isSocketDrop =
+          err.message?.includes('Closed') ||
+          err.message?.includes('Terminated') ||
+          err.message?.includes('1006') ||
+          err.message?.includes('ECONNRESET');
+
+        if (isSocketDrop && activeSocketGetter) {
+          console.warn(`[OutboundSender] Socket disconnected while sending to ${chatJid}. Waiting 1.2s for reconnect before retry...`);
+          await new Promise((r) => setTimeout(r, 1200));
+          const freshSock = activeSocketGetter();
+          if (freshSock && (freshSock as any).ws?.isOpen) {
+            console.log(`[OutboundSender] 🔄 Retrying outbound to ${chatJid} via fresh reconnected socket...`);
+            const retryResult = await freshSock.sendMessage(chatJid, { text });
+            chatLogger.logOutboundMessage(chatJid, text);
+            return retryResult;
+          }
+        }
+        throw err;
       }
-      throw err;
-    }
+    });
   }
 
   public static async sendSticker(
@@ -25,15 +105,20 @@ export class OutboundSender {
     bufferOrPath: Buffer | string,
     quoted?: proto.IWebMessageInfo
   ): Promise<any> {
+    if (!this.checkSafety(chatJid, quoted)) return null;
+
+    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
     const buffer = typeof bufferOrPath === 'string'
       ? fs.readFileSync(bufferOrPath)
       : bufferOrPath;
 
-    return await sock.sendMessage(
-      chatJid,
-      { sticker: buffer },
-      { quoted }
-    );
+    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+      return await sock.sendMessage(
+        chatJid,
+        { sticker: buffer },
+        { quoted: safeQuoted }
+      );
+    });
   }
 
   public static async sendImage(
@@ -43,23 +128,28 @@ export class OutboundSender {
     caption?: string,
     quoted?: proto.IWebMessageInfo
   ): Promise<any> {
+    if (!this.checkSafety(chatJid, quoted)) return null;
+
+    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
     const content = Buffer.isBuffer(bufferOrUrl)
       ? bufferOrUrl
       : { url: bufferOrUrl };
 
-    try {
-      return await sock.sendMessage(
-        chatJid,
-        { image: content, caption },
-        { quoted }
-      );
-    } catch (err: any) {
-      if (quoted) {
-        console.warn(`[OutboundSender] sendImage with quoted failed (${err.message}), retrying directly...`);
-        return await sock.sendMessage(chatJid, { image: content, caption });
+    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+      try {
+        return await sock.sendMessage(
+          chatJid,
+          { image: content, caption },
+          { quoted: safeQuoted }
+        );
+      } catch (err: any) {
+        if (safeQuoted) {
+          console.warn(`[OutboundSender] sendImage with quoted failed (${err.message}), retrying directly...`);
+          return await sock.sendMessage(chatJid, { image: content, caption });
+        }
+        throw err;
       }
-      throw err;
-    }
+    });
   }
 
   public static async sendAudio(
@@ -69,6 +159,9 @@ export class OutboundSender {
     isVoiceNote: boolean = false,
     quoted?: proto.IWebMessageInfo
   ): Promise<any> {
+    if (!this.checkSafety(chatJid, quoted)) return null;
+
+    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
     const content = Buffer.isBuffer(bufferOrUrl)
       ? bufferOrUrl
       : { url: bufferOrUrl };
@@ -85,27 +178,29 @@ export class OutboundSender {
       }
     }
 
-    try {
-      return await sock.sendMessage(
-        chatJid,
-        {
-          audio: content,
-          mimetype,
-          ptt: isVoiceNote,
-        },
-        { quoted }
-      );
-    } catch (err: any) {
-      if (quoted) {
-        console.warn(`[OutboundSender] sendAudio with quoted failed (${err.message}), retrying directly...`);
-        return await sock.sendMessage(chatJid, {
-          audio: content,
-          mimetype,
-          ptt: isVoiceNote,
-        });
+    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+      try {
+        return await sock.sendMessage(
+          chatJid,
+          {
+            audio: content,
+            mimetype,
+            ptt: isVoiceNote,
+          },
+          { quoted: safeQuoted }
+        );
+      } catch (err: any) {
+        if (safeQuoted) {
+          console.warn(`[OutboundSender] sendAudio with quoted failed (${err.message}), retrying directly...`);
+          return await sock.sendMessage(chatJid, {
+            audio: content,
+            mimetype,
+            ptt: isVoiceNote,
+          });
+        }
+        throw err;
       }
-      throw err;
-    }
+    });
   }
 
   public static async sendVideo(
@@ -115,31 +210,36 @@ export class OutboundSender {
     caption?: string,
     quoted?: proto.IWebMessageInfo
   ): Promise<any> {
+    if (!this.checkSafety(chatJid, quoted)) return null;
+
+    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
     const content = Buffer.isBuffer(bufferOrUrl)
       ? bufferOrUrl
       : { url: bufferOrUrl };
 
-    try {
-      return await sock.sendMessage(
-        chatJid,
-        {
-          video: content,
-          caption,
-          mimetype: 'video/mp4',
-        },
-        { quoted }
-      );
-    } catch (err: any) {
-      if (quoted) {
-        console.warn(`[OutboundSender] sendVideo with quoted failed (${err.message}), retrying directly...`);
-        return await sock.sendMessage(chatJid, {
-          video: content,
-          caption,
-          mimetype: 'video/mp4',
-        });
+    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+      try {
+        return await sock.sendMessage(
+          chatJid,
+          {
+            video: content,
+            caption,
+            mimetype: 'video/mp4',
+          },
+          { quoted: safeQuoted }
+        );
+      } catch (err: any) {
+        if (safeQuoted) {
+          console.warn(`[OutboundSender] sendVideo with quoted failed (${err.message}), retrying directly...`);
+          return await sock.sendMessage(chatJid, {
+            video: content,
+            caption,
+            mimetype: 'video/mp4',
+          });
+        }
+        throw err;
       }
-      throw err;
-    }
+    });
   }
 
   public static async sendContact(
@@ -149,6 +249,9 @@ export class OutboundSender {
     phoneNumber: string,
     quoted?: proto.IWebMessageInfo
   ): Promise<any> {
+    if (!this.checkSafety(chatJid, quoted)) return null;
+
+    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
     const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
     const vcard =
       'BEGIN:VCARD\n' +
@@ -157,16 +260,17 @@ export class OutboundSender {
       `TEL;type=CELL;type=VOICE;waid=${cleanNumber}:+${cleanNumber}\n` +
       'END:VCARD';
 
-    return await sock.sendMessage(
-      chatJid,
-      {
-        contacts: {
-          displayName,
-          contacts: [{ vcard }],
+    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+      return await sock.sendMessage(
+        chatJid,
+        {
+          contacts: {
+            displayName,
+            contacts: [{ vcard }],
+          },
         },
-      },
-      { quoted }
-    );
+        { quoted: safeQuoted }
+      );
+    });
   }
 }
-

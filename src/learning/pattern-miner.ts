@@ -48,11 +48,56 @@ export class PatternMiner {
         }
       }
 
-      // 2. Periodically update Chat Style Profile (e.g. every few messages)
+      // 2. Evaluate User Feedback to Bot Replies (Positive rewards vs Explicit disapproval)
+      // Note: If a user ignores or does not reply, it is NEVER marked as negative (silence is 100% neutral on WhatsApp).
+      if (
+        (previous.sender_jid === 'bot' || previous.sender_jid === 'Forgelabs assistant') &&
+        current.sender_jid !== 'bot' &&
+        current.sender_jid !== 'Forgelabs assistant' &&
+        current.content_type === 'text' &&
+        current.message_text
+      ) {
+        this.evaluateBotFeedback(chatJid, previous.message_text, current.message_text);
+      }
+
+      // 3. Periodically update Chat Style Profile (e.g. every few messages)
       this.updateChatStyleProfile(chatJid);
     } catch (err) {
       // Fail silently in background to avoid disrupting main loop
     }
+  }
+
+  private positiveFeedbackRegex = /\b(lol|lmao|lmfao|rofl|haha|hahaha|hehe|lwkmd|💀|😂|🤣|sharp|correct|spot on|you sabi|valid|facts|no cap|nice one|bless|thanks|thank you|good bot|smart|fire)\b/i;
+  private explicitDisapprovalRegex = /\b(shut up|you too dey talk|stop talking|stop messaging|wrong info|shut it|annoying bot|abeg keep quiet)\b/i;
+
+  /**
+   * Evaluates user reactions to previous bot responses:
+   * - Positive laughter / hype / gratitude increases exemplar quality score.
+   * - Explicit disapproval (e.g. 'shut up', 'you too dey talk') lowers quality score.
+   * - CRITICAL: When a user ignores the bot or changes topic, it is NEVER penalized. Silence is completely neutral.
+   */
+  public evaluateBotFeedback(chatJid: string, botMessageText: string | null, userReaction: string): void {
+    if (!botMessageText) return;
+    const trimmedBot = botMessageText.trim();
+
+    if (this.positiveFeedbackRegex.test(userReaction)) {
+      try {
+        db.prepare(`
+          UPDATE dialogue_exemplars
+          SET quality_score = MIN(2.5, quality_score + 0.4)
+          WHERE chat_jid = ? AND response_text = ?
+        `).run(chatJid, trimmedBot);
+      } catch {}
+    } else if (this.explicitDisapprovalRegex.test(userReaction)) {
+      try {
+        db.prepare(`
+          UPDATE dialogue_exemplars
+          SET quality_score = MAX(0.2, quality_score - 0.5)
+          WHERE chat_jid = ? AND response_text = ?
+        `).run(chatJid, trimmedBot);
+      } catch {}
+    }
+    // No penalty for being ignored or left on read - users ignore messages for any random reason.
   }
 
   private recordDialogueExemplar(chatJid: string, contextText: string, responseText: string, vibe: string): void {

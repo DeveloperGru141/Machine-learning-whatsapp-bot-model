@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import sys
+import re
 from pathlib import Path
 
 # Ensure UTF-8 output on Windows
@@ -27,20 +28,35 @@ ROBOTIC_CLICHES = [
     "how can i help",
     "what can i help",
     "can i help you",
+    "how may i assist",
+    "how can i assist",
+    "how can i be of service",
     "i'm here to assist",
     "i am here to assist",
     "i'm here to help",
     "i am here to help",
+    "i'd be happy to",
+    "i would be happy to",
+    "i would be glad to",
+    "happy to help",
+    "glad to help",
     "feel free",
     "certainly!",
     "certainly,",
     "sure thing!",
     "i hope this helps",
+    "i hope you find this helpful",
     "let me know if you need",
     "let me know if you want",
     "anything else i can",
-    "happy to help",
-    "glad to help",
+    "is there anything else",
+    "don't hesitate",
+    "do not hesitate",
+    "reach out if",
+    "further assistance",
+    "if you have any other questions",
+    "if you need further",
+    "virtual assistant",
     "an error occurred",
     "network slow small",
     "abeg try again in a sec",
@@ -152,9 +168,11 @@ def validate_and_tighten():
         "deprecated_artifact": 0,
         "inconsistent_creator": 0,
         "duplicates": 0,
+        "repetitive_response_cap": 0,
     }
 
     seen_pairs = set()
+    response_counts = {}
 
     for data in raw_candidates:
         messages = data.get("messages", [])
@@ -211,6 +229,13 @@ def validate_and_tighten():
             continue
         seen_pairs.add(pair_key)
 
+        # Rule 8: Strict Response Diversity & Repetition Cap (Max 3 identical responses)
+        resp_key = asst_lower.strip()
+        if response_counts.get(resp_key, 0) >= 3:
+            skipped_reasons["repetitive_response_cap"] += 1
+            continue
+        response_counts[resp_key] = response_counts.get(resp_key, 0) + 1
+
         # Ensure the unified system prompt is strictly enforced
         has_system = False
         for m in messages:
@@ -220,6 +245,13 @@ def validate_and_tighten():
                 break
         if not has_system:
             messages.insert(0, {"role": "system", "content": DEFAULT_SYSTEM_PROMPT})
+
+        # Format tightening for WhatsApp: strip un-conversational Markdown headers and excess spacing
+        for m in messages:
+            if m.get("role") == "assistant":
+                cleaned = re.sub(r"^#{1,6}\s+", "", m.get("content", ""), flags=re.MULTILINE)
+                cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+                m["content"] = cleaned
 
         valid_samples.append(data)
 

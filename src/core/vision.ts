@@ -10,35 +10,39 @@ export async function analyzeImageBuffer(
     prompt?.trim() ||
     'Describe this image clearly, reading any text, documents, or details present.';
 
-  // 1. Primary Engine: Gemini 2.5 Flash Vision if GEMINI_API_KEY is available
+  // 1. Primary Engine: Gemini 3.5 Flash-Lite Vision (1,500 RPD quota) if GEMINI_API_KEY is available
   const geminiKey = config.gemini.apiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (geminiKey) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                { text: userQuestion },
-                { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
-              ],
-            },
-          ],
-        }),
-      });
-      if (res.ok) {
-        const data = (await res.json()) as any;
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-        if (text) {
-          console.log(`[Vision] Read image via Gemini Vision (${text.length} chars)`);
-          return text;
+    const geminiVisionModels = ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-2.5-flash'];
+    for (const gemModel of geminiVisionModels) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${gemModel}:generateContent?key=${geminiKey}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  { text: userQuestion },
+                  { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
+                ],
+              },
+            ],
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as any;
+          const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+          if (text) {
+            console.log(`[Vision] Read image via Gemini Vision (${gemModel}, ${text.length} chars)`);
+            return text;
+          }
         }
+      } catch (err: any) {
+        console.warn(`[Vision] Gemini Vision (${gemModel}) warning:`, err.message);
       }
-    } catch (err: any) {
-      console.warn('[Vision] Gemini Vision fallback triggered:', err.message);
     }
   }
 

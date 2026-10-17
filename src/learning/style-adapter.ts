@@ -17,8 +17,11 @@ export class StyleAdapter {
     if (/\b(ademola|creator|developer|who built|who made|who coded|who owns|who created|who trained|who programmed|who runs|who is behind)\b/i.test(lower)) {
       return 'creator';
     }
-    if (/\b(who are you|what are you|your name|forgelabs|nova|are you nova|are you chatgpt|what is this bot|what can you do)\b/i.test(lower)) {
+    if (/\b(who are you|what are you|your name|forgelabs|nova|are you nova|are you chatgpt|what is this bot|what can you do|who am i|what is my name|do you know me|remember me)\b/i.test(lower)) {
       return 'identity';
+    }
+    if (/\b(micah|david|femi|contact|contacts|address book|phone number|save contact|saved contact|my contacts|who is in your)\b/i.test(lower)) {
+      return 'contacts';
     }
     if (/^(hi|hello|hey|yo|sup|good morning|gm|good afternoon|good evening|howdy)\b/i.test(lower)) {
       return 'greeting';
@@ -26,13 +29,16 @@ export class StyleAdapter {
     if (/\b(btc|bitcoin|eth|sol|price|crypto|stock|market)\b/i.test(lower)) {
       return 'crypto';
     }
-    if (/\b(how far|wetin|omo|abeg|dey craze|whine|stress|fr|lol|lmao|hehe|fire|no cap)\b/i.test(lower)) {
+    if (/\b(how far|wetin|omo|abeg|dey craze|whine|stress|fr|lol|lmao|hehe|fire|no cap|how body|you don chop|which level|how market)\b/i.test(lower)) {
       return 'slang';
     }
-    if (/\b(download|video|audio|remind|reminder|pdf|doc|document|summarize|read|vcf|contact|voice note|voicenote|vn|speak|say|tts)\b/i.test(lower)) {
+    if (/\b(download|video|audio|remind|reminder|pdf|doc|document|summarize|read|vcf|voice note|voicenote|vn|speak|say|tts|scrape|link|url|website|article)\b/i.test(lower)) {
       return 'tools';
     }
-    return null;
+    if (/\b(check in|checking in|checking up|check up|dropped|follow up|following up|saying hi|say hi|haven't heard|how have you been|how you dey|long time|quiet here|how did that go|update on)\b/i.test(lower)) {
+      return 'followup';
+    }
+    return 'slang';
   }
 
   public getStyleContext(chatJid: string, incomingText?: string): StyleAdapterContext {
@@ -46,14 +52,14 @@ export class StyleAdapter {
     let styleGuidance = '';
     if (profile) {
       if (profile.formality_style === 'short_punchy') {
-        styleGuidance = `Chat Vibe: Fast-paced & direct. Keep replies short (1-2 sentences), natural, zero fluff, NO emoji spam.`;
+        styleGuidance = `Chat Cadence: Short, snappy (1-2 sentences). Pure Nigerian WhatsApp flow, zero AI cliches, 0-1 emoji max.`;
       } else if (profile.formality_style === 'detailed') {
-        styleGuidance = `Chat Vibe: Thoughtful and clear. Explain concepts simply without robotic jargon, NO emoji spam.`;
+        styleGuidance = `Chat Cadence: Clear and punchy. Explain simply without robotic jargon, 0-1 emoji max.`;
       } else {
-        styleGuidance = `Chat Vibe: Natural, relaxed WhatsApp banter. Authentic friend vibe, sharp, witty, NO emoji spam (0 to 1 emoji max).`;
+        styleGuidance = `Chat Cadence: Authentic WhatsApp banter. Sharp, witty, friendly friend vibe, 0-1 emoji max.`;
       }
     } else {
-      styleGuidance = `Chat Vibe: Authentic WhatsApp user cadence. Short, sharp, friendly, zero AI clichés, NO emoji spam.`;
+      styleGuidance = `Chat Cadence: Natural WhatsApp peer flow. Crisp, witty, zero customer-service tropes, 0-1 emoji max.`;
     }
 
     // 2. Fetch targeted few-shot exemplars: Match user intent first, then backfill general exemplars
@@ -73,20 +79,20 @@ export class StyleAdapter {
       exemplars.push(...targeted);
     }
 
-    const remainingSlots = 6 - exemplars.length;
+    const remainingSlots = 5 - exemplars.length;
     if (remainingSlots > 0) {
       const existingContexts = new Set(exemplars.map((e) => e.context_text));
       const general = db.prepare(`
         SELECT context_text, response_text, response_type
         FROM dialogue_exemplars
         WHERE response_type != 'sticker' AND response_text IS NOT NULL AND response_text != ''
-          ${targetVibe ? 'AND vibe_classification != ?' : ''}
+          AND vibe_classification IN ('slang', 'casual', 'creator')
         ORDER BY quality_score DESC, RANDOM()
-        LIMIT ?
-      `).all(...(targetVibe ? [targetVibe, remainingSlots + 2] : [remainingSlots + 2])) as Array<{ context_text: string; response_text: string; response_type: string }>;
+        LIMIT 6
+      `).all() as Array<{ context_text: string; response_text: string; response_type: string }>;
 
       for (const g of general) {
-        if (!existingContexts.has(g.context_text) && exemplars.length < 6) {
+        if (!existingContexts.has(g.context_text) && exemplars.length < 5) {
           exemplars.push(g);
           existingContexts.add(g.context_text);
         }

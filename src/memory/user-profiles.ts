@@ -13,6 +13,39 @@ export interface UserProfile {
 }
 
 export class UserProfileManager {
+  constructor() {
+    this.seedOwners();
+  }
+
+  /**
+   * Seeds configured bot owners into user_profiles and contacts with Ademola identity.
+   */
+  public seedOwners(): void {
+    const now = Date.now();
+    for (const rawOwner of config.bot.owners) {
+      if (!rawOwner) continue;
+      const normDigits = normalizePhoneNumber(rawOwner);
+      const jid = rawOwner.endsWith('@lid') ? rawOwner : `${normDigits}@s.whatsapp.net`;
+      try {
+        db.prepare(`
+          INSERT INTO user_profiles (user_jid, display_name, preferred_language, personality_notes, first_seen, last_seen, total_messages, is_owner)
+          VALUES (?, 'Ademola', 'en', 'Creator and Owner of Forgelabs Assistant', ?, ?, 0, 1)
+          ON CONFLICT(user_jid) DO UPDATE SET is_owner = 1, display_name = 'Ademola'
+        `).run(jid, now, now);
+
+        if (!jid.endsWith('@lid') && normDigits) {
+          db.prepare(`
+            INSERT INTO contacts (phone_number, jid, display_name, custom_name, notes, tags, is_auto_saved, is_introduced, created_at, updated_at)
+            VALUES (?, ?, 'Ademola', 'Ademola', 'Creator and Owner of Forgelabs Assistant', 'owner,creator', 0, 1, ?, ?)
+            ON CONFLICT(jid) DO UPDATE SET display_name = 'Ademola', custom_name = 'Ademola', notes = 'Creator and Owner of Forgelabs Assistant'
+          `).run(normDigits, jid, now, now);
+        }
+      } catch (err: any) {
+        // Safe ignore
+      }
+    }
+  }
+
   /**
    * Determines if a user is an authorized bot owner.
    * Checks database `is_owner` flag OR environment `config.bot.owners`.

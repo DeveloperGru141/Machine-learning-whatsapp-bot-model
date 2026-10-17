@@ -62,17 +62,45 @@ export async function synthesizeVoiceNote(
     // Write text to temp file to avoid shell escaping issues
     fs.writeFileSync(tempTextFile, spokenText, 'utf-8');
 
-    // Run edge-tts with natural conversational pacing (+3% rate)
+    // Run edge-tts with cross-platform Linux/Windows support (python3 / python / edge-tts CLI)
     const selectedVoice = voice || config.bot.voice || 'en-NG-AbeoNeural';
-    const cmd = `python -m edge_tts --voice "${selectedVoice}" --rate="+3%" -f "${tempTextFile}" --write-media "${tempMp3File}"`;
+    const runners = ['edge-tts', 'python3 -m edge_tts', 'python -m edge_tts'];
+
+    const runEdgeTts = async (targetVoice: string): Promise<boolean> => {
+      for (const runner of runners) {
+        try {
+          const cmd = `${runner} --voice "${targetVoice}" --rate="+3%" -f "${tempTextFile}" --write-media "${tempMp3File}"`;
+          await execAsync(cmd, { timeout: 15_000 });
+          if (fs.existsSync(tempMp3File) && fs.statSync(tempMp3File).size > 100) {
+            return true;
+          }
+        } catch {}
+      }
+      return false;
+    };
 
     try {
-      try {
-        await execAsync(cmd);
-      } catch (cmdErr: any) {
-        console.warn(`[TTS] Primary voice "${selectedVoice}" failed, falling back to en-US-BrianMultilingualNeural...`);
-        const fallbackCmd = `python -m edge_tts --voice "en-US-BrianMultilingualNeural" --rate="+3%" -f "${tempTextFile}" --write-media "${tempMp3File}"`;
-        await execAsync(fallbackCmd);
+      let generated = await runEdgeTts(selectedVoice);
+      if (!generated) {
+        console.warn(`[TTS] Primary voice "${selectedVoice}" unavailable, trying en-US-BrianMultilingualNeural...`);
+        generated = await runEdgeTts('en-US-BrianMultilingualNeural');
+      }
+
+      // Pure Node.js HTTP TTS fallback if Python/edge-tts is not installed on external server
+      if (!generated) {
+        try {
+          const ttsChunk = spokenText.slice(0, 200);
+          const gUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=en&client=tw-ob&q=${encodeURIComponent(ttsChunk)}`;
+          const res = await fetch(gUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (res.ok) {
+            const arrBuf = await res.arrayBuffer();
+            fs.writeFileSync(tempMp3File, Buffer.from(arrBuf));
+            generated = true;
+          }
+        } catch {}
       }
 
       if (!fs.existsSync(tempMp3File)) {

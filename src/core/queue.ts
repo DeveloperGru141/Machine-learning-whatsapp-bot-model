@@ -41,11 +41,11 @@ export class RequestQueue {
     this.activeChats.add(task.chatJid);
 
     try {
-      // 45-second timeout safeguard per task
+      // 15-second timeout safeguard per task (fails fast if socket hangs)
       await Promise.race([
         task.execute(),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Task execution timed out')), 45000)
+          setTimeout(() => reject(new Error('Task execution timed out')), 15000)
         ),
       ]);
     } catch (err: any) {
