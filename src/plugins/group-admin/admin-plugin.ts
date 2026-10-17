@@ -2,6 +2,8 @@ import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { config } from '../../config/env.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
 import { chatLogger } from '../../memory/chat-logger.js';
+import { contactService } from '../../memory/contact-service.js';
+import { logAutonomousAction } from '../../memory/db.js';
 
 export class GroupAdminPlugin implements IPlugin {
   name = 'GroupAdminSuite';
@@ -52,6 +54,73 @@ export class GroupAdminPlugin implements IPlugin {
   }
 
   /**
+   * Resolves a target participant in a group from WhatsApp natural flow:
+   * 1. Check if the user tagged/mentioned someone (@user) in rawMessage
+   * 2. Check if the user replied to/quoted someone's message
+   * 3. Check if rawTarget has phone number digits
+   * 4. Check if rawTarget matches any group participant's name or saved contact name
+   */
+  private async resolveTargetUser(
+    sock: any,
+    groupJid: string,
+    rawTarget?: string,
+    rawMessage?: any
+  ): Promise<{ jid?: string; cleanNumber?: string; error?: string }> {
+    const contextInfo =
+      rawMessage?.message?.extendedTextMessage?.contextInfo ||
+      rawMessage?.message?.imageMessage?.contextInfo ||
+      rawMessage?.message?.videoMessage?.contextInfo;
+
+    const quotedParticipant = contextInfo?.participant;
+    const mentionedJids: string[] = contextInfo?.mentionedJid || [];
+
+    // If target was tagged with @mention in chat
+    if (mentionedJids.length > 0) {
+      const jid = mentionedJids[0];
+      const cleanNumber = jid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      return { jid, cleanNumber };
+    }
+
+    // If target was replied to / quoted
+    if (quotedParticipant) {
+      const cleanNumber = quotedParticipant.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      return { jid: quotedParticipant, cleanNumber };
+    }
+
+    const cleanInput = (rawTarget || '').trim();
+
+    // If phone number digits provided (e.g. "+23480...", "080...", "234...")
+    const digitsOnly = cleanInput.replace(/[^0-9]/g, '');
+    if (digitsOnly.length >= 7 && digitsOnly.length <= 15) {
+      let formatted = digitsOnly;
+      if (formatted.startsWith('0') && formatted.length === 11) {
+        formatted = '234' + formatted.slice(1);
+      }
+      return { jid: `${formatted}@s.whatsapp.net`, cleanNumber: formatted };
+    }
+
+    // If a name or keyword was given, match against group participants
+    try {
+      const meta = await sock.groupMetadata(groupJid);
+      if (cleanInput) {
+        const lower = cleanInput.toLowerCase().replace(/^@/, '');
+        for (const p of meta.participants) {
+          const num = p.id ? p.id.split('@')[0].split(':')[0].replace(/[^0-9]/g, '') : '';
+          const saved = contactService.getContact(num || p.id);
+          const name = (saved?.custom_name || saved?.display_name || '').toLowerCase();
+          if (name.includes(lower) || num.includes(lower)) {
+            return { jid: p.id, cleanNumber: num };
+          }
+        }
+      }
+    } catch {}
+
+    return {
+      error: 'Please tag the member (@user), reply to their message, or state their phone number or contact name so I know who you mean.',
+    };
+  }
+
+  /**
    * Passive Anti-Link moderation: Deletes unauthorized WhatsApp group invite links sent by non-admins
    */
   public async handleAntiLink(sock: any, msg: any, chatJid: string, senderJid: string, text: string): Promise<boolean> {
@@ -73,6 +142,7 @@ export class GroupAdminPlugin implements IPlugin {
         text: `⚠️ @${senderJid.split('@')[0]}, group invite links are not permitted here!`,
         mentions: [senderJid],
       });
+      logAutonomousAction('anti_link_moderation', chatJid, senderJid, 'Autonomously deleted unauthorized group invite link');
       return true;
     } catch (err: any) {
       console.error('[GroupAdmin] Failed to delete link:', err.message);
@@ -155,22 +225,21 @@ export class GroupAdminPlugin implements IPlugin {
     },
     {
       name: 'kick_member',
-      description: 'Removes/kicks a specified member from the group. Requires the bot to be an admin.',
+      description: 'Removes/kicks a member from the group. The member can be specified by contact name, phone number, @tag, or by replying to/quoting their message.',
       parameters: {
         type: 'object',
         properties: {
-          phone_number: {
+          target: {
             type: 'string',
-            description: 'Phone number or JID of the user to remove (e.g. "2348012345678").',
+            description: 'Phone number, contact name, or @tag of the member to remove.',
           },
           reason: {
             type: 'string',
             description: 'Reason for removal.',
           },
         },
-        required: ['phone_number'],
       },
-      execute: async (args: { phone_number: string; reason?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (args: { target?: string; phone_number?: string; reason?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         if (!ctx.isGroup) {
           return { success: false, message: 'This tool is only available in groups.' };
         }
@@ -185,16 +254,16 @@ export class GroupAdminPlugin implements IPlugin {
           return { success: false, message: 'Permission denied: Only group admins can request to remove members.' };
         }
 
-        const cleanNumber = args.phone_number.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-        const targetJid = args.phone_number.endsWith('@lid')
-          ? `${cleanNumber}@lid`
-          : `${cleanNumber}@s.whatsapp.net`;
+        const resolved = await this.resolveTargetUser(ctx.sock, ctx.chatJid, args.target || args.phone_number, ctx.rawMessage);
+        if (resolved.error || !resolved.jid) {
+          return { success: false, message: resolved.error || 'Could not identify which member to remove.' };
+        }
 
         try {
-          await ctx.sock.groupParticipantsUpdate(ctx.chatJid, [targetJid], 'remove');
+          await ctx.sock.groupParticipantsUpdate(ctx.chatJid, [resolved.jid], 'remove');
           return {
             success: true,
-            message: `User @${cleanNumber} has been removed from the group. ${args.reason ? `Reason: ${args.reason}` : ''}`,
+            message: `User @${resolved.cleanNumber} has been removed from the group. ${args.reason ? `Reason: ${args.reason}` : ''}`,
           };
         } catch (err: any) {
           return { success: false, message: `Failed to remove user: ${err.message}` };
@@ -243,29 +312,31 @@ export class GroupAdminPlugin implements IPlugin {
     },
     {
       name: 'promote_member',
-      description: 'Promotes a group member to admin status. Requires the bot to be an admin in the group, and requester must be admin/owner.',
+      description: 'Promotes a group member to admin status. The member can be specified by contact name, phone number, @tag, or by replying to/quoting their message.',
       parameters: {
         type: 'object',
         properties: {
-          phone_number: {
+          target: {
             type: 'string',
-            description: 'Phone number or JID of the user to promote to admin.',
+            description: 'Phone number, contact name, or @tag of the user to promote to admin.',
           },
         },
-        required: ['phone_number'],
       },
-      execute: async (args: { phone_number: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (args: { target?: string; phone_number?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         if (!ctx.isGroup) return { success: false, message: 'This tool is only available in groups.' };
         const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
         if (!botIsAdmin) return { success: false, message: 'Action failed: I must be made an admin in this group first.' };
         const senderIsAdmin = await this.isUserAdmin(ctx.sock, ctx.chatJid, ctx.senderJid);
         if (!senderIsAdmin) return { success: false, message: 'Permission denied: Only group admins can promote members.' };
 
-        const cleanNumber = args.phone_number.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-        const targetJid = args.phone_number.endsWith('@lid') ? `${cleanNumber}@lid` : `${cleanNumber}@s.whatsapp.net`;
+        const resolved = await this.resolveTargetUser(ctx.sock, ctx.chatJid, args.target || args.phone_number, ctx.rawMessage);
+        if (resolved.error || !resolved.jid) {
+          return { success: false, message: resolved.error || 'Could not identify which member to promote.' };
+        }
+
         try {
-          await ctx.sock.groupParticipantsUpdate(ctx.chatJid, [targetJid], 'promote');
-          return { success: true, message: `User @${cleanNumber} has been successfully promoted to group admin.` };
+          await ctx.sock.groupParticipantsUpdate(ctx.chatJid, [resolved.jid], 'promote');
+          return { success: true, message: `User @${resolved.cleanNumber} has been successfully promoted to group admin.` };
         } catch (err: any) {
           return { success: false, message: `Failed to promote user: ${err.message}` };
         }
@@ -273,29 +344,31 @@ export class GroupAdminPlugin implements IPlugin {
     },
     {
       name: 'demote_member',
-      description: 'Demotes a group admin back to regular member. Requires the bot to be an admin in the group, and requester must be admin/owner.',
+      description: 'Demotes a group admin back to regular member. The admin can be specified by contact name, phone number, @tag, or by replying to/quoting their message.',
       parameters: {
         type: 'object',
         properties: {
-          phone_number: {
+          target: {
             type: 'string',
-            description: 'Phone number or JID of the admin to demote.',
+            description: 'Phone number, contact name, or @tag of the admin to demote.',
           },
         },
-        required: ['phone_number'],
       },
-      execute: async (args: { phone_number: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (args: { target?: string; phone_number?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         if (!ctx.isGroup) return { success: false, message: 'This tool is only available in groups.' };
         const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
         if (!botIsAdmin) return { success: false, message: 'Action failed: I must be made an admin in this group first.' };
         const senderIsAdmin = await this.isUserAdmin(ctx.sock, ctx.chatJid, ctx.senderJid);
         if (!senderIsAdmin) return { success: false, message: 'Permission denied: Only group admins can demote admins.' };
 
-        const cleanNumber = args.phone_number.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-        const targetJid = args.phone_number.endsWith('@lid') ? `${cleanNumber}@lid` : `${cleanNumber}@s.whatsapp.net`;
+        const resolved = await this.resolveTargetUser(ctx.sock, ctx.chatJid, args.target || args.phone_number, ctx.rawMessage);
+        if (resolved.error || !resolved.jid) {
+          return { success: false, message: resolved.error || 'Could not identify which admin to demote.' };
+        }
+
         try {
-          await ctx.sock.groupParticipantsUpdate(ctx.chatJid, [targetJid], 'demote');
-          return { success: true, message: `Admin @${cleanNumber} has been demoted to a regular member.` };
+          await ctx.sock.groupParticipantsUpdate(ctx.chatJid, [resolved.jid], 'demote');
+          return { success: true, message: `Admin @${resolved.cleanNumber} has been demoted to a regular member.` };
         } catch (err: any) {
           return { success: false, message: `Failed to demote user: ${err.message}` };
         }

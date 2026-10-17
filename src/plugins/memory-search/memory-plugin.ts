@@ -1,5 +1,6 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { memoryService } from '../../memory/memory-service.js';
+import { db, getRecentAutonomousActions } from '../../memory/db.js';
 
 export class MemoryPlugin implements IPlugin {
   name = 'MemoryRecall';
@@ -77,6 +78,132 @@ export class MemoryPlugin implements IPlugin {
           success: true,
           message: `Fact successfully saved to long-term memory: "${args.fact}"`,
         };
+      },
+    },
+    {
+      name: 'get_cross_chat_activity',
+      description:
+        'Provides situational awareness of what the bot has been doing across all WhatsApp chats and groups: recent conversations, group interactions, admin moderation, and dispatched actions. Use when the owner or user asks what you have been doing across chats, which groups you are in, or what happened recently.',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: {
+            type: 'number',
+            description: 'Number of recent conversation events to review (default: 20).',
+          },
+        },
+      },
+      execute: async (args: { limit?: number }, _ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const limit = Math.min(Math.max(Number(args.limit) || 20, 5), 50);
+
+          // 1. Fetch recent exchanges across chats
+          const logs = db.prepare(`
+            SELECT chat_jid, sender_name, sender_jid, message_text, is_group, timestamp
+            FROM chat_logs
+            ORDER BY id DESC LIMIT ?
+          `).all(limit) as Array<{
+            chat_jid: string;
+            sender_name: string | null;
+            sender_jid: string;
+            message_text: string | null;
+            is_group: number;
+            timestamp: number;
+          }>;
+
+          if (logs.length === 0) {
+            return {
+              success: true,
+              message: 'No recent activity recorded yet in memory logs.',
+              data: { summary: 'No activity yet' },
+            };
+          }
+
+          // Group by conversation
+          const groupsActive = new Map<string, { count: number; lastText: string; lastTime: number }>();
+          const dmsActive = new Map<string, { count: number; name: string; lastText: string; lastTime: number }>();
+
+          for (const l of logs) {
+            const time = l.timestamp;
+            const text = (l.message_text || '').slice(0, 80);
+            if (l.is_group) {
+              const existing = groupsActive.get(l.chat_jid) || { count: 0, lastText: text, lastTime: time };
+              existing.count++;
+              groupsActive.set(l.chat_jid, existing);
+            } else {
+              const name = l.sender_name || (l.sender_jid === 'bot' ? 'Assistant' : 'Contact');
+              const existing = dmsActive.get(l.chat_jid) || { count: 0, name, lastText: text, lastTime: time };
+              existing.count++;
+              dmsActive.set(l.chat_jid, existing);
+            }
+          }
+
+          const groupSummaries: string[] = [];
+          for (const [_jid, data] of groupsActive.entries()) {
+            groupSummaries.push(`- Group conversation: ${data.count} recent message(s). Latest: "${data.lastText}"`);
+          }
+
+          const dmSummaries: string[] = [];
+          for (const [_jid, data] of dmsActive.entries()) {
+            dmSummaries.push(`- Direct Chat (${data.name}): ${data.count} recent message(s). Latest: "${data.lastText}"`);
+          }
+
+          const totalMessages = logs.length;
+          const report =
+            `📊 *Recent Cross-Chat Awareness Summary:*\n` +
+            `• Evaluated last ${totalMessages} messages across ${groupsActive.size} group(s) and ${dmsActive.size} direct chat(s).\n\n` +
+            (groupSummaries.length > 0 ? `*Group Activity:*\n${groupSummaries.join('\n')}\n\n` : '') +
+            (dmSummaries.length > 0 ? `*Direct Message Activity:*\n${dmSummaries.join('\n')}` : '');
+
+          return {
+            success: true,
+            message: report.trim(),
+            data: { totalMessages, groupsCount: groupsActive.size, dmsCount: dmsActive.size },
+          };
+        } catch (err: any) {
+          return { success: false, message: `Failed to compile cross-chat activity: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'list_autonomous_actions',
+      description:
+        'Lists autonomous actions and self-directed functions the bot executed on its own without being commanded (unreplied DM check-ins, auto-moderation of spam links, passive contact indexing, continuous pattern learning, and scheduled broadcasts). Use when the owner asks what you do on your own or asks about your sentience/autonomy.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (_args: {}, _ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const recent = getRecentAutonomousActions(10);
+          const lines: string[] = [];
+
+          if (recent.length > 0) {
+            for (const a of recent) {
+              const timeStr = new Date(a.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+              lines.push(`• [${timeStr}] *${a.action_type}*: ${a.summary} (${a.target_name || 'System'})`);
+            }
+          }
+
+          // Add standing autonomous capabilities summary
+          const standingCapabilities =
+            `🤖 *Autonomous Functions Active in Bot Runtime:*\n\n` +
+            (lines.length > 0 ? `*Recent Self-Directed Events:*\n${lines.join('\n')}\n\n` : '') +
+            `*Active Autonomous Capabilities:*\n` +
+            `1. *Anti-Spam & Anti-Link Shield*: Autonomously deletes unauthorized group invite links and spam bursts without waiting for admin command.\n` +
+            `2. *Continuous Pattern Mining*: Passively learns speaking styles, slang, and formality metrics every 8 exchanges.\n` +
+            `3. *Passive Contact Indexing*: Automatically captures and indexes new contacts and numbers into SQLite.\n` +
+            `4. *Unreplied Message Watchdog*: Periodically scans for genuine unreplied DMs from contacts and prepares replies.\n` +
+            `5. *Scheduled Morning Broadcasts & Status*: Posts daily motivational/tech insights to WhatsApp Status and registered groups.`;
+
+          return {
+            success: true,
+            message: standingCapabilities,
+            data: { recentActions: recent },
+          };
+        } catch (err: any) {
+          return { success: false, message: `Failed to retrieve autonomous actions: ${err.message}` };
+        }
       },
     },
   ];

@@ -1,6 +1,6 @@
 import type { WASocket } from '@whiskeysockets/baileys';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
-import { db } from '../../memory/db.js';
+import { db, logAutonomousAction } from '../../memory/db.js';
 import { OutboundSender } from '../../core/sender.js';
 import { antiBanEngine } from '../../security/anti-ban.js';
 import { llmClient } from '../../agent/llm-client.js';
@@ -434,6 +434,7 @@ Drop a natural 1-2 sentence ${isContact ? 'check-in / hello' : 'reminder / follo
 
       const dispatchResult = await this.dispatchProactiveMessage(socket, chosen);
       if (dispatchResult.success) {
+        logAutonomousAction('proactive_checkin', chosen.chatJid, chosen.targetName, `Autonomous check-in sent: "${dispatchResult.messageSent}"`);
         return {
           executed: true,
           summary: `Successfully sent proactive ${chosen.targetType} message to ${chosen.chatJid}: "${dispatchResult.messageSent}"`,

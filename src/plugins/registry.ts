@@ -199,17 +199,6 @@ export class PluginRegistry {
       selected.add('cancel_scheduled_broadcast');
     }
 
-    // 7. Image Generation
-    if (
-      text.includes('image') ||
-      text.includes('generate') ||
-      text.includes('picture') ||
-      text.includes('photo') ||
-      text.includes('draw') ||
-      text.includes('art')
-    ) {
-      selected.add('generate_image');
-    }
 
     // 8. Video/Audio Downloaders, Link Summaries, & Document Reading
     if (
@@ -233,6 +222,33 @@ export class PluginRegistry {
 
     if (text.includes('document') || text.includes('pdf') || text.includes('file') || text.includes('docx')) {
       selected.add('read_document');
+    }
+
+    // 9. Memory, Cross-Chat Awareness, & Autonomous Sentience
+    if (
+      text.includes('remember') ||
+      text.includes('recall') ||
+      text.includes('memory') ||
+      text.includes('forgot') ||
+      text.includes('history') ||
+      text.includes('across chat') ||
+      text.includes('other chat') ||
+      text.includes('other group') ||
+      text.includes('activity') ||
+      text.includes('what have you done') ||
+      text.includes('wetin you don do') ||
+      text.includes('what did you do') ||
+      text.includes('what are you doing') ||
+      text.includes('autonomous') ||
+      text.includes('sentience') ||
+      text.includes('on your own') ||
+      text.includes('by yourself') ||
+      text.includes('recent action')
+    ) {
+      selected.add('search_memory');
+      selected.add('remember_fact');
+      selected.add('get_cross_chat_activity');
+      selected.add('list_autonomous_actions');
     }
 
     // 10. Admin Privileges & Group Administration

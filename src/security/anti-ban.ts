@@ -162,6 +162,40 @@ export class AntiBanEngine {
   }
 
   /**
+   * Starts an active typing heartbeat ('composing') so users and groups immediately see
+   * that the bot is alive and crafting their response. Re-broadcasts every 3.5s to keep
+   * WhatsApp's typing bubble active until the reply is delivered.
+   */
+  public startTypingHeartbeat(sock: WASocket | null | undefined, chatJid: string): () => void {
+    if (!sock || chatJid.endsWith('@lid') || chatJid.endsWith('@broadcast')) {
+      return () => {};
+    }
+
+    let isStopped = false;
+    const sendComposing = () => {
+      if (isStopped) return;
+      try {
+        sock.sendPresenceUpdate('composing', chatJid).catch(() => {});
+      } catch {}
+    };
+
+    // Send initial composing bubble immediately
+    sendComposing();
+
+    // WhatsApp composing presence expires after ~5s, so refresh every 3.5s
+    const timer = setInterval(sendComposing, 3500);
+
+    return () => {
+      if (isStopped) return;
+      isStopped = true;
+      clearInterval(timer);
+      try {
+        sock.sendPresenceUpdate('paused', chatJid).catch(() => {});
+      } catch {}
+    };
+  }
+
+  /**
    * Simulates human reading delay proportional to the user's message length before the bot starts typing.
    */
   public async simulateReadingDelay(incomingTextLength: number = 0, isGroup: boolean = false): Promise<void> {

@@ -172,6 +172,18 @@ export function initDatabase() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_proactive_checkins_chat ON proactive_checkins(chat_jid, timestamp);
+
+    -- Autonomous Sentience Actions: audit log of actions the bot decides and executes on its own
+    CREATE TABLE IF NOT EXISTS autonomous_actions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      action_type TEXT NOT NULL,
+      target_chat TEXT NOT NULL,
+      target_name TEXT,
+      summary TEXT NOT NULL,
+      timestamp INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_autonomous_actions_time ON autonomous_actions(timestamp);
   `);
 
   // Safe migration for existing databases
@@ -377,6 +389,29 @@ function seedContactsFromVcfIfEmpty(): void {
 
 // Auto-initialize tables on module load
 initDatabase();
+
+export function logAutonomousAction(actionType: string, targetChat: string, targetName: string, summary: string): void {
+  try {
+    db.prepare(`
+      INSERT INTO autonomous_actions (action_type, target_chat, target_name, summary, timestamp)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(actionType, targetChat, targetName, summary, Date.now());
+  } catch (err: any) {
+    console.error('[DB] Error logging autonomous action:', err.message);
+  }
+}
+
+export function getRecentAutonomousActions(limit = 10): Array<{ id: number; action_type: string; target_chat: string; target_name: string; summary: string; timestamp: number }> {
+  try {
+    return db.prepare(`
+      SELECT id, action_type, target_chat, target_name, summary, timestamp
+      FROM autonomous_actions
+      ORDER BY id DESC LIMIT ?
+    `).all(limit) as any;
+  } catch {
+    return [];
+  }
+}
 
 
 

@@ -656,10 +656,10 @@ export class SchedulerPlugin implements IPlugin {
             description:
               'The 24-hour time of day to deliver the broadcast every morning (e.g. "07:00", "08:00", "06:30"). Defaults to "07:00".',
           },
-          group_jid: {
+          group: {
             type: 'string',
             description:
-              'The target WhatsApp group JID (e.g. "120363xxx@g.us"). If omitted or invoked directly inside a group, defaults to the current group.',
+              'Optional name of the target WhatsApp group. If omitted, defaults to the current group or chat.',
           },
           custom_prompt: {
             type: 'string',
@@ -669,7 +669,7 @@ export class SchedulerPlugin implements IPlugin {
         required: ['topic'],
       },
       execute: async (
-        args: { topic: string; time_of_day?: string; group_jid?: string; custom_prompt?: string },
+        args: { topic: string; time_of_day?: string; group?: string; group_jid?: string; custom_prompt?: string },
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
         try {
@@ -678,7 +678,23 @@ export class SchedulerPlugin implements IPlugin {
             activeSocket = ctx.sock;
           }
 
-          const targetChat = args.group_jid || ctx.chatJid;
+          let targetChat = ctx.chatJid;
+          const groupQuery = (args.group || args.group_jid || '').trim();
+          if (groupQuery) {
+            if (groupQuery.endsWith('@g.us')) {
+              targetChat = groupQuery;
+            } else if (ctx.sock?.groupFetchAllParticipating) {
+              try {
+                const participating = await ctx.sock.groupFetchAllParticipating();
+                const matched = Object.values(participating).find((g: any) =>
+                  g.subject && g.subject.toLowerCase().includes(groupQuery.toLowerCase())
+                );
+                if (matched) {
+                  targetChat = (matched as any).id;
+                }
+              } catch {}
+            }
+          }
           const timeOfDay = args.time_of_day?.trim() || '07:00';
           const topic = args.topic.trim();
 
@@ -723,15 +739,15 @@ export class SchedulerPlugin implements IPlugin {
       parameters: {
         type: 'object',
         properties: {
-          group_jid: {
+          group: {
             type: 'string',
-            description: 'Optional group JID to filter by. Omit to view all active broadcasts across groups.',
+            description: 'Optional group to filter by. Omit to view all active broadcasts across groups.',
           },
         },
       },
-      execute: async (args: { group_jid?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (args: { group?: string; group_jid?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
-          const filterChat = args.group_jid || (ctx.isGroup ? ctx.chatJid : undefined);
+          const filterChat = args.group || args.group_jid || (ctx.isGroup ? ctx.chatJid : undefined);
           const broadcasts = getActiveDailyBroadcasts(filterChat);
 
           if (broadcasts.length === 0) {
@@ -745,7 +761,7 @@ export class SchedulerPlugin implements IPlugin {
           const formatted = broadcasts
             .map((b) => {
               const nextTime = new Date(b.fire_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-              return `• ID #${b.id} | Topic: *${b.topic}* | Time: ${b.time_of_day || '07:00'} (Next: ${nextTime}) | Chat: ${b.chat_jid}`;
+              return `• ID #${b.id} | Topic: *${b.topic}* | Time: ${b.time_of_day || '07:00'} (Next: ${nextTime})`;
             })
             .join('\n');
 
@@ -786,7 +802,7 @@ export class SchedulerPlugin implements IPlugin {
     },
     {
       name: 'list_my_groups',
-      description: 'Lists all WhatsApp groups the bot is currently participating in, including their names and JIDs.',
+      description: 'Lists all WhatsApp groups the bot is currently participating in with their names and member counts.',
       parameters: {
         type: 'object',
         properties: {},
@@ -810,12 +826,12 @@ export class SchedulerPlugin implements IPlugin {
           }
 
           const summary = groupList
-            .map((g) => `• *${g.subject}* (${g.participantsCount} members)\n  JID: \`${g.id}\``)
-            .join('\n\n');
+            .map((g, idx) => `${idx + 1}. *${g.subject}* (${g.participantsCount} members)`)
+            .join('\n');
 
           return {
             success: true,
-            message: `Participating Groups (${groupList.length}):\n\n${summary}`,
+            message: `👥 *Groups I dey inside (${groupList.length}):*\n\n${summary}`,
             data: { groups: groupList },
           };
         } catch (err: any) {

@@ -885,6 +885,11 @@ export class WhatsAppClient {
       }
     }
 
+    // Strict Policy: Do not reply to stickers since sticker visual content is not parsed
+    if (normalized.contentType === 'sticker') {
+      return;
+    }
+
     // 2. Trigger Evaluation (DM vs Group @mention/quote)
     const botJid = this.sock?.user?.id || '';
     const botLid = this.sock?.user?.lid || '';
@@ -960,9 +965,6 @@ export class WhatsAppClient {
       }
     } else if (normalized.contentType === 'document') {
       promptText = `[User sent or quoted a document: "${normalized.text}"]. Please use the read_document tool to read, inspect, and answer or summarize based on this file.`;
-    } else if (normalized.contentType === 'sticker') {
-      promptText = `[User sent a sticker]`;
-      chatLogger.updateLatestMessageText(normalized.chatJid, 'sticker', promptText);
     }
 
     if (!promptText) return;
@@ -1030,15 +1032,21 @@ export class WhatsAppClient {
       senderJid: normalized.senderJid,
       chatJid: normalized.chatJid,
       execute: async () => {
+        let stopTyping: (() => void) | null = null;
         try {
-          // 1. Human reading delay proportional to user's message length (and longer in groups).
-          // Never send 'composing' before reading — humans read first, then type!
+          // 1. Human reading delay proportional to user's message length (longer in groups)
           await antiBanEngine.simulateReadingDelay(incomingCharLen, normalized.isGroup);
+          // 2. Start active typing bubble immediately so users know the bot is alive and crafting their reply
+          stopTyping = antiBanEngine.startTypingHeartbeat(sock, normalized.chatJid);
           await agentHarness.handleMessage(promptText, context);
         } catch (err: any) {
           console.error('[WhatsAppClient] Error in agent handler:', err.message);
           healthMonitor.recordError(err);
           analyticsEngine.trackEvent('error', { error: err.message }, normalized.chatJid, normalized.senderJid);
+        } finally {
+          if (stopTyping) {
+            stopTyping();
+          }
         }
       },
     });

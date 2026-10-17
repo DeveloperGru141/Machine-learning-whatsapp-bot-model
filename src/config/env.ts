@@ -96,7 +96,7 @@ export const config = {
   },
   bot: {
     name: process.env.BOT_NAME || 'Forgelabs assistant',
-    creator: process.env.BOT_CREATOR || 'ADEMOLA',
+    creator: process.env.BOT_CREATOR || 'Ademola, an ML/AI enthusiast',
     prefix: process.env.BOT_PREFIX || '',
     voice: process.env.BOT_VOICE || 'en-NG-AbeoNeural',
     owners: normalizedOwners,

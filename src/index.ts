@@ -9,7 +9,6 @@ import http from 'http';
 import { config } from './config/env.js';
 import { db, initDatabase } from './memory/db.js';
 import { pluginRegistry } from './plugins/registry.js';
-import { imageGenPlugin } from './plugins/image-gen/image-plugin.js';
 import { audioDownloaderPlugin } from './plugins/audio-downloader/audio-plugin.js';
 import { memoryPlugin } from './plugins/memory-search/memory-plugin.js';
 import { datasetExporterPlugin } from './learning/dataset-exporter.js';
@@ -332,7 +331,6 @@ async function bootstrap() {
   cleanupTimer.unref();
 
   // 3. Register Active Plugins
-  await pluginRegistry.registerPlugin(imageGenPlugin);
   await pluginRegistry.registerPlugin(audioDownloaderPlugin);
   await pluginRegistry.registerPlugin(videoDownloaderPlugin);
   await pluginRegistry.registerPlugin(groupAdminPlugin);
