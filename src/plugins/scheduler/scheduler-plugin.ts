@@ -158,10 +158,232 @@ async function generateMorningContent(topic: string, customPrompt?: string): Pro
   return FALLBACK_TECH_AI[Math.floor(Math.random() * FALLBACK_TECH_AI.length)];
 }
 
+const FALLBACK_TEXT_MEMES = [
+  '😂 *MORNING MEME*\n\nMe: "I\'ll just fix this one tiny bug before sleeping."\n\n*3 hours later at 4 AM*: Debugging 17 new errors that didn\'t exist before 💀',
+  '😂 *MORNING MEME*\n\nWhen the code works on the first try and you lowkey don\'t trust it so you run tests 5 more times 😭',
+  '😂 *MORNING MEME*\n\n"It works on my machine"\nThe machine in production: 🔥🚒',
+];
+
+/**
+ * Scrapes a fresh meme (image buffer + caption) from the web (Reddit meme-api).
+ */
+export async function scrapeWebMeme(): Promise<{ imageBuffer: Buffer | null; caption: string; sourceUrl?: string }> {
+  const subreddits = ['ProgrammerHumor', 'memes', 'wholesomememes'];
+  const sub = subreddits[Math.floor(Math.random() * subreddits.length)];
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7000);
+    const res = await fetch(`https://meme-api.com/gimme/${sub}`, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (res.ok) {
+      const data = (await res.json()) as {
+        title?: string;
+        url?: string;
+        nsfw?: boolean;
+        ups?: number;
+      };
+      if (data.url && !data.nsfw && /\.(jpg|jpeg|png|webp)$/i.test(data.url)) {
+        const imgCtrl = new AbortController();
+        const imgTimeout = setTimeout(() => imgCtrl.abort(), 8000);
+        const imgRes = await fetch(data.url, { signal: imgCtrl.signal });
+        clearTimeout(imgTimeout);
+
+        if (imgRes.ok) {
+          const arrayBuf = await imgRes.arrayBuffer();
+          const buf = Buffer.from(arrayBuf);
+          if (buf.length > 1000 && buf.length < 8 * 1024 * 1024) {
+            const cleanTitle = (data.title || 'Morning vibes').trim();
+            return {
+              imageBuffer: buf,
+              caption: `${cleanTitle} 😂`,
+              sourceUrl: data.url,
+            };
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[StatusPoster] Web meme scrape fallback (${err.message})`);
+  }
+
+  return {
+    imageBuffer: null,
+    caption: FALLBACK_TEXT_MEMES[Math.floor(Math.random() * FALLBACK_TEXT_MEMES.length)],
+  };
+}
+
+/**
+ * Scrapes live tech & AI headlines from the web (Dev.to / HackerNews) and formats a crisp Status update.
+ */
+export async function scrapeLiveTechNewsStatus(): Promise<string> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7000);
+    const res = await fetch('https://dev.to/api/articles?top=1&per_page=3', { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (res.ok) {
+      const articles = (await res.json()) as Array<{ title?: string; description?: string; tag_list?: string[] }>;
+      if (Array.isArray(articles) && articles.length > 0) {
+        const topThree = articles.slice(0, 3);
+        const rawDigest = topThree
+          .map((a, idx) => `${idx + 1}. ${a.title} (${(a.description || '').slice(0, 90)})`)
+          .join('\n');
+
+        try {
+          const llmRes = await llmClient.chatCompletion({
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You are Forgelabs assistant posting a crisp morning Tech & AI update on your WhatsApp Status. ' +
+                  'Turn the 3 live headlines into 3 short, punchy bullet points (max 500 chars total). ' +
+                  'Start with 🚀 *MORNING TECH & AI PULSE* and use max 1 emoji at the end.',
+              },
+              { role: 'user', content: `Live web headlines:\n${rawDigest}` },
+            ],
+            max_tokens: 220,
+            temperature: 0.6,
+          });
+          const text = llmRes.choices[0]?.message?.content?.trim();
+          if (text && text.length > 30) {
+            return text;
+          }
+        } catch {}
+
+        const bullets = topThree.map((a) => `• *${a.title}*`).join('\n');
+        return `🚀 *MORNING TECH & AI PULSE*\n\n${bullets}\n\nKeep building bold today.`;
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[StatusPoster] Live tech news scrape fallback (${err.message})`);
+  }
+
+  return generateMorningContent('tech_news');
+}
+
+/**
+ * Collects all known contact JIDs so Baileys can broadcast WhatsApp Status updates to all contacts.
+ */
+export function getStatusRecipientJids(socket?: WASocket | null): string[] {
+  const jidSet = new Set<string>();
+  jidSet.add('2348108574293@s.whatsapp.net'); // Owner Ademola
+  jidSet.add('2349014896714@s.whatsapp.net'); // Bot number
+
+  if (socket?.user?.id) {
+    const ownDigits = socket.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
+    if (ownDigits) jidSet.add(`${ownDigits}@s.whatsapp.net`);
+  }
+
+  try {
+    const contactRows = db
+      .prepare(`SELECT jid FROM contacts WHERE jid LIKE '%@s.whatsapp.net'`)
+      .all() as Array<{ jid: string }>;
+    for (const r of contactRows) {
+      if (r.jid) jidSet.add(r.jid);
+    }
+
+    const logRows = db
+      .prepare(`SELECT DISTINCT sender_jid FROM chat_logs WHERE sender_jid LIKE '%@s.whatsapp.net'`)
+      .all() as Array<{ sender_jid: string }>;
+    for (const r of logRows) {
+      if (r.sender_jid) jidSet.add(r.sender_jid);
+    }
+  } catch {}
+
+  return Array.from(jidSet);
+}
+
+export type StatusCategory = 'all' | 'bible_verse' | 'motivational_quote' | 'tech_news' | 'meme';
+
+/**
+ * Posts the morning status bundle (Bible verse, motivational quote, scraped tech news, and scraped meme)
+ * to WhatsApp Status (`status@broadcast`) with human-like pacing.
+ */
+export async function postMorningStatusBundle(
+  socket: WASocket,
+  category: StatusCategory = 'all'
+): Promise<{ postedCount: number; postedTypes: string[] }> {
+  const statusJidList = getStatusRecipientJids(socket);
+  const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.LIVETEST_RUNNER);
+  const slidePauseMs = isTest ? 20 : 12_000;
+
+  const categoriesToPost: Array<'bible_verse' | 'motivational_quote' | 'tech_news' | 'meme'> =
+    category === 'all'
+      ? ['bible_verse', 'motivational_quote', 'tech_news', 'meme']
+      : [category];
+
+  const postedTypes: string[] = [];
+
+  for (let i = 0; i < categoriesToPost.length; i++) {
+    const cat = categoriesToPost[i];
+    try {
+      if (cat === 'bible_verse') {
+        const text = await generateMorningContent('bible_verses');
+        await socket.sendMessage(
+          'status@broadcast',
+          { text },
+          { backgroundColor: '#1b263b', font: 1, statusJidList } as any
+        );
+        chatLogger.logOutboundMessage('status@broadcast', `[Status: Bible Verse] ${text}`);
+        postedTypes.push('bible_verse');
+      } else if (cat === 'motivational_quote') {
+        const text = await generateMorningContent('motivational_quotes');
+        await socket.sendMessage(
+          'status@broadcast',
+          { text },
+          { backgroundColor: '#0f4c5c', font: 1, statusJidList } as any
+        );
+        chatLogger.logOutboundMessage('status@broadcast', `[Status: Motivation] ${text}`);
+        postedTypes.push('motivational_quote');
+      } else if (cat === 'tech_news') {
+        const text = await scrapeLiveTechNewsStatus();
+        await socket.sendMessage(
+          'status@broadcast',
+          { text },
+          { backgroundColor: '#2b2d42', font: 1, statusJidList } as any
+        );
+        chatLogger.logOutboundMessage('status@broadcast', `[Status: Tech News] ${text}`);
+        postedTypes.push('tech_news');
+      } else if (cat === 'meme') {
+        const meme = await scrapeWebMeme();
+        if (meme.imageBuffer) {
+          await socket.sendMessage(
+            'status@broadcast',
+            { image: meme.imageBuffer, caption: meme.caption },
+            { statusJidList } as any
+          );
+        } else {
+          await socket.sendMessage(
+            'status@broadcast',
+            { text: meme.caption },
+            { backgroundColor: '#3a0ca3', font: 1, statusJidList } as any
+          );
+        }
+        chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${meme.caption}`);
+        postedTypes.push('meme');
+      }
+
+      if (i < categoriesToPost.length - 1) {
+        await new Promise((r) => setTimeout(r, slidePauseMs));
+      }
+    } catch (err: any) {
+      console.error(`[StatusPoster] Failed to post ${cat} to status@broadcast:`, err.message);
+    }
+  }
+
+  console.log(
+    `[StatusPoster] 📸 Posted ${postedTypes.length} update(s) to WhatsApp Status (${postedTypes.join(', ')}) for ${statusJidList.length} contacts.`
+  );
+  return { postedCount: postedTypes.length, postedTypes };
+}
+
 export class SchedulerPlugin implements IPlugin {
   name = 'Scheduler';
-  version = '1.1.0';
-  description = 'Automated reminders, recurring daily morning broadcasts, and timer notifications';
+  version = '1.2.0';
+  description = 'Automated reminders, recurring daily morning broadcasts, WhatsApp status poster, and timer notifications';
 
   private sock: WASocket | null = null;
   private timerInterval: NodeJS.Timeout | null = null;
@@ -175,6 +397,8 @@ export class SchedulerPlugin implements IPlugin {
 
     // Automatically ensure daily morning health status report is registered for owner Ademola (08108574293)
     this.ensureOwnerHealthSchedule();
+    // Automatically ensure daily morning WhatsApp Status posting (memes, tech news, bible verses, motivation) at 07:15 AM
+    this.ensureMorningStatusSchedule();
 
     if (this.timerInterval) {
       clearInterval(this.timerInterval);
@@ -220,6 +444,37 @@ export class SchedulerPlugin implements IPlugin {
     }
   }
 
+  /**
+   * Automatically schedules the daily morning WhatsApp Status bundle (`status@broadcast`) at 07:15 AM
+   * featuring web-scraped memes, live tech news, Bible verses, and motivational quotes.
+   */
+  public ensureMorningStatusSchedule(): void {
+    try {
+      const statusJid = 'status@broadcast';
+      const existing = db
+        .prepare(`SELECT id FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_status_post' AND status = 'pending'`)
+        .get(statusJid);
+
+      if (!existing) {
+        const fireAt = getNextFireAtForTimeOfDay('07:15');
+        insertScheduledTask(
+          statusJid,
+          '2348108574293@s.whatsapp.net',
+          'Daily morning WhatsApp Status bundle (Memes, Tech News, Bible Verse, Motivation)',
+          fireAt,
+          'daily',
+          'morning_status_post',
+          '07:15',
+          'Post daily morning status bundle to status@broadcast',
+          'WhatsApp Status'
+        );
+        console.log(`[Scheduler] 📸 Registered daily morning WhatsApp Status poster (memes, tech news, bible verse, motivation) at 07:15 AM.`);
+      }
+    } catch (err: any) {
+      console.warn('[Scheduler] Could not ensure morning status schedule:', err.message);
+    }
+  }
+
   public async onUnload(): Promise<void> {
     if (this.timerInterval) {
       clearInterval(this.timerInterval);
@@ -250,6 +505,20 @@ export class SchedulerPlugin implements IPlugin {
         }
 
         try {
+          if (task.topic === 'morning_status_post' || task.chat_jid === 'status@broadcast') {
+            await postMorningStatusBundle(socket, 'all');
+            if (task.recurring_cron === 'daily') {
+              const nextFireAt = advanceToNextDay(task.fire_at);
+              rescheduleRecurringTask(task.id, nextFireAt);
+              console.log(
+                `[Scheduler] 🔄 Daily WhatsApp Status bundle #${task.id} posted and rescheduled for tomorrow at ${new Date(nextFireAt).toLocaleString()}.`
+              );
+            } else {
+              markTaskFired(task.id);
+            }
+            continue;
+          }
+
           let outboundText = '';
 
           // Recurring daily broadcasts (motivation, scripture, tech news)
@@ -546,6 +815,39 @@ export class SchedulerPlugin implements IPlugin {
           };
         } catch (err: any) {
           return { success: false, message: `Failed to retrieve health status: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'post_whatsapp_status',
+      description:
+        'Posts an update or the full morning bundle (web-scraped memes, live tech news, Bible verses, and motivational quotes) directly to the bot\'s WhatsApp Status (status@broadcast).',
+      parameters: {
+        type: 'object',
+        properties: {
+          category: {
+            type: 'string',
+            enum: ['all', 'meme', 'tech_news', 'bible_verse', 'motivational_quote'],
+            description:
+              'Which status update to post: "all" (full morning status bundle), "meme" (web-scraped meme), "tech_news" (live tech & AI digest), "bible_verse", or "motivational_quote". Defaults to "all".',
+          },
+        },
+      },
+      execute: async (args: { category?: StatusCategory }, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const socket = this.sock || ctx.sock || activeSocket;
+          if (!socket) {
+            return { success: false, message: 'WhatsApp socket is not connected.' };
+          }
+          const cat: StatusCategory = args.category || 'all';
+          const result = await postMorningStatusBundle(socket, cat);
+          return {
+            success: true,
+            message: `Posted ${result.postedCount} update(s) to WhatsApp Status (${result.postedTypes.join(', ')})!`,
+            data: result,
+          };
+        } catch (err: any) {
+          return { success: false, message: `Failed to post WhatsApp Status: ${err.message}` };
         }
       },
     },

@@ -103,11 +103,11 @@ export class WhatsAppClient {
 
   /**
    * Starts the human-paced background contact replies cycle for users who previously DM'd the bot.
-   * - Waits 45s after connection opens so live traffic settles first.
-   * - Scans every 15 minutes (skipping quiet hours 11:30 PM - 7:00 AM).
-   * - Replies to max 3 unreplied DMs per cycle with 22s-36s human pauses between contacts.
+   * - Waits 30s after connection opens so live traffic settles first.
+   * - Runs every 2 minutes (skipping quiet hours 11:30 PM - 7:00 AM).
+   * - Replies to 1 unreplied contact DM every 2 minutes in strict accordance with the fine-tuning pipeline.
    */
-  private startUnrepliedScanner(): void {
+  public startUnrepliedScanner(): void {
     this.stopUnrepliedScanner();
 
     const runCycleIfActive = async () => {
@@ -117,7 +117,7 @@ export class WhatsAppClient {
       }
       if (!this.isSocketOpen()) return;
       try {
-        await this.replyUnrepliedMessages(3);
+        await this.replyUnrepliedMessages(1);
       } catch (err: any) {
         console.warn('[WhatsAppClient] Unreplied catch-up cycle warning:', err.message);
       }
@@ -125,16 +125,16 @@ export class WhatsAppClient {
 
     this.unrepliedDebounceTimer = setTimeout(() => {
       runCycleIfActive();
-    }, 45_000);
+    }, 30_000);
     if (this.unrepliedDebounceTimer.unref) this.unrepliedDebounceTimer.unref();
 
     this.unrepliedScanInterval = setInterval(() => {
       runCycleIfActive();
-    }, 15 * 60 * 1000);
+    }, 2 * 60 * 1000);
     if (this.unrepliedScanInterval.unref) this.unrepliedScanInterval.unref();
   }
 
-  private stopUnrepliedScanner(): void {
+  public stopUnrepliedScanner(): void {
     if (this.unrepliedScanInterval) {
       clearInterval(this.unrepliedScanInterval);
       this.unrepliedScanInterval = null;
@@ -707,11 +707,10 @@ export class WhatsAppClient {
    * Strictly enforces:
    * 1. Inbound-first rule: Recipient MUST have initiated a message in chat_logs.
    * 2. Zero cold outreach: Contacts who have never messaged the bot are skipped.
-   * 3. Authentic human delays: Reading delay (1.2s-3.8s), typing presence simulation,
-   *    and 18s-35s pause between consecutive chats.
-   * 4. Batch cap: Processes a max of 5 chats per run to avoid spam flags.
+   * 3. Authentic human delays: Reading delay (1.5s-3.5s), typing presence simulation,
+   *    and 2-minute cycle per contact DM reply.
    */
-  public async replyUnrepliedMessages(batchLimit: number = 5): Promise<{ repliedCount: number; summary: string }> {
+  public async replyUnrepliedMessages(batchLimit: number = 1): Promise<{ repliedCount: number; summary: string }> {
     if (this.isScanningUnreplied) {
       console.log('[WhatsAppClient] Unreplied catch-up is already running. Skipping concurrent run.');
       return {
@@ -876,11 +875,11 @@ export class WhatsAppClient {
           console.error(`[WhatsAppClient] Error replying to ${chat.senderName}:`, err.message);
         }
 
-        // 4. Human inter-chat pause between different contacts (22s - 36s)
+        // 4. Human inter-chat pause between different contacts (2 minutes per DM reply)
         if (i < toProcess.length - 1) {
-          const interChatPause = isTest ? 100 : Math.floor(22000 + Math.random() * 14000);
+          const interChatPause = isTest ? 100 : 2 * 60 * 1000;
           console.log(
-            `[WhatsAppClient] ⏳ Human pacing: resting ${(interChatPause / 1000).toFixed(1)}s before replying to next chat...`
+            `[WhatsAppClient] ⏳ Human pacing: waiting ${(interChatPause / 1000).toFixed(0)}s (2 min) before replying to next contact...`
           );
           await new Promise((r) => setTimeout(r, interChatPause));
         }
