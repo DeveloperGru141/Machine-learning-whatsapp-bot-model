@@ -203,14 +203,21 @@ export class WhatsAppClient {
         fs.mkdirSync(config.paths.sessions, { recursive: true });
       }
 
-      // Detect if PAIRING_PHONE_NUMBER changed vs existing session creds.json
+      // Detect if PAIRING_PHONE_NUMBER changed vs existing session creds.json, or if previous pairing was incomplete
       const credsFile = path.join(config.paths.sessions, 'creds.json');
-      if (fs.existsSync(credsFile) && config.bot.pairingPhoneNumber) {
+      if (fs.existsSync(credsFile)) {
         try {
           const rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
+          const isFullyPaired = Boolean(rawCreds?.registered || rawCreds?.account);
           const existingPhone = (rawCreds?.me?.id || '').split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
-          const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber);
-          if (existingPhone && targetPhone && existingPhone !== targetPhone) {
+          const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '09014896714');
+
+          if (!isFullyPaired) {
+            // Incomplete pairing attempt left a partial creds.me without account/registered; wipe so Baileys sends RegistrationNode
+            fs.rmSync(config.paths.sessions, { recursive: true, force: true });
+            fs.mkdirSync(config.paths.sessions, { recursive: true });
+            this.pairingRequested = false;
+          } else if (existingPhone && targetPhone && existingPhone !== targetPhone) {
             console.log(
               `[WhatsAppClient] 🔄 Default bot number changed (+${existingPhone} -> +${targetPhone}). Archiving previous session and preparing fresh pairing for +${targetPhone}...`
             );
@@ -291,7 +298,7 @@ export class WhatsAppClient {
           qrcode.generate(qr, { small: true });
         }
 
-        // Request pairing code ONCE right when the initial QR noise handshake is ready
+        // Request deterministic pairing code (ADEM1234) ONCE right when the initial QR noise handshake is ready
         if (qr && config.bot.pairingMethod === 'code' && !this.sock?.authState?.creds?.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           const phoneNumber = config.bot.pairingPhoneNumber || '09014896714';
@@ -301,11 +308,11 @@ export class WhatsAppClient {
               if (!this.sock || this.sock.authState?.creds?.registered) return;
               try {
                 console.log(`[WhatsAppClient] Requesting clean pairing code for +${cleanNumber}...`);
-                const code = await this.sock.requestPairingCode(cleanNumber);
+                const code = await this.sock.requestPairingCode(cleanNumber, 'ADEM1234');
                 this.latestPairingCode = code;
                 this.latestPairingCodeAt = Date.now();
                 console.log('\n======================================================');
-                console.log(`📱 YOUR WHATSAPP PAIRING CODE: ${code}`);
+                console.log(`📱 YOUR WHATSAPP PAIRING CODE: ${code} (ADEM-1234)`);
                 console.log('------------------------------------------------------');
                 console.log(`Phone Number: +${cleanNumber} (${phoneNumber})`);
                 console.log('1. Open WhatsApp on your phone');
@@ -317,7 +324,7 @@ export class WhatsAppClient {
                 console.error(`[WhatsAppClient] Error requesting pairing code:`, err.message);
                 this.pairingRequested = false;
               }
-            }, 1200);
+            }, 800);
           }
         }
 
@@ -327,7 +334,7 @@ export class WhatsAppClient {
           const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
           const errorMsg = (lastDisconnect?.error as any)?.message || (lastDisconnect?.error as any)?.output?.payload?.message || '';
           const isStreamConflict = errorMsg.includes('conflict') || errorMsg.includes('Stream Errored');
-          const isRegistered = Boolean(this.sock?.authState?.creds?.registered);
+          const isRegistered = Boolean(this.sock?.authState?.creds?.registered || this.sock?.authState?.creds?.account);
           // If socket was never registered, 401 or 408 is simply an expired pairing code, not a device logout
           const shouldReconnect = isRegistered
             ? (statusCode !== DisconnectReason.loggedOut || isStreamConflict)
@@ -344,9 +351,9 @@ export class WhatsAppClient {
             return;
           }
 
-          // If unlinked pairing attempt expired or hit 401, wipe partial creds to request a fresh code on next loop
-          if (!isRegistered && (statusCode === DisconnectReason.loggedOut || statusCode === 408)) {
-            console.log('[WhatsAppClient] Pairing attempt timed out or closed. Clearing stale credentials to generate fresh pairing code...');
+          // If unlinked pairing attempt closed for ANY reason (428, 408, 401), wipe partial creds so next loop starts a clean RegistrationNode with ADEM1234
+          if (!isRegistered) {
+            console.log('[WhatsAppClient] Unlinked pairing socket closed. Resetting partial credentials to keep pairing code ADEM1234 active...');
             try {
               if (fs.existsSync(config.paths.sessions)) {
                 fs.rmSync(config.paths.sessions, { recursive: true, force: true });
