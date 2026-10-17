@@ -6,7 +6,7 @@ import makeWASocket, {
   proto,
   Browsers,
 } from '@whiskeysockets/baileys';
-import { db } from '../memory/db.js';
+import { db, upsertKnownGroup } from '../memory/db.js';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { Boom } from '@hapi/boom';
@@ -587,6 +587,7 @@ export class WhatsAppClient {
           const ownerJid = config.bot.owners[0] || '';
           healthMonitor.startMonitoring(this.sock!, ownerJid);
           analyticsEngine.startPeriodicReports(this.sock!, ownerJid);
+          this.syncGroups().catch((err) => console.warn('[WhatsAppClient] Error syncing groups on connect:', err?.message || err));
           console.log('✅ [WhatsAppClient] Connection established, contact replies cycle & server watchdog active!');
         }
       });
@@ -612,6 +613,8 @@ export class WhatsAppClient {
             for (const chat of chats) {
               if (chat.id && !chat.id.endsWith('@g.us') && (chat.name || (chat as any).notify)) {
                 contactService.autoSaveContact(chat.id, chat.name || (chat as any).notify);
+              } else if (chat.id && chat.id.endsWith('@g.us') && (chat.name || (chat as any).subject)) {
+                upsertKnownGroup(chat.id, chat.name || (chat as any).subject);
               }
               const embedded = (chat as any).messages;
               if (Array.isArray(embedded)) {
@@ -711,7 +714,13 @@ export class WhatsAppClient {
         try {
           let loggedUnreadDm = false;
           for (const chat of newChats) {
-            if (!chat.id || chat.id.endsWith('@g.us') || chat.id.includes('broadcast')) continue;
+            if (chat.id && chat.id.endsWith('@g.us')) {
+              if (chat.name || (chat as any).subject) {
+                upsertKnownGroup(chat.id, chat.name || (chat as any).subject);
+              }
+              continue;
+            }
+            if (!chat.id || chat.id.includes('broadcast')) continue;
             if (chat.name || (chat as any).notify) {
               contactService.autoSaveContact(chat.id, chat.name || (chat as any).notify);
             }
@@ -746,6 +755,17 @@ export class WhatsAppClient {
         } catch {}
       });
 
+      // Passively record group subject updates
+      this.sock.ev.on('groups.update', (updates) => {
+        try {
+          for (const u of updates) {
+            if (u.id && u.subject) {
+              upsertKnownGroup(u.id, u.subject);
+            }
+          }
+        } catch {}
+      });
+
       // Message handler
       this.sock.ev.on('messages.upsert', async (m) => {
         for (const msg of m.messages) {
@@ -754,6 +774,36 @@ export class WhatsAppClient {
       });
     } finally {
       this.isConnecting = false;
+    }
+  }
+
+  /**
+   * Fetches all WhatsApp groups the bot is currently participating in and syncs them to SQLite.
+   */
+  public async syncGroups(): Promise<void> {
+    if (!this.sock?.groupFetchAllParticipating) return;
+    try {
+      const participating = await this.sock.groupFetchAllParticipating();
+      const botNumber = this.sock.user?.id ? `${this.sock.user.id.split(':')[0].split('@')[0]}@s.whatsapp.net` : '';
+      const botLid = this.sock.user?.lid ? `${this.sock.user.lid.split(':')[0].split('@')[0]}@lid` : '';
+
+      for (const group of Object.values(participating) as any[]) {
+        if (!group.id || !group.subject) continue;
+        const isAdmin = Boolean(
+          group.participants?.some((p: any) => {
+            const pId = p.id ? `${p.id.split(':')[0].split('@')[0]}@${p.id.split('@')[1] || 's.whatsapp.net'}` : '';
+            const pLid = p.lid ? `${p.lid.split(':')[0].split('@')[0]}@lid` : '';
+            return (
+              (p.admin === 'admin' || p.admin === 'superadmin') &&
+              (p.id === this.sock?.user?.id || pId === botNumber || pLid === botLid)
+            );
+          })
+        );
+        upsertKnownGroup(group.id, group.subject, group.participants?.length || 0, isAdmin);
+      }
+      console.log(`[WhatsAppClient] 👥 Synced ${Object.keys(participating).length} participating groups into memory.`);
+    } catch (err: any) {
+      console.warn('[WhatsAppClient] Failed to fetch participating groups:', err?.message || err);
     }
   }
 

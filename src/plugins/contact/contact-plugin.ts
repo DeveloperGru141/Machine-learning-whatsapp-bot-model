@@ -4,7 +4,8 @@ import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { contactService } from '../../memory/contact-service.js';
 import { whatsAppClient } from '../../core/client.js';
 import { config } from '../../config/env.js';
-import { db } from '../../memory/db.js';
+import { db, findKnownGroup } from '../../memory/db.js';
+import { chatLogger } from '../../memory/chat-logger.js';
 import { OutboundSender } from '../../core/sender.js';
 import { antiBanEngine } from '../../security/anti-ban.js';
 
@@ -436,6 +437,26 @@ export class ContactPlugin implements IPlugin {
           }
 
           if (!targetJid) {
+            // Smart Fallback: Check if the recipient name matches a WhatsApp group!
+            const matchedGroup = findKnownGroup(rawRecipient);
+            if (matchedGroup && ctx.sock) {
+              await ctx.sock.sendMessage(matchedGroup.group_jid, { text: rawMessage });
+              chatLogger.logMessage({
+                chatJid: matchedGroup.group_jid,
+                senderJid: 'bot',
+                senderName: config.bot.name,
+                isGroup: true,
+                contentType: 'text',
+                messageText: rawMessage,
+                timestamp: Date.now(),
+              });
+              return {
+                success: true,
+                message: `✅ Message sent to group "${matchedGroup.subject}": "${rawMessage}"`,
+                data: { groupJid: matchedGroup.group_jid, subject: matchedGroup.subject },
+              };
+            }
+
             return {
               success: false,
               message: `Could not find a contact matching "${rawRecipient}" in the address book. Please specify their phone number so I can send the message.`,

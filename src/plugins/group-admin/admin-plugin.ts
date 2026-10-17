@@ -3,7 +3,7 @@ import { config } from '../../config/env.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
 import { chatLogger } from '../../memory/chat-logger.js';
 import { contactService } from '../../memory/contact-service.js';
-import { logAutonomousAction } from '../../memory/db.js';
+import { db, logAutonomousAction, upsertKnownGroup, findKnownGroup, getAllKnownGroups } from '../../memory/db.js';
 
 export class GroupAdminPlugin implements IPlugin {
   name = 'GroupAdminSuite';
@@ -531,6 +531,10 @@ export class GroupAdminPlugin implements IPlugin {
 
           const groupTitle = groupInfo?.subject || 'the group';
 
+          if (groupJid) {
+            upsertKnownGroup(groupJid, groupTitle, groupInfo?.size || 0, false);
+          }
+
           logAutonomousAction('joined_group', groupJid || 'group', ctx.senderJid, `Joined group "${groupTitle}" via invite link`);
 
           // Send a warm greeting into the newly joined group
@@ -559,6 +563,135 @@ export class GroupAdminPlugin implements IPlugin {
           return {
             success: false,
             message: `Failed to join group: ${err?.message || 'The link may have expired or was revoked.'}`,
+          };
+        }
+      },
+    },
+    {
+      name: 'send_message_to_group',
+      description: 'Sends or relays a message to a WhatsApp group that the bot belongs to, or replies to a specific member inside that group. Use whenever asked to "send [msg] to [group]", "post in [group]", "reply to [person] on [group]", or "tell [group] ...".',
+      parameters: {
+        type: 'object',
+        properties: {
+          group: {
+            type: 'string',
+            description: 'The name or keyword of the group (e.g., "IFT Interactive Space", "IFT", or group JID).',
+          },
+          message: {
+            type: 'string',
+            description: 'The message text to send or reply with in the group.',
+          },
+          target_member: {
+            type: 'string',
+            description: 'Optional name, push name, or handle of the group member to tag or reply to (e.g. "god\'s virtue", "David").',
+          },
+        },
+        required: ['group', 'message'],
+      },
+      execute: async (args: { group: string; message: string; target_member?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const rawGroup = (args.group || '').trim();
+          const rawMessage = (args.message || '').trim();
+
+          if (!rawGroup || !rawMessage) {
+            return { success: false, message: 'Both group name and message content are required.' };
+          }
+
+          // 1. Resolve Group JID: First check database cache
+          let targetGroupJid = '';
+          let targetGroupSubject = rawGroup;
+
+          const cached = findKnownGroup(rawGroup);
+          if (cached) {
+            targetGroupJid = cached.group_jid;
+            targetGroupSubject = cached.subject;
+          }
+
+          // 2. If not found or to refresh, query live socket
+          if (!targetGroupJid && ctx.sock?.groupFetchAllParticipating) {
+            try {
+              const participating = await ctx.sock.groupFetchAllParticipating();
+              const lowerSearch = rawGroup.toLowerCase();
+              for (const [jid, meta] of Object.entries(participating) as [string, any][]) {
+                const sub = (meta.subject || '').toLowerCase();
+                if (sub.includes(lowerSearch) || lowerSearch.includes(sub)) {
+                  targetGroupJid = jid;
+                  targetGroupSubject = meta.subject || rawGroup;
+                  upsertKnownGroup(jid, targetGroupSubject, meta.participants?.length || 0);
+                  break;
+                }
+              }
+            } catch (fetchErr) {
+              console.warn('[GroupAdmin] Error fetching participating groups during send:', fetchErr);
+            }
+          }
+
+          if (!targetGroupJid) {
+            return {
+              success: false,
+              message: `Could not find a group matching "${rawGroup}" among the groups I am in. You can ask me "which groups are you in?" to see my list of groups.`,
+            };
+          }
+
+          // 3. Resolve target_member mention/reply if provided
+          let mentions: string[] = [];
+          let formattedText = rawMessage;
+
+          if (args.target_member && args.target_member.trim()) {
+            const targetName = args.target_member.trim();
+            try {
+              const memberRow = db.prepare(`
+                SELECT sender_jid, sender_name FROM chat_logs
+                WHERE chat_jid = ? AND is_group = 1 AND (LOWER(sender_name) LIKE LOWER(?) OR sender_jid LIKE ?)
+                ORDER BY id DESC LIMIT 1
+              `).get(targetGroupJid, `%${targetName}%`, `%${targetName}%`) as { sender_jid: string; sender_name: string } | undefined;
+
+              if (memberRow && memberRow.sender_jid) {
+                mentions.push(memberRow.sender_jid);
+                const rawSender = memberRow.sender_jid.split('@')[0].split(':')[0];
+                const isLid = memberRow.sender_jid.endsWith('@lid') || rawSender.length > 13;
+                const mentionTag = isLid ? `@${memberRow.sender_name || targetName}` : `@${rawSender}`;
+                formattedText = `${mentionTag} ${rawMessage}`;
+              } else {
+                formattedText = `@${targetName} ${rawMessage}`;
+              }
+            } catch {}
+          }
+
+          // 4. Send the message to the group
+          await ctx.sock.sendMessage(targetGroupJid, {
+            text: formattedText,
+            mentions: mentions.length > 0 ? mentions : undefined,
+          });
+
+          // 5. Log the outbound message in chat logs
+          chatLogger.logMessage({
+            chatJid: targetGroupJid,
+            senderJid: 'bot',
+            senderName: config.bot.name,
+            isGroup: true,
+            contentType: 'text',
+            messageText: formattedText,
+            timestamp: Date.now(),
+          });
+
+          logAutonomousAction('sent_group_message', targetGroupJid, ctx.senderJid, `Sent message to "${targetGroupSubject}": "${rawMessage}"`);
+
+          const replyLabel = args.target_member ? ` (replying to ${args.target_member})` : '';
+          return {
+            success: true,
+            message: `✅ Message sent to group "${targetGroupSubject}"${replyLabel}: "${rawMessage}"`,
+            data: {
+              groupJid: targetGroupJid,
+              subject: targetGroupSubject,
+              message: formattedText,
+            },
+          };
+        } catch (err: any) {
+          console.error('[GroupAdmin] Error sending message to group:', err);
+          return {
+            success: false,
+            message: `Failed to send message to group: ${err.message}`,
           };
         }
       },

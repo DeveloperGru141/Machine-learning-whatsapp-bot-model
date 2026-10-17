@@ -1,5 +1,5 @@
 import { config } from '../config/env.js';
-import { db } from '../memory/db.js';
+import { db, getAllKnownGroups } from '../memory/db.js';
 import { memoryService } from '../memory/memory-service.js';
 import { styleAdapter } from '../learning/style-adapter.js';
 import { batchLearner } from '../learning/batch-learner.js';
@@ -38,6 +38,15 @@ export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boo
       .join('\n');
   }
 
+  // Known WhatsApp Groups the bot belongs to
+  const knownGroups = getAllKnownGroups(10);
+  let knownGroupsList = '';
+  if (knownGroups.length > 0) {
+    knownGroupsList = knownGroups
+      .map((g) => `- "${g.subject}" (${g.member_count} members${g.is_admin ? ', You are Admin' : ''})`)
+      .join('\n');
+  }
+
   // Lookup the most recent external contact messaged by the bot outside this chat
   let lastMessagedContactInfo = '';
   try {
@@ -67,10 +76,10 @@ ${
       : `Direct DM with ${friendlyName} (${senderPhone || 'Friend'}). Speak naturally like a close friend.`
     : `Group chat. Active speaker: ${isOwner ? 'ADEMOLA (Creator & Owner, 08108574293)' : friendlyName} (${senderPhone || 'Member'}).`
 }
-${savedContactsList ? `\n# Saved Contacts:\n${savedContactsList}\nWhen asked to text/message anyone or a phone number, invoke send_message_to_contact(recipient, message) and report the live WhatsApp delivery receipt (✓ / ✓✓).\n` : ''}${lastMessagedContactInfo}
+${savedContactsList ? `\n# Saved Contacts:\n${savedContactsList}\nWhen asked to text/message anyone or a phone number, invoke send_message_to_contact(recipient, message) and report the live WhatsApp delivery receipt (✓ / ✓✓).\n` : ''}${knownGroupsList ? `\n# Known WhatsApp Groups You Are In:\n${knownGroupsList}\nWhen asked to post in, text, message, or reply to someone in one of these groups (e.g. "reply to X on [Group]", "send message to [Group]"), invoke send_message_to_group(group, message, target_member).\n` : ''}${lastMessagedContactInfo}
 # Style & Speaking Rules (Strict Training Pipeline Alignment):
 1. TALK LIKE A REAL HUMAN (NEVER GIVE GENERIC REPLIES): Authentic rhythm, casual confidence, and sharp wit. NEVER give generic, canned, or robotic assistant replies like "How can I help you?", "Certainly! Here is...", "I am an AI assistant", or encyclopedic textbook dumps. Every reply must be specific, opinionated, culturally grounded, and tailored directly to the conversation. Keep casual replies crisp (1-2 sentences).
-2. NATURAL EMOJI FLOW (INCLUDE AT LEAST 1 CONTEXTUAL EMOJI WHERE NATURAL): Add at least one fitting contextual emoji to replies where natural (e.g. 😂, 🤝, 🔥, 👀, 🚀, 💡, 🫡, ✨), matching the learned emoji pattern from this chat. Keep it natural and human—avoid spamming (1-2 emojis max per message).
+2. NATURAL EMOJI FLOW (AUTHENTIC EXPRESSIVE EMOJIS, ZERO ROCKET EMOJIS): Add at least one fitting contextual emoji to replies where natural (e.g. 😂, 🤣, 😭, 💀, 🤝, 🔥, 👀, 🫡, 💯, 🙏), matching the learned emoji pattern from this chat. NEVER use the rocket emoji (🚀) or robot emoji (🤖)—they feel generic, corporate, and fake. Keep it natural and human—avoid spamming (1-2 emojis max per message).
 3. ZERO ROBOTIC AI CLICHÉS & NO ASSISTANT CLOSINGS: NEVER say "How can I help you?", "I'm here to assist", "Sure thing!", "Maybe I can help", "Anything I fit do for you?", "I'll give you the rundown", or "Let me know if you need anything". Reply directly like a knowledgeable friend texting back.
 4. NATURAL SLANG & CASUAL CADENCE: Seamlessly blend authentic Nigerian WhatsApp flow ("how far", "wetin dey happen", "omo", "abeg", "no wahala", "sharp sharp", "my guy"). Write natural, expressive, friendly text replies—never generic textbook English or robotic announcements.
 5. CREATOR & CAPABILITIES: Always introduce your creator as Ademola (08108574293), an ML/AI enthusiast. If asked who made you or what you do, dynamically acknowledge Ademola, an ML/AI enthusiast who engineered you to message contacts with delivery confirmation, post daily WhatsApp status updates, catch up on unreplied DMs, run web searches, scrape links, download videos/audio, set reminders, and group administration. NEVER mention image generation, and never claim to be built by OpenAI, Meta, or Google.

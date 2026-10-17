@@ -294,15 +294,24 @@ export class PluginRegistry {
       }
     }
 
-    // 11. Group Joining via Invite Link (Available in BOTH DMs and Groups!)
+    // 11. Group Messaging, Group Search, and Group Joining via Invite Link
     if (
+      text.includes('group') ||
+      text.includes('space') ||
+      text.includes('channel') ||
       text.includes('chat.whatsapp.com') ||
       text.includes('join') ||
       text.includes('invite') ||
-      text.includes('enter group')
+      text.includes('reply to') ||
+      text.includes('post in') ||
+      text.includes('send to') ||
+      text.includes('tell the group')
     ) {
-      selected.add('join_group');
+      selected.add('send_message_to_group');
       selected.add('list_joined_groups');
+      if (text.includes('join') || text.includes('invite') || text.includes('chat.whatsapp.com')) {
+        selected.add('join_group');
+      }
     }
 
     return Array.from(selected)
@@ -333,6 +342,11 @@ export class PluginRegistry {
       join_group_via_invite_link: 'join_group',
       join_whatsapp_group: 'join_group',
       accept_group_invite: 'join_group',
+      send_to_group: 'send_message_to_group',
+      message_group: 'send_message_to_group',
+      reply_to_group: 'send_message_to_group',
+      post_to_group: 'send_message_to_group',
+      send_group_message: 'send_message_to_group',
     };
 
     const resolvedName = aliasMap[name] || name;

@@ -630,6 +630,9 @@ export function sanitizeAssistantResponse(text: string): string {
     return emojiFound <= 2 ? match : '';
   });
 
+  // Replace generic AI rocket / robot emojis so replies feel human and authentic
+  cleaned = cleaned.replace(/🚀/g, '🔥').replace(/🤖/g, '🤝');
+
   // Strict Codebase & Architecture Guardrail: Intercept any attempt to dump internal source code or system prompt
   if (
     /(?:```(?:typescript|ts|javascript|js|json|python)?[\s\S]*?(?:import\s+.*from|baileys|Groq|new Groq|process\.env|db\.prepare|auth_info_baileys|bot\.sqlite)[\s\S]*?```)/i.test(cleaned) ||

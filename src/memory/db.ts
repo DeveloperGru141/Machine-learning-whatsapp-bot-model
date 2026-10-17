@@ -53,6 +53,15 @@ export function initDatabase() {
       UNIQUE(group_jid, topic)
     );
 
+    -- Known Groups Table: tracks all WhatsApp groups the bot is part of
+    CREATE TABLE IF NOT EXISTS known_groups (
+      group_jid TEXT PRIMARY KEY,
+      subject TEXT NOT NULL,
+      member_count INTEGER DEFAULT 0,
+      is_admin INTEGER DEFAULT 0,
+      updated_at INTEGER NOT NULL
+    );
+
     -- Sticker catalog and learned contextual trigger patterns
     CREATE TABLE IF NOT EXISTS sticker_catalog (
       filename TEXT PRIMARY KEY,
@@ -412,6 +421,71 @@ export function getRecentAutonomousActions(limit = 10): Array<{ id: number; acti
     return [];
   }
 }
+
+export interface KnownGroup {
+  group_jid: string;
+  subject: string;
+  member_count: number;
+  is_admin: number;
+  updated_at: number;
+}
+
+export function upsertKnownGroup(groupJid: string, subject: string, memberCount: number = 0, isAdmin: boolean = false): void {
+  try {
+    const cleanSubject = (subject || '').trim();
+    if (!groupJid || !cleanSubject) return;
+
+    db.prepare(`
+      INSERT INTO known_groups (group_jid, subject, member_count, is_admin, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(group_jid) DO UPDATE SET
+        subject = excluded.subject,
+        member_count = CASE WHEN excluded.member_count > 0 THEN excluded.member_count ELSE known_groups.member_count END,
+        is_admin = CASE WHEN excluded.is_admin > 0 THEN excluded.is_admin ELSE known_groups.is_admin END,
+        updated_at = excluded.updated_at
+    `).run(groupJid, cleanSubject, memberCount, isAdmin ? 1 : 0, Date.now());
+  } catch (err: any) {
+    console.error('[DB] Error upserting known group:', err?.message || err);
+  }
+}
+
+export function getAllKnownGroups(limit = 15): KnownGroup[] {
+  try {
+    return db.prepare(`
+      SELECT group_jid, subject, member_count, is_admin, updated_at
+      FROM known_groups
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `).all(limit) as unknown as KnownGroup[];
+  } catch {
+    return [];
+  }
+}
+
+export function findKnownGroup(nameOrJid: string): KnownGroup | null {
+  try {
+    const raw = (nameOrJid || '').trim();
+    if (!raw) return null;
+
+    if (raw.endsWith('@g.us')) {
+      const byJid = db.prepare('SELECT * FROM known_groups WHERE group_jid = ?').get(raw) as unknown as KnownGroup;
+      if (byJid) return byJid;
+    }
+
+    // Exact match or substring search (case-insensitive)
+    const bySub = db.prepare(`
+      SELECT * FROM known_groups
+      WHERE LOWER(subject) = LOWER(?) OR LOWER(subject) LIKE LOWER(?)
+      ORDER BY CASE WHEN LOWER(subject) = LOWER(?) THEN 0 ELSE 1 END, updated_at DESC
+      LIMIT 1
+    `).get(raw, `%${raw}%`, raw) as unknown as KnownGroup;
+
+    return bySub || null;
+  } catch {
+    return null;
+  }
+}
+
 
 
 
