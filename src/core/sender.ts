@@ -9,6 +9,21 @@ export function setActiveSocketGetter(getter: () => WASocket | null) {
 }
 
 export class OutboundSender {
+  private static dispatchedIds: Set<string> = new Set();
+
+  public static isDispatchedId(id?: string | null): boolean {
+    return id ? this.dispatchedIds.has(id) : false;
+  }
+
+  public static recordDispatchedId(id?: string | null): void {
+    if (!id) return;
+    this.dispatchedIds.add(id);
+    if (this.dispatchedIds.size > 2000) {
+      const first = this.dispatchedIds.keys().next().value;
+      if (first) this.dispatchedIds.delete(first);
+    }
+  }
+
   /**
    * Verifies outbound safety with the Anti-Ban Engine before dispatching.
    */
@@ -62,6 +77,7 @@ export class OutboundSender {
       let currentSock = sock || activeSocketGetter?.();
       try {
         const result = await currentSock.sendMessage(chatJid, { text }, { quoted: safeQuoted });
+        this.recordDispatchedId(result?.key?.id);
         chatLogger.logOutboundMessage(chatJid, text);
         return result;
       } catch (err: any) {
@@ -69,6 +85,7 @@ export class OutboundSender {
           console.warn(`[OutboundSender] Reply with quoted failed (${err.message}), retrying direct text...`);
           try {
             const result = await currentSock.sendMessage(chatJid, { text });
+            this.recordDispatchedId(result?.key?.id);
             chatLogger.logOutboundMessage(chatJid, text);
             return result;
           } catch (innerErr: any) {
@@ -137,15 +154,19 @@ export class OutboundSender {
 
     return antiBanEngine.scheduleDispatch(chatJid, async () => {
       try {
-        return await sock.sendMessage(
+        const res = await sock.sendMessage(
           chatJid,
           { image: content, caption },
           { quoted: safeQuoted }
         );
+        this.recordDispatchedId(res?.key?.id);
+        return res;
       } catch (err: any) {
         if (safeQuoted) {
           console.warn(`[OutboundSender] sendImage with quoted failed (${err.message}), retrying directly...`);
-          return await sock.sendMessage(chatJid, { image: content, caption });
+          const res = await sock.sendMessage(chatJid, { image: content, caption });
+          this.recordDispatchedId(res?.key?.id);
+          return res;
         }
         throw err;
       }
@@ -180,7 +201,7 @@ export class OutboundSender {
 
     return antiBanEngine.scheduleDispatch(chatJid, async () => {
       try {
-        return await sock.sendMessage(
+        const res = await sock.sendMessage(
           chatJid,
           {
             audio: content,
@@ -189,14 +210,18 @@ export class OutboundSender {
           },
           { quoted: safeQuoted }
         );
+        this.recordDispatchedId(res?.key?.id);
+        return res;
       } catch (err: any) {
         if (safeQuoted) {
           console.warn(`[OutboundSender] sendAudio with quoted failed (${err.message}), retrying directly...`);
-          return await sock.sendMessage(chatJid, {
+          const res = await sock.sendMessage(chatJid, {
             audio: content,
             mimetype,
             ptt: isVoiceNote,
           });
+          this.recordDispatchedId(res?.key?.id);
+          return res;
         }
         throw err;
       }

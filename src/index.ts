@@ -7,7 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import http from 'http';
 import { config } from './config/env.js';
-import { initDatabase } from './memory/db.js';
+import { db, initDatabase } from './memory/db.js';
 import { pluginRegistry } from './plugins/registry.js';
 import { imageGenPlugin } from './plugins/image-gen/image-plugin.js';
 import { audioDownloaderPlugin } from './plugins/audio-downloader/audio-plugin.js';
@@ -223,6 +223,18 @@ function startHealthServer() {
       res.end(payload);
       return;
     }
+    if (req.url === '/debug' || req.url === '/recent-logs') {
+      try {
+        const rows = db.prepare(`SELECT * FROM chat_logs ORDER BY id DESC LIMIT 25`).all();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ count: rows.length, logs: rows }, null, 2));
+      } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not Found' }));
   });

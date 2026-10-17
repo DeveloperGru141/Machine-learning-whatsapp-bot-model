@@ -61,6 +61,7 @@ export class WhatsAppClient {
   private latestPairingCode: string | null = null;
   private latestPairingCodeAt = 0;
   private latestQr: string | null = null;
+  private sessionStartedAt = Date.now();
   private attemptedCatchupKeys: Set<string> = new Set();
   private messageStore: Map<string, any> = new Map();
   private deliveryStatusMap: Map<
@@ -310,11 +311,10 @@ export class WhatsAppClient {
       }
     };
 
-    this.scheduleUnrepliedScan(20_000);
-
+    // Periodic scanner runs every 2.5 minutes passively for messages that arrived during this session
     this.unrepliedScanInterval = setInterval(() => {
       runCycleIfActive();
-    }, 120_000);
+    }, 150_000);
     if (this.unrepliedScanInterval.unref) this.unrepliedScanInterval.unref();
   }
 
@@ -771,39 +771,57 @@ export class WhatsAppClient {
       }
     }
 
-    const msgTime = Number(msg.messageTimestamp) * 1000;
-    const effectiveMsgTime = msgTime ? Math.min(msgTime, Date.now()) : Date.now();
+    // Safely parse timestamp even if deserialized as protobuf Long object
+    const rawTs = (msg.messageTimestamp as any)?.low ?? msg.messageTimestamp;
+    const msgTime = Number(rawTs) * 1000;
+    const effectiveMsgTime = !isNaN(msgTime) && msgTime > 0 ? Math.min(msgTime, Date.now()) : Date.now();
 
-    // Ignore messages sent by ourselves for agent trigger, and only log if not already logged by OutboundSender
-    if (msg.key?.fromMe) {
+    // 1. Check if this is an automated outbound message sent by OutboundSender
+    const isBotDispatched = Boolean(msg.key?.id && OutboundSender.isDispatchedId(msg.key.id));
+    if (isBotDispatched) {
+      if (msg.key?.id && msg.key?.remoteJid) {
+        this.recordDeliveryStatus(msg.key.id, msg.key.remoteJid, Number(msg.status || 2));
+      }
+      return;
+    }
+
+    // 2. Distinguish "Message Yourself" (user testing on their own WhatsApp phone) vs user texting a 3rd party
+    const cleanRemote = (msg.key?.remoteJid || '').split('@')[0].split(':')[0];
+    const botOwnDigits = (this.sock?.user?.id || '').split('@')[0].split(':')[0] || '2347058967815';
+    const isMessageToSelf =
+      Boolean(msg.key?.fromMe) &&
+      !msg.key?.remoteJid?.endsWith('@g.us') &&
+      (cleanRemote === botOwnDigits || cleanRemote === '2347058967815' || cleanRemote === config.bot.pairingPhoneNumber);
+
+    // If fromMe and NOT Message Yourself, the owner is manually texting someone else: do not intervene!
+    if (msg.key?.fromMe && !isMessageToSelf) {
       if (msg.key?.id && msg.key?.remoteJid) {
         this.recordDeliveryStatus(msg.key.id, msg.key.remoteJid, Number(msg.status || 2));
       }
       const normalized = normalizeMessage(msg);
       if (normalized && (normalized.text || normalized.contentType)) {
-        const alreadyLogged = db
-          .prepare(
-            `SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid = 'bot' AND message_text = ? AND timestamp >= ? LIMIT 1`
-          )
-          .get(normalized.chatJid, normalized.text || '', effectiveMsgTime - 20_000);
-        if (!alreadyLogged) {
-          chatLogger.logMessage({
-            chatJid: normalized.chatJid,
-            senderJid: 'bot',
-            senderName: config.bot.name,
-            isGroup: normalized.isGroup,
-            contentType: normalized.contentType,
-            messageText: normalized.text,
-            stickerFilename: normalized.stickerFilename,
-            timestamp: effectiveMsgTime,
-          });
-        }
+        chatLogger.logMessage({
+          chatJid: normalized.chatJid,
+          senderJid: 'bot',
+          senderName: config.bot.name,
+          isGroup: normalized.isGroup,
+          contentType: normalized.contentType,
+          messageText: normalized.text,
+          stickerFilename: normalized.stickerFilename,
+          timestamp: effectiveMsgTime,
+        });
       }
       return;
     }
 
     const normalized = normalizeMessage(msg);
     if (!normalized) return;
+
+    // If Message Yourself, set sender to the owner so owner recognition triggers properly
+    if (isMessageToSelf) {
+      normalized.senderJid = config.bot.owners[0] || '2348108574293@s.whatsapp.net';
+      normalized.senderName = 'Ademola';
+    }
 
     // 1. Passive Continuous Learning & Analytics: Log EVERY message in all chats
     chatLogger.logMessage({
@@ -832,9 +850,9 @@ export class WhatsAppClient {
 
     // Historical Backlog Evaluation:
     // Strictly ignore any message older than 2 minutes for immediate live trigger,
-    // but if it is an offline DM, schedule a background unreplied DM scan so the user still gets a reply!
-    if (msgTime && Date.now() - msgTime > 120_000) {
-      if (!normalized.isGroup) {
+    // and ONLY consider offline DMs that arrived DURING this session (never historical sync from before startup)
+    if (!isNaN(msgTime) && msgTime > 0 && Date.now() - msgTime > 120_000) {
+      if (!normalized.isGroup && msgTime >= this.sessionStartedAt - 5 * 60 * 1000) {
         this.scheduleUnrepliedScan(12_000);
       }
       return;
@@ -1090,8 +1108,8 @@ export class WhatsAppClient {
           return false;
         }
 
-        // 2. Ignore very old messages (>7 days old) to avoid resurrecting dead threads
-        if (chat.timestamp && chat.timestamp > 0 && chat.timestamp < sevenDaysAgo) {
+        // 2. Ignore messages that arrived before this bot session started (never auto-reply to synced historical chats)
+        if (chat.timestamp && chat.timestamp < this.sessionStartedAt - 5 * 60 * 1000) {
           return false;
         }
 
