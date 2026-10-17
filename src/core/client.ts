@@ -204,7 +204,7 @@ export class WhatsAppClient {
 
   public isRegistered(): boolean {
     const creds = this.sock?.authState?.creds;
-    return Boolean(creds?.registered || creds?.account || creds?.me?.id);
+    return Boolean(creds?.registered || creds?.account);
   }
 
   /**
