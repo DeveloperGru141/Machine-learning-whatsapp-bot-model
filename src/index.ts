@@ -235,6 +235,34 @@ function startHealthServer() {
       return;
     }
 
+    if (req.url === '/session-bundle') {
+      try {
+        const credsFile = path.join(config.paths.sessions, 'creds.json');
+        if (!fs.existsSync(credsFile)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'No registered session exists yet' }));
+          return;
+        }
+        const zlib = await import('zlib');
+        const filesMap: Record<string, string> = {};
+        for (const file of fs.readdirSync(config.paths.sessions)) {
+          const fullPath = path.join(config.paths.sessions, file);
+          if (fs.statSync(fullPath).isFile()) {
+            filesMap[file] = fs.readFileSync(fullPath, 'utf8');
+          }
+        }
+        const jsonStr = JSON.stringify(filesMap);
+        const gzipped = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'));
+        const bundle = gzipped.toString('base64');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, count: Object.keys(filesMap).length, bundle }));
+      } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not Found' }));
   });
