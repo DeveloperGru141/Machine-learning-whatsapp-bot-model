@@ -47,9 +47,11 @@ export class ImageGenPlugin implements IPlugin {
             console.log('[ImageGen] 🍌 Generating via Nano Banana (Nano Banana Pro / Gemini 3 Image)...');
             try {
               const bananaModels = [
-                'nano-banana-pro-preview',
-                'gemini-nano-banana-2.1',
+                'gemini-2.5-flash-image',
                 'gemini-3-pro-image',
+                'nano-banana-pro-preview',
+                'gemini-3.1-flash-image',
+                'gemini-nano-banana-2.1',
                 'imagen-3.0-generate-002',
               ];
 
@@ -72,7 +74,7 @@ export class ImageGenPlugin implements IPlugin {
                         responseModalities: ['IMAGE'],
                       },
                     }),
-                    signal: AbortSignal.timeout(20000),
+                    signal: AbortSignal.timeout(25000),
                   });
 
                   if (response.ok) {
@@ -82,85 +84,70 @@ export class ImageGenPlugin implements IPlugin {
 
                     if (base64Data) {
                       const imageBuffer = Buffer.from(base64Data, 'base64');
-                      const caption = args.caption || `🎨 "${args.prompt}" (Nano Banana)`;
+                      const caption = args.caption || `🎨 "${args.prompt}" (Google Imagen)`;
                       await ctx.sendImage(imageBuffer, caption);
 
-                      console.log(`[ImageGen] ✅ Nano Banana (${model}) image successfully generated (${imageBuffer.length} bytes) and sent!`);
+                      console.log(`[ImageGen] ✅ Google Imagen (${model}) image successfully generated (${imageBuffer.length} bytes) and sent!`);
                       return {
                         success: true,
-                        message: `Top-tier image generated via Nano Banana (${model}) and sent to chat.`,
+                        message: `Top-tier image generated via Google Imagen (${model}) and sent to chat.`,
                       };
                     }
-                  }
-
-                  // Attempt 2: :predict endpoint (legacy Imagen 3 schema)
-                  const predictUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:predict?key=${geminiApiKey}`;
-                  const predictResponse = await fetch(predictUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      instances: [{ prompt: args.prompt }],
-                      parameters: {
-                        sampleCount: 1,
-                        aspectRatio: ratio,
-                        outputMimeType: 'image/jpeg',
-                      },
-                    }),
-                    signal: AbortSignal.timeout(20000),
-                  });
-
-                  if (predictResponse.ok) {
-                    const predictData = (await predictResponse.json()) as any;
-                    const base64Data = predictData.predictions?.[0]?.bytesBase64Encoded;
-
-                    if (base64Data) {
-                      const imageBuffer = Buffer.from(base64Data, 'base64');
-                      const caption = args.caption || `🎨 "${args.prompt}" (Nano Banana)`;
-                      await ctx.sendImage(imageBuffer, caption);
-
-                      console.log(`[ImageGen] ✅ Nano Banana (${model}) image successfully generated via predict (${imageBuffer.length} bytes) and sent!`);
-                      return {
-                        success: true,
-                        message: `Top-tier image generated via Nano Banana (${model}) and sent to chat.`,
-                      };
+                  } else {
+                    const errText = await response.text();
+                    if (response.status === 429) {
+                      console.warn(`[ImageGen] Google ${model} returned 429 Quota Exceeded (Google AI Studio requires Pay-As-You-Go/Billing enabled for image models).`);
+                    } else {
+                      console.warn(`[ImageGen] Google ${model} failed (${response.status}): ${errText.slice(0, 150)}`);
                     }
                   }
                 } catch (singleModelErr: any) {
-                  // Try next banana model
+                  // Try next model
                 }
               }
 
-              console.warn('[ImageGen] ⚠️ Nano Banana quota limit or endpoint reached. Seamlessly falling back to secondary FLUX engine...');
+              console.warn('[ImageGen] ⚠️ Google image quota limit reached (free tier limit is 0 for image models). Falling back to ultra-high quality FLUX Realism engine...');
             } catch (bananaErr: any) {
-              console.warn(`[ImageGen] Nano Banana error: ${bananaErr.message}. Falling back...`);
+              console.warn(`[ImageGen] Google engine error: ${bananaErr.message}. Falling back...`);
             }
           } else {
-            console.log('[ImageGen] Note: GEMINI_API_KEY not configured. Using secondary FLUX engine (add GEMINI_API_KEY in .env for Nano Banana).');
+            console.log('[ImageGen] Note: GEMINI_API_KEY not configured. Using high-resolution FLUX Realism engine.');
           }
 
-          // 2. Secondary Engine: Enhanced High-Resolution FLUX.1
-          console.log('[ImageGen] Generating via enhanced FLUX.1 engine...');
-          const enhancedPrompt = encodeURIComponent(`${args.prompt}, 8k uhd, photorealistic, highly detailed, masterwork`);
-          const fluxUrl = `https://image.pollinations.ai/prompt/${enhancedPrompt}?model=flux&width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random() * 1000000)}`;
+          // 2. High-Resolution Photorealistic FLUX Realism Engine
+          console.log('[ImageGen] Generating via high-resolution FLUX Realism engine with automatic prompt enhancement...');
+          const enhancedPrompt = encodeURIComponent(`${args.prompt}, 8k resolution, award winning photography, ultra-detailed, photorealistic masterpiece, sharp focus, natural lighting`);
 
-          const res = await fetch(fluxUrl, { signal: AbortSignal.timeout(18000) });
-          if (!res.ok) {
-            return {
-              success: false,
-              message: `Image generation failed with HTTP ${res.status}. Please check your prompt or configure GEMINI_API_KEY for Nano Banana.`,
-            };
+          const fallbackEngines = [
+            `https://image.pollinations.ai/prompt/${enhancedPrompt}?model=flux-realism&width=1024&height=1024&nologo=true&enhance=true&private=true&seed=${Math.floor(Math.random() * 1000000)}`,
+            `https://image.pollinations.ai/prompt/${enhancedPrompt}?model=flux-pro&width=1024&height=1024&nologo=true&enhance=true&private=true&seed=${Math.floor(Math.random() * 1000000)}`,
+            `https://image.pollinations.ai/prompt/${enhancedPrompt}?model=flux&width=1024&height=1024&nologo=true&enhance=true&private=true&seed=${Math.floor(Math.random() * 1000000)}`,
+          ];
+
+          for (const engineUrl of fallbackEngines) {
+            try {
+              const res = await fetch(engineUrl, { signal: AbortSignal.timeout(25000) });
+              if (res.ok) {
+                const arrayBuffer = await res.arrayBuffer();
+                const buffer = Buffer.from(arrayBuffer);
+                if (buffer.length > 5000) {
+                  const caption = args.caption || `🎨 "${args.prompt}"`;
+                  await ctx.sendImage(buffer, caption);
+                  console.log(`[ImageGen] ✅ FLUX Realism image successfully delivered (${buffer.length} bytes).`);
+                  return {
+                    success: true,
+                    message: 'Image generated and delivered successfully to WhatsApp chat.',
+                  };
+                }
+              }
+            } catch (err: any) {
+              console.warn(`[ImageGen] Fallback engine error: ${err.message}, trying next...`);
+            }
           }
 
-          const arrayBuffer = await res.arrayBuffer();
-          const buffer = Buffer.from(arrayBuffer);
-
-          const caption = args.caption || `🎨 "${args.prompt}"`;
-          await ctx.sendImage(buffer, caption);
-
-          console.log(`[ImageGen] ✅ FLUX image successfully delivered (${buffer.length} bytes).`);
           return {
-            success: true,
-            message: 'Image generated and delivered successfully to WhatsApp chat.',
+            success: false,
+            message: 'Image generation failed across all available engines. Please try again with a different visual prompt.',
           };
         } catch (err: any) {
           console.error('[ImageGen] Critical error:', err.message);
