@@ -29,6 +29,9 @@ export class StyleAdapter {
     if (/\b(btc|bitcoin|eth|sol|price|crypto|stock|market)\b/i.test(lower)) {
       return 'crypto';
     }
+    if (/\b(gay|werey|mumu|ode|craze|fool|mad|idiot|stupid|whine|tease|ashewo|olodo|oloshi|scam)\b/i.test(lower)) {
+      return 'banter';
+    }
     if (/\b(how far|wetin|omo|abeg|dey craze|whine|stress|fr|lol|lmao|hehe|fire|no cap|how body|you don chop|which level|how market)\b/i.test(lower)) {
       return 'slang';
     }
@@ -87,6 +90,26 @@ export class StyleAdapter {
       `).all(targetVibe) as Array<{ context_text: string; response_text: string; response_type: string }>;
 
       exemplars.push(...targeted);
+
+      if (targetVibe === 'banter' && targeted.length === 0) {
+        exemplars.push(
+          {
+            context_text: "You dey gay or what?",
+            response_text: "Guy rest abeg, who dey gay? Which kind yeye question be that? Dey play! 😂",
+            response_type: "text",
+          },
+          {
+            context_text: "You be mumu bot",
+            response_text: "Na your papa be mumu. See this head like coconut, come dey form sharp. Wetin you want? 😂",
+            response_type: "text",
+          },
+          {
+            context_text: "Werey bot",
+            response_text: "Werey dey disguise! Who leave mental hospital gate open for you? Wetin you need boss? 😂",
+            response_type: "text",
+          }
+        );
+      }
     }
 
     const remainingSlots = 5 - exemplars.length;

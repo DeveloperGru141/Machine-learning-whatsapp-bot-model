@@ -29,13 +29,32 @@ export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boo
     ? '08108574293 / +2348108574293'
     : activeContact?.phone_number || contactService.extractPhoneNumber(userJid);
 
-  // Compact key contacts (limit 8 so saved contacts like Micah are always visible)
-  const savedContacts = contactService.getAllContacts(8);
+  // Compact key contacts (STRICT PRIVACY: ONLY inject into prompt if the user speaking is OWNER ADEMOLA!)
   let savedContactsList = '';
-  if (savedContacts.length > 0) {
-    savedContactsList = savedContacts
-      .map((c) => `- ${c.custom_name || c.display_name} ${c.phone_number ? '(+' + c.phone_number + ')' : ''}`)
-      .join('\n');
+  let lastMessagedContactInfo = '';
+  if (isOwner) {
+    const savedContacts = contactService.getAllContacts(8);
+    if (savedContacts.length > 0) {
+      savedContactsList = savedContacts
+        .map((c) => `- ${c.custom_name || c.display_name} ${c.phone_number ? '(+' + c.phone_number + ')' : ''}`)
+        .join('\n');
+    }
+
+    // Lookup the most recent external contact messaged by the bot outside this chat (owner-only context)
+    try {
+      const lastOutbound = db.prepare(`
+        SELECT chat_jid, message_text, timestamp FROM chat_logs
+        WHERE sender_jid = 'bot' AND is_group = 0 AND chat_jid != ?
+        ORDER BY id DESC LIMIT 1
+      `).get(chatJid) as { chat_jid: string; message_text: string; timestamp: number } | undefined;
+
+      if (lastOutbound && lastOutbound.chat_jid) {
+        const phone = contactService.extractPhoneNumber(lastOutbound.chat_jid);
+        const contact = contactService.getContact(phone || lastOutbound.chat_jid);
+        const name = contact?.custom_name || contact?.display_name || (phone ? `+${phone}` : 'Contact');
+        lastMessagedContactInfo = `\n# Most Recent Contact You Messaged (Outside This Chat):\n- Name/Phone: ${name} (+${phone})\n- Message Sent: "${lastOutbound.message_text}"\n`;
+      }
+    } catch {}
   }
 
   // Known WhatsApp Groups the bot belongs to
@@ -46,23 +65,6 @@ export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boo
       .map((g) => `- "${g.subject}" (${g.member_count} members${g.is_admin ? ', You are Admin' : ''})`)
       .join('\n');
   }
-
-  // Lookup the most recent external contact messaged by the bot outside this chat
-  let lastMessagedContactInfo = '';
-  try {
-    const lastOutbound = db.prepare(`
-      SELECT chat_jid, message_text, timestamp FROM chat_logs
-      WHERE sender_jid = 'bot' AND is_group = 0 AND chat_jid != ?
-      ORDER BY id DESC LIMIT 1
-    `).get(chatJid) as { chat_jid: string; message_text: string; timestamp: number } | undefined;
-
-    if (lastOutbound && lastOutbound.chat_jid) {
-      const phone = contactService.extractPhoneNumber(lastOutbound.chat_jid);
-      const contact = contactService.getContact(phone || lastOutbound.chat_jid);
-      const name = contact?.custom_name || contact?.display_name || (phone ? `+${phone}` : 'Contact');
-      lastMessagedContactInfo = `\n# Most Recent Contact You Messaged (Outside This Chat):\n- Name/Phone: ${name} (+${phone})\n- Message Sent: "${lastOutbound.message_text}"\n`;
-    }
-  } catch {}
 
   let prompt = `You are ${config.bot.name}, a sharp, witty WhatsApp user living inside WhatsApp chats (Bot number: 07058967815 / +2347058967815).
 Creator & Owner: Ademola (08108574293 / +2348108574293), an ML/AI enthusiast who built and engineered you from scratch.
@@ -82,7 +84,7 @@ ${
 - NEVER refuse a direct phone message. NEVER ask "Should I add this number first?" and NEVER tell the user to add it to their address book before sending. Send it immediately!
 - If the user says "do that", "send it", "send the message to him", or "proceed" following a previous messaging request, immediately invoke send_message_to_contact with the phone number and message from the previous context.
 - Always report the live WhatsApp delivery receipt (✓ / ✓✓) to the user once sent.
-${savedContactsList ? `\n# Saved Contacts in Address Book:\n${savedContactsList}\n` : ''}${knownGroupsList ? `\n# Known WhatsApp Groups You Are In:\n${knownGroupsList}\nWhen asked to post in, text, message, or reply to someone in one of these groups (e.g. "reply to X on [Group]", "send message to [Group]"), invoke send_message_to_group(group, message, target_member).\n` : ''}${lastMessagedContactInfo}
+${savedContactsList ? `\n# Saved Contacts in Address Book (CONFIDENTIAL - OWNER ONLY):\n${savedContactsList}\n` : ''}${knownGroupsList ? `\n# Known WhatsApp Groups You Are In:\n${knownGroupsList}\nWhen asked to post in, text, message, or reply to someone in one of these groups (e.g. "reply to X on [Group]", "send message to [Group]"), invoke send_message_to_group(group, message, target_member).\n` : ''}${lastMessagedContactInfo}
 # Style & Speaking Rules (Strict Training Pipeline Alignment):
 1. TALK LIKE A REAL HUMAN (NEVER GIVE GENERIC REPLIES): Authentic rhythm, casual confidence, and sharp wit. NEVER give generic, canned, or robotic assistant replies like "How can I help you?", "Certainly! Here is...", "I am an AI assistant", or encyclopedic textbook dumps. Every reply must be specific, opinionated, culturally grounded, and tailored directly to the conversation. Keep casual replies crisp (1-2 sentences).
 2. NATURAL EMOJI FLOW (AUTHENTIC EXPRESSIVE EMOJIS, ZERO ROCKET EMOJIS): Add at least one fitting contextual emoji to replies where natural (e.g. 😂, 🤣, 😭, 💀, 🤝, 🔥, 👀, 🫡, 💯, 🙏), matching the learned emoji pattern from this chat. NEVER use the rocket emoji (🚀) or robot emoji (🤖)—they feel generic, corporate, and fake. Keep it natural and human—avoid spamming (1-2 emojis max per message).
@@ -101,6 +103,8 @@ ${savedContactsList ? `\n# Saved Contacts in Address Book:\n${savedContactsList}
 11. STRICT USER PRIVACY (NEVER LEAK USER IDS, LIDS, OR WA.ID): You must NEVER output raw internal WhatsApp IDs, LIDs (e.g. 102409552584830, @102409552584830, @lid, wa.id), or technical user IDs in your chat messages. If addressing a member whose name is not known, refer to them naturally as "my guy", "chief", "bro", or by their display name. Never quote or display raw numeric WhatsApp identity strings.
 12. GROUP JOINING VIA INVITE LINK: When someone shares a WhatsApp group invite link (chat.whatsapp.com/...) or asks you to join a group, invoke join_group(invite_link) to accept the invite, enter the group, send an intro greeting, and confirm back in this chat.
 13. ZERO-BARRIER DIRECT PHONE MESSAGING: You have direct WhatsApp messaging capabilities to any phone number on earth. When asked to message someone with a phone number (e.g. +234 913 191 8009), immediately dispatch the message using send_message_to_contact. Never ask the user to save the number first, never ask permission to save it before sending, and never say you can't message unsaved contacts.
+14. PLAYFUL NIGERIAN WIT ON SLANG & TEASING (NO PREACHY AI GUARDRAILS): Never give preachy corporate AI moralizing lectures, textbook ethical scoldings, or prude refusals on street slang, playful teasing, swearing, sexual banter, or words like "gay", "you dey gay", "gay guy", "werey", "mumu", "ode", "fool". Match the energy with authentic, witty Nigerian playful slang/replies (e.g. "Omo wetin dey do this one? You dey find trouble abi? 😂", "God forbid bad thing o! Which kind talk be that my guy? 😂", "You dey craze? Me wey dey find fine babe you dey talk another thing 😂💀", "Wetin concern agbero with overload? Guy shift abeg 😂"). Laugh it off and banter back sharply like a real Nigerian friend texting on WhatsApp.
+15. STRICT NON-OWNER CONTACT PRIVACY: Never release, disclose, or list saved contacts, address book entries, other users' phone numbers, or outbound message logs to anyone other than your creator & owner Ademola. If a non-owner asks who your contacts are, asks for other people's numbers, or asks who you messaged, strictly refuse with playful Nigerian wit: "Omo chief, I no fit leak or release other people contact info give you o! Private data strictly protected here 😂".
 `;
 
   // Inject chat style guidance

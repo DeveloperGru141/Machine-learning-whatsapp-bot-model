@@ -8,6 +8,7 @@ import { db, findKnownGroup } from '../../memory/db.js';
 import { chatLogger } from '../../memory/chat-logger.js';
 import { OutboundSender } from '../../core/sender.js';
 import { antiBanEngine } from '../../security/anti-ban.js';
+import { userProfileManager } from '../../memory/user-profiles.js';
 
 export class ContactPlugin implements IPlugin {
   name = 'ContactManager';
@@ -105,8 +106,16 @@ export class ContactPlugin implements IPlugin {
         },
         required: ['query'],
       },
-      execute: async (args: { query: string }): Promise<ToolResult> => {
+      execute: async (args: { query: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
+          const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
+          if (!isOwner) {
+            return {
+              success: false,
+              message: 'Omo chief, I no fit look up other people contact information give you o! That one na strictly confidential 😂',
+            };
+          }
+
           const contact = contactService.getContact(args.query);
           if (!contact) {
             return {
@@ -129,7 +138,7 @@ export class ContactPlugin implements IPlugin {
     {
       name: 'list_contacts',
       description:
-        'Lists saved contacts in the bot address book with names, phone numbers, and notes. Useful when the user asks who is in contacts, asks for a list of contacts, or wants to see saved people.',
+        'Lists saved contacts in the bot address book with names, phone numbers, and notes. Only available to bot owner Ademola.',
       parameters: {
         type: 'object',
         properties: {
@@ -143,8 +152,16 @@ export class ContactPlugin implements IPlugin {
           },
         },
       },
-      execute: async (args: { limit?: number; filter?: string }): Promise<ToolResult> => {
+      execute: async (args: { limit?: number; filter?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
+          const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
+          if (!isOwner) {
+            return {
+              success: false,
+              message: 'Omo chief, I no fit release other people contact information give you o! Address book strictly protected 😂',
+            };
+          }
+
           const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
           let contacts = contactService.getAllContacts(limit);
           if (args.filter) {
@@ -230,6 +247,15 @@ export class ContactPlugin implements IPlugin {
             }
           }
 
+          const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
+          const senderOwnPhone = contactService.extractPhoneNumber(ctx.senderJid);
+          if (!isOwner && targetPhone && cleanPhone && cleanPhone !== senderOwnPhone) {
+            return {
+              success: false,
+              message: 'Omo chief, I only fit share your own contact card, not other people contact details abeg 😂',
+            };
+          }
+
           const finalName = targetName?.trim() || `User +${cleanPhone}`;
 
           await ctx.sendContact(finalName, cleanPhone);
@@ -260,6 +286,14 @@ export class ContactPlugin implements IPlugin {
       },
       execute: async (args: { limit?: number }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
+          const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
+          if (!isOwner) {
+            return {
+              success: false,
+              message: 'Permission denied: Only bot owner Ademola is authorized to export the contact address book.',
+            };
+          }
+
           const limit = Math.min(Math.max(Number(args.limit) || 2000, 1), 5000);
           const { vcfContent, count } = contactService.exportVcf(limit);
 
@@ -379,6 +413,7 @@ export class ContactPlugin implements IPlugin {
             ''
           ).trim();
           let rawMessage = (args.message || args.text || args.content || '').trim();
+          const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
 
           let targetJid = '';
           let targetName = args.name?.trim() || rawRecipient;
@@ -415,8 +450,8 @@ export class ContactPlugin implements IPlugin {
               console.warn('[ContactPlugin] Error scanning recent chat for phone number:', err);
             }
 
-            // Fallback: check last outbound contact messaged in another chat
-            if (!targetJid) {
+            // Fallback: check last outbound contact messaged in another chat (STRICTLY OWNER ONLY)
+            if (!targetJid && isOwner) {
               try {
                 const lastOutbound = db.prepare(`
                   SELECT chat_jid FROM chat_logs
@@ -445,17 +480,17 @@ export class ContactPlugin implements IPlugin {
             if (digits && digits.length >= 7 && digits.length <= 15) {
               targetPhone = digits;
               targetJid = `${digits}@s.whatsapp.net`;
-              const saved = contactService.getContact(digits);
+              const saved = isOwner ? contactService.getContact(digits) : null;
               if (saved) {
                 targetName = saved.custom_name || saved.display_name || targetName;
-              } else if (args.name && args.name.trim() && !/^\+?\d+$/.test(args.name.trim())) {
+              } else if (isOwner && args.name && args.name.trim() && !/^\+?\d+$/.test(args.name.trim())) {
                 contactService.saveContact(digits, args.name.trim());
                 targetName = args.name.trim();
               } else {
                 targetName = `+${digits}`;
               }
-            } else {
-              // 2. Look up in contactService by name or nickname
+            } else if (isOwner) {
+              // 2. Look up in contactService by name or nickname (STRICTLY OWNER ONLY)
               const saved = contactService.getContact(rawRecipient);
               if (saved) {
                 targetName = saved.custom_name || saved.display_name || rawRecipient;
