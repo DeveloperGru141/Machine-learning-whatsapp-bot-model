@@ -50,28 +50,28 @@ export class AntiBanEngine {
   private lastDispatchTimes: Map<string, number> = new Map(); // chatJid -> timestamp
   private recentGlobalDispatches: number[] = []; // timestamps of recent dispatches within 60s
   private readonly maxGlobalPerMinute = 25; // Safe human cap: max 25 messages/min across all chats
-  private readonly minPerChatCooldownMs = 1000; // Ultra-snappy 1.0s cooldown between messages to the same chat
-  private readonly minGlobalGapMs = 500; // 0.5s minimum gap between consecutive dispatches
+  private readonly minPerChatCooldownMs = 800; // Ultra-snappy 800ms cooldown between messages to the same chat
+  private readonly minGlobalGapMs = 400; // 0.4s minimum gap between consecutive dispatches
 
   /**
    * Calculates an authentic human reading delay proportional to the length of the message
-   * sent by the user (~400ms - 1.2s for groups, ~800ms - 2.5s for DMs).
+   * sent by the user (~350ms - 800ms for groups, ~400ms - 1.2s for DMs).
    */
   public calculateReadingDelay(incomingTextLength: number = 0, isGroup: boolean = false): number {
     if (isLivetestRunner()) return 10;
 
-    const cleanLen = Math.max(1, Math.min(incomingTextLength || 20, 250));
-    const baseMs = isGroup ? 400 : 700;
-    const perCharMs = isGroup ? 5 : 12;
+    const cleanLen = Math.max(1, Math.min(incomingTextLength || 20, 200));
+    const baseMs = isGroup ? 350 : 400;
+    const perCharMs = isGroup ? 4 : 5;
     const rawDelay = baseMs + cleanLen * perCharMs;
-    const jitter = Math.floor(Math.random() * 250);
-    const maxCap = isGroup ? 1400 : 3000;
+    const jitter = Math.floor(Math.random() * 200);
+    const maxCap = isGroup ? 1200 : 1500;
     return Math.min(maxCap, rawDelay + jitter);
   }
 
   /**
    * Calculates realistic human typing delay based on BOTH how long the user's message was
-   * and how long the bot's reply is (~12-22ms per character in groups).
+   * and how long the bot's reply is (~10-18ms per character).
    */
   public calculateTypingDelay(
     responseTextLength: number = 0,
@@ -80,20 +80,20 @@ export class AntiBanEngine {
   ): number {
     if (isLivetestRunner()) return 20;
 
-    const replyLen = Math.max(10, Math.min(responseTextLength || 40, 250));
-    const userLen = Math.max(0, Math.min(incomingTextLength || 20, 200));
+    const replyLen = Math.max(10, Math.min(responseTextLength || 40, 200));
+    const userLen = Math.max(0, Math.min(incomingTextLength || 20, 150));
 
-    const baseMs = isGroup ? 600 : 900;
-    const replyTypingMs = replyLen * (isGroup ? 12 : 22);
-    const userComprehensionMs = userLen * (isGroup ? 4 : 8);
+    const baseMs = isGroup ? 500 : 600;
+    const replyTypingMs = replyLen * (isGroup ? 10 : 12);
+    const userComprehensionMs = userLen * (isGroup ? 3 : 4);
     const rawTotal = baseMs + replyTypingMs + userComprehensionMs;
 
-    // Add +/- 12% natural human rhythm variance
+    // Add +/- 10% natural human rhythm variance
     const varianceFactor = 0.9 + Math.random() * 0.2;
     const computed = Math.floor(rawTotal * varianceFactor);
 
-    const minFloor = isGroup ? 800 : 1200;
-    const maxCeiling = isGroup ? 2500 : 4500;
+    const minFloor = isGroup ? 600 : 800;
+    const maxCeiling = isGroup ? 2000 : 2500;
     return Math.max(minFloor, Math.min(maxCeiling, computed));
   }
 

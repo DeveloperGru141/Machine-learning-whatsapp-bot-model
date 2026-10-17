@@ -28,6 +28,19 @@ export function setSchedulerSocket(sock: WASocket): void {
   schedulerPlugin.setSocket(sock);
 }
 
+export function parseTimeToHHMM(timeStr: string): string {
+  const clean = timeStr.trim().toLowerCase();
+  const isPm = clean.includes('pm') || clean.includes('p.m.');
+  const isAm = clean.includes('am') || clean.includes('a.m.');
+  const digits = clean.replace(/[^0-9:]/g, '');
+  const parts = digits.split(':');
+  let hour = parseInt(parts[0], 10) || 0;
+  const minute = parts[1] ? parseInt(parts[1], 10) : 0;
+  if (isPm && hour < 12) hour += 12;
+  if (isAm && hour === 12) hour = 0;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
 /**
  * Generates a comprehensive morning system health report for owner Ademola.
  */
@@ -559,23 +572,31 @@ export class SchedulerPlugin implements IPlugin {
   tools: BotTool[] = [
     {
       name: 'set_reminder',
-      description: 'Schedules a one-time reminder to be sent to this chat after a specified number of minutes.',
+      description: 'Schedules a one-time reminder or alarm to be sent to this chat at a specific time (e.g. "9pm", "21:00") or after a specified number of minutes.',
       parameters: {
         type: 'object',
         properties: {
           message: {
             type: 'string',
-            description: 'The reminder content or message to deliver.',
+            description: 'The reminder content or alarm label to deliver.',
           },
           delay_minutes: {
             type: 'number',
-            description: 'How many minutes from now the reminder should trigger (e.g. 5, 10, 60).',
+            description: 'Optional: How many minutes from now the reminder should trigger (e.g. 5, 10, 60).',
+          },
+          time: {
+            type: 'string',
+            description: 'Optional: The time of day to trigger the reminder (e.g. "9pm", "21:00", "08:30 AM").',
+          },
+          time_of_day: {
+            type: 'string',
+            description: 'Optional alias for time (e.g. "21:00", "9pm").',
           },
         },
-        required: ['message', 'delay_minutes'],
+        required: ['message'],
       },
       execute: async (
-        args: { message: string; delay_minutes: number },
+        args: { message: string; delay_minutes?: number; time?: string; time_of_day?: string; at?: string },
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
         try {
@@ -588,23 +609,28 @@ export class SchedulerPlugin implements IPlugin {
             return { success: false, message: 'Reminder message cannot be empty.' };
           }
 
-          const delayMinutes = Number(args.delay_minutes);
-          if (isNaN(delayMinutes) || delayMinutes <= 0) {
-            return { success: false, message: 'delay_minutes must be a positive number greater than 0.' };
+          const rawTime = args.time || args.time_of_day || args.at;
+          let fireAt = 0;
+          let delayMinutes = Number(args.delay_minutes);
+
+          if (rawTime) {
+            const hhmm = parseTimeToHHMM(rawTime);
+            fireAt = getNextFireAtForTimeOfDay(hhmm);
+            delayMinutes = Math.max(1, Math.round((fireAt - Date.now()) / (60 * 1000)));
+          } else if (!isNaN(delayMinutes) && delayMinutes > 0) {
+            fireAt = Date.now() + Math.round(delayMinutes * 60 * 1000);
+          } else {
+            delayMinutes = 10;
+            fireAt = Date.now() + 10 * 60 * 1000;
           }
 
-          const now = Date.now();
-          const fireAt = now + Math.round(delayMinutes * 60 * 1000);
           const taskId = insertScheduledTask(ctx.chatJid, ctx.senderJid, args.message.trim(), fireAt, null, 'custom');
-
           const scheduledDate = new Date(fireAt);
           const timeFormatted = scheduledDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
           return {
             success: true,
-            message: `Reminder set! I will remind you about "${args.message.trim()}" in ${delayMinutes} minute${
-              delayMinutes === 1 ? '' : 's'
-            } (at ${timeFormatted}).`,
+            message: `Reminder set! I will remind you about "${args.message.trim()}" at ${timeFormatted} (in about ${delayMinutes} minutes).`,
             data: { taskId, delayMinutes, fireAt, timeFormatted },
           };
         } catch (err: any) {
