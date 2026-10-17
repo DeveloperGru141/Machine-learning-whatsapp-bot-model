@@ -65,11 +65,16 @@ export class WhatsAppClient {
   private pairingRequested = false;
   private latestPairingCode: string | null = null;
   private latestPairingCodeAt = 0;
+  private latestQr: string | null = null;
   private attemptedCatchupKeys: Set<string> = new Set();
   private messageStore: Map<string, any> = new Map();
 
   public getLatestPairingCode(): string | null {
     return this.latestPairingCode;
+  }
+
+  public getLatestQr(): string | null {
+    return this.latestQr;
   }
 
   public isRegistered(): boolean {
@@ -293,9 +298,12 @@ export class WhatsAppClient {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        if (qr && config.bot.pairingMethod === 'qr') {
-          console.log('\n📱 SCAN THE QR CODE BELOW TO CONNECT WHATSAPP:');
-          qrcode.generate(qr, { small: true });
+        if (qr) {
+          this.latestQr = qr;
+          if (config.bot.pairingMethod === 'qr') {
+            console.log('\n📱 SCAN THE QR CODE BELOW (OR OPEN /qr ON THE SERVER) TO CONNECT WHATSAPP:');
+            qrcode.generate(qr, { small: true });
+          }
         }
 
         // Request deterministic pairing code (ADEM1234) ONCE right when the initial QR noise handshake is ready
@@ -389,6 +397,7 @@ export class WhatsAppClient {
           this.reconnectAttempts = 0;
           this.pairingRequested = false;
           this.latestPairingCode = null;
+          this.latestQr = null;
           healthMonitor.setConnectionStatus(true);
           this.startKeepAlive();
           this.startUnrepliedScanner();

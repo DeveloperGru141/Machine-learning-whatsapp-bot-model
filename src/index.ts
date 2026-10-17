@@ -108,20 +108,83 @@ let healthServer: http.Server | null = null;
 function startHealthServer() {
   const port = Number(process.env.PORT) || 3000;
   healthServer = http.createServer(async (req, res) => {
-    if (req.url && req.url.startsWith('/pair')) {
-      const forceReset = req.url.includes('refresh=1');
-      const code = await whatsAppClient.requestFreshPairingCode(forceReset);
-      const formattedCode = code && code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          status: whatsAppClient.isRegistered() ? 'already_connected' : 'awaiting_pairing',
-          pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2349014896714'}`,
-          pairingCode: code || whatsAppClient.getLatestPairingCode(),
-          formattedPairingCode: formattedCode,
-          refreshUrl: '/pair?refresh=1',
-        })
-      );
+    if (req.url && (req.url.startsWith('/qr') || req.url.startsWith('/pair'))) {
+      const qr = whatsAppClient.getLatestQr();
+      const registered = whatsAppClient.isRegistered();
+
+      if (req.url.includes('json=1')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            status: registered ? 'already_connected' : 'awaiting_qr_scan',
+            pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2349014896714'}`,
+            qr,
+          })
+        );
+        return;
+      }
+
+      const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${config.bot.name} • WhatsApp QR Pairing</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0b141a; color: #e9edef; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; text-align: center; }
+    .card { background: #111b21; border: 1px solid #222e35; border-radius: 16px; padding: 32px; max-width: 420px; width: 100%; box-shadow: 0 12px 32px rgba(0,0,0,0.45); }
+    h1 { font-size: 20px; margin: 0 0 8px; color: #00a884; }
+    p { font-size: 14px; color: #8696a0; margin: 6px 0 20px; line-height: 1.5; }
+    .qr-box { background: #ffffff; padding: 16px; border-radius: 12px; display: inline-block; min-width: 280px; min-height: 280px; }
+    .qr-box img { width: 280px; height: 280px; display: block; }
+    .badge { display: inline-block; padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; margin-top: 18px; background: #1f2c34; color: #00a884; }
+    .steps { text-align: left; font-size: 13px; color: #d1d7db; margin-top: 20px; background: #1f2c34; padding: 14px 18px; border-radius: 10px; line-height: 1.7; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>${config.bot.name}</h1>
+    <p>Scan with WhatsApp (+${config.bot.pairingPhoneNumber || '2349014896714'}) to link instantly</p>
+    <div id="qr-container" class="qr-box">
+      ${
+        registered
+          ? '<div style="color:#00a884;padding:90px 20px;font-weight:700;font-size:18px;">✅ WhatsApp Connected & Active!</div>'
+          : qr
+          ? `<img id="qr-img" src="https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=10&data=${encodeURIComponent(qr)}" alt="WhatsApp QR Code" />`
+          : '<div style="color:#111b21;padding:110px 20px;font-weight:600;">Generating fresh QR code...</div>'
+      }
+    </div>
+    <div><span id="status-badge" class="badge">${registered ? '🟢 Connected' : '⏳ Waiting for QR Scan (Auto-refreshes live)'}</span></div>
+    <div class="steps">
+      1. Open <b>WhatsApp</b> on your phone (<b>09014896714</b>)<br/>
+      2. Tap <b>Settings (or ⋮) &rarr; Linked Devices</b><br/>
+      3. Tap <b>Link a Device</b> and point your camera at this QR code
+    </div>
+  </div>
+  <script>
+    let lastQr = ${JSON.stringify(qr || '')};
+    setInterval(async () => {
+      try {
+        const res = await fetch('/health');
+        const data = await res.json();
+        const container = document.getElementById('qr-container');
+        const badge = document.getElementById('status-badge');
+        if (data.whatsappRegistered) {
+          container.innerHTML = '<div style="color:#00a884;padding:90px 20px;font-weight:700;font-size:18px;">✅ WhatsApp Connected & Active!</div>';
+          badge.textContent = '🟢 Connected & Registered';
+          return;
+        }
+        if (data.qr && data.qr !== lastQr) {
+          lastQr = data.qr;
+          container.innerHTML = '<img id="qr-img" src="https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=10&data=' + encodeURIComponent(data.qr) + '" alt="WhatsApp QR Code" />';
+        }
+      } catch (e) {}
+    }, 2500);
+  </script>
+</body>
+</html>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
       return;
     }
 
@@ -134,6 +197,7 @@ function startHealthServer() {
         pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2349014896714'}`,
         whatsappRegistered: whatsAppClient.isRegistered(),
         whatsappConnected: whatsAppClient.isSocketOpen() || report.isConnected,
+        qr: whatsAppClient.getLatestQr(),
         pairingCode: whatsAppClient.getLatestPairingCode(),
         activeModel: llmClient.getModel(),
         uptimeSeconds: report.uptime,
