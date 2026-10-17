@@ -55,24 +55,24 @@ export class AntiBanEngine {
 
   /**
    * Calculates an authentic human reading delay proportional to the length of the message
-   * sent by the user (~80ms - 220ms for groups, ~200ms - 600ms for DMs).
+   * sent by the user (~1.2s - 2.5s for groups, ~700ms - 1.8s for DMs).
    */
   public calculateReadingDelay(incomingTextLength: number = 0, isGroup: boolean = false): number {
     if (isLivetestRunner()) return 10;
 
     const cleanLen = Math.max(1, Math.min(incomingTextLength || 20, 150));
-    // Groups: Ultra-fast 80ms - 220ms reading delay so mentions get acknowledged near-instantly
-    const baseMs = isGroup ? 80 : 200;
-    const perCharMs = isGroup ? 1 : 2;
+    // Groups: Realistic human reading pause so group replies feel like an active human member
+    const baseMs = isGroup ? 1200 : 700;
+    const perCharMs = isGroup ? 6 : 4;
     const rawDelay = baseMs + cleanLen * perCharMs;
-    const jitter = Math.floor(Math.random() * (isGroup ? 40 : 100));
-    const maxCap = isGroup ? 220 : 600;
+    const jitter = Math.floor(Math.random() * (isGroup ? 300 : 200));
+    const maxCap = isGroup ? 2500 : 1800;
     return Math.min(maxCap, rawDelay + jitter);
   }
 
   /**
    * Calculates realistic human typing delay based on BOTH how long the user's message was
-   * and how long the bot's reply is (~2-5ms per character).
+   * and how long the bot's reply is (~8-14ms per character).
    */
   public calculateTypingDelay(
     responseTextLength: number = 0,
@@ -84,18 +84,18 @@ export class AntiBanEngine {
     const replyLen = Math.max(10, Math.min(responseTextLength || 40, 150));
     const userLen = Math.max(0, Math.min(incomingTextLength || 20, 100));
 
-    // Groups: Fast 200ms - 600ms typing presence
-    const baseMs = isGroup ? 120 : 250;
-    const replyTypingMs = replyLen * (isGroup ? 2 : 4);
-    const userComprehensionMs = userLen * (isGroup ? 1 : 2);
+    // Groups: Realistic human typing presence (1.8s - 3.8s)
+    const baseMs = isGroup ? 1500 : 1000;
+    const replyTypingMs = replyLen * (isGroup ? 10 : 8);
+    const userComprehensionMs = userLen * (isGroup ? 3 : 2);
     const rawTotal = baseMs + replyTypingMs + userComprehensionMs;
 
     // Add +/- 10% natural human rhythm variance
     const varianceFactor = 0.9 + Math.random() * 0.2;
     const computed = Math.floor(rawTotal * varianceFactor);
 
-    const minFloor = isGroup ? 200 : 350;
-    const maxCeiling = isGroup ? 600 : 1200;
+    const minFloor = isGroup ? 1800 : 1200;
+    const maxCeiling = isGroup ? 3800 : 2800;
     return Math.max(minFloor, Math.min(maxCeiling, computed));
   }
 

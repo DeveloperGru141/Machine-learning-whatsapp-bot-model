@@ -249,16 +249,32 @@ export class PluginRegistry {
 
     if (isGroup) {
       if (
-        text.includes('tag all') ||
+        text.includes('tag') ||
         text.includes('everyone') ||
         text.includes('kick') ||
         text.includes('remove') ||
+        text.includes('promote') ||
+        text.includes('demote') ||
+        text.includes('admin') ||
+        text.includes('lock') ||
+        text.includes('mute') ||
         text.includes('group mode') ||
-        text.includes('mute')
+        text.includes('subject') ||
+        text.includes('name') ||
+        text.includes('rename') ||
+        text.includes('description') ||
+        text.includes('link') ||
+        text.includes('invite')
       ) {
         selected.add('tag_all');
         selected.add('kick_member');
+        selected.add('promote_member');
+        selected.add('demote_member');
         selected.add('set_group_mode');
+        selected.add('set_group_subject');
+        selected.add('set_group_description');
+        selected.add('get_group_invite_link');
+        selected.add('revoke_group_invite_link');
       }
     }
 

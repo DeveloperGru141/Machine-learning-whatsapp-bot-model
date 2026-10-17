@@ -241,6 +241,166 @@ export class GroupAdminPlugin implements IPlugin {
         }
       },
     },
+    {
+      name: 'promote_member',
+      description: 'Promotes a group member to admin status. Requires the bot to be an admin in the group, and requester must be admin/owner.',
+      parameters: {
+        type: 'object',
+        properties: {
+          phone_number: {
+            type: 'string',
+            description: 'Phone number or JID of the user to promote to admin.',
+          },
+        },
+        required: ['phone_number'],
+      },
+      execute: async (args: { phone_number: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!ctx.isGroup) return { success: false, message: 'This tool is only available in groups.' };
+        const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
+        if (!botIsAdmin) return { success: false, message: 'Action failed: I must be made an admin in this group first.' };
+        const senderIsAdmin = await this.isUserAdmin(ctx.sock, ctx.chatJid, ctx.senderJid);
+        if (!senderIsAdmin) return { success: false, message: 'Permission denied: Only group admins can promote members.' };
+
+        const cleanNumber = args.phone_number.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+        const targetJid = args.phone_number.endsWith('@lid') ? `${cleanNumber}@lid` : `${cleanNumber}@s.whatsapp.net`;
+        try {
+          await ctx.sock.groupParticipantsUpdate(ctx.chatJid, [targetJid], 'promote');
+          return { success: true, message: `User @${cleanNumber} has been successfully promoted to group admin.` };
+        } catch (err: any) {
+          return { success: false, message: `Failed to promote user: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'demote_member',
+      description: 'Demotes a group admin back to regular member. Requires the bot to be an admin in the group, and requester must be admin/owner.',
+      parameters: {
+        type: 'object',
+        properties: {
+          phone_number: {
+            type: 'string',
+            description: 'Phone number or JID of the admin to demote.',
+          },
+        },
+        required: ['phone_number'],
+      },
+      execute: async (args: { phone_number: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!ctx.isGroup) return { success: false, message: 'This tool is only available in groups.' };
+        const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
+        if (!botIsAdmin) return { success: false, message: 'Action failed: I must be made an admin in this group first.' };
+        const senderIsAdmin = await this.isUserAdmin(ctx.sock, ctx.chatJid, ctx.senderJid);
+        if (!senderIsAdmin) return { success: false, message: 'Permission denied: Only group admins can demote admins.' };
+
+        const cleanNumber = args.phone_number.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+        const targetJid = args.phone_number.endsWith('@lid') ? `${cleanNumber}@lid` : `${cleanNumber}@s.whatsapp.net`;
+        try {
+          await ctx.sock.groupParticipantsUpdate(ctx.chatJid, [targetJid], 'demote');
+          return { success: true, message: `Admin @${cleanNumber} has been demoted to a regular member.` };
+        } catch (err: any) {
+          return { success: false, message: `Failed to demote user: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'set_group_subject',
+      description: 'Changes the title / name of the group. Requires the bot to be an admin in the group.',
+      parameters: {
+        type: 'object',
+        properties: {
+          subject: {
+            type: 'string',
+            description: 'New title/name for the group.',
+          },
+        },
+        required: ['subject'],
+      },
+      execute: async (args: { subject: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!ctx.isGroup) return { success: false, message: 'This tool is only available in groups.' };
+        const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
+        if (!botIsAdmin) return { success: false, message: 'Action failed: I must be made an admin in this group to change the group name.' };
+        const senderIsAdmin = await this.isUserAdmin(ctx.sock, ctx.chatJid, ctx.senderJid);
+        if (!senderIsAdmin) return { success: false, message: 'Permission denied: Only group admins can change the group name.' };
+
+        try {
+          await ctx.sock.groupUpdateSubject(ctx.chatJid, args.subject.trim());
+          return { success: true, message: `Group name successfully updated to "${args.subject.trim()}".` };
+        } catch (err: any) {
+          return { success: false, message: `Failed to update group name: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'set_group_description',
+      description: 'Changes the description of the group. Requires the bot to be an admin in the group.',
+      parameters: {
+        type: 'object',
+        properties: {
+          description: {
+            type: 'string',
+            description: 'New description text for the group.',
+          },
+        },
+        required: ['description'],
+      },
+      execute: async (args: { description: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!ctx.isGroup) return { success: false, message: 'This tool is only available in groups.' };
+        const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
+        if (!botIsAdmin) return { success: false, message: 'Action failed: I must be made an admin in this group to update description.' };
+        const senderIsAdmin = await this.isUserAdmin(ctx.sock, ctx.chatJid, ctx.senderJid);
+        if (!senderIsAdmin) return { success: false, message: 'Permission denied: Only group admins can change group description.' };
+
+        try {
+          await ctx.sock.groupUpdateDescription(ctx.chatJid, args.description.trim());
+          return { success: true, message: `Group description successfully updated.` };
+        } catch (err: any) {
+          return { success: false, message: `Failed to update group description: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'get_group_invite_link',
+      description: 'Retrieves the official WhatsApp invite link for this group. Requires the bot to be an admin.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!ctx.isGroup) return { success: false, message: 'This tool is only available in groups.' };
+        const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
+        if (!botIsAdmin) return { success: false, message: 'Action failed: I must be made an admin in this group to retrieve invite link.' };
+
+        try {
+          const code = await ctx.sock.groupInviteCode(ctx.chatJid);
+          const link = `https://chat.whatsapp.com/${code}`;
+          return { success: true, message: `🔗 *Group Invite Link:*\n${link}` };
+        } catch (err: any) {
+          return { success: false, message: `Failed to get invite link: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'revoke_group_invite_link',
+      description: 'Revokes the existing group invite link and resets it with a new code. Requires the bot to be an admin.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!ctx.isGroup) return { success: false, message: 'This tool is only available in groups.' };
+        const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
+        if (!botIsAdmin) return { success: false, message: 'Action failed: I must be made an admin in this group to revoke invite link.' };
+        const senderIsAdmin = await this.isUserAdmin(ctx.sock, ctx.chatJid, ctx.senderJid);
+        if (!senderIsAdmin) return { success: false, message: 'Permission denied: Only group admins can revoke invite links.' };
+
+        try {
+          const newCode = await ctx.sock.groupRevokeInvite(ctx.chatJid);
+          const link = `https://chat.whatsapp.com/${newCode}`;
+          return { success: true, message: `🔄 Previous link revoked. *New Group Invite Link:*\n${link}` };
+        } catch (err: any) {
+          return { success: false, message: `Failed to revoke invite link: ${err.message}` };
+        }
+      },
+    },
   ];
 }
 

@@ -844,7 +844,8 @@ export class WhatsAppClient {
     // Automatic Contact Saving: passively record and index all contacts
     const contactSaveStatus = contactService.autoSaveContact(normalized.senderJid, normalized.senderName);
 
-    // Continuous ML Batch Learning: buffers 20 exchanges before a single compression API call
+    // Continuous ML Learning: updates linguistic metrics, humor exemplars, and style patterns on every turn
+    patternMiner.analyzeInteraction(normalized.chatJid);
     batchLearner.recordExchange(normalized.chatJid, normalized.senderJid);
 
     // Historical Backlog Evaluation:
@@ -896,21 +897,24 @@ export class WhatsAppClient {
 
     if (!shouldRespond) return;
 
-    // Per-User Token Rate Limiter (protect against spamming bot reasoning loop)
-    const limitStatus = userRateLimiter.checkLimit(normalized.senderJid);
-    if (!limitStatus.allowed) {
-      console.warn(`[UserRateLimiter] User ${normalized.senderJid} throttled. Reset in ${limitStatus.resetInSeconds}s`);
-      if (this.sock) {
-        await OutboundSender.replyText(
-          this.sock,
-          normalized.chatJid,
-          `Take a breather small! Try again in ${limitStatus.resetInSeconds}s.`,
-          msg
-        );
+    // Per-User Token Rate Limiter (protect against spamming bot reasoning loop; owners are exempt)
+    const isOwnerUser = userProfileManager.isOwner(normalized.senderJid, normalized.senderName);
+    if (!isOwnerUser) {
+      const limitStatus = userRateLimiter.checkLimit(normalized.senderJid);
+      if (!limitStatus.allowed) {
+        console.warn(`[UserRateLimiter] User ${normalized.senderJid} throttled. Reset in ${limitStatus.resetInSeconds}s`);
+        if (this.sock) {
+          await OutboundSender.replyText(
+            this.sock,
+            normalized.chatJid,
+            `Take a breather small! Try again in ${limitStatus.resetInSeconds}s.`,
+            msg
+          );
+        }
+        return;
       }
-      return;
+      userRateLimiter.consumeToken(normalized.senderJid);
     }
-    userRateLimiter.consumeToken(normalized.senderJid);
 
     // Passive Contact Introduction Tracking (no unsolicited canned message)
     if (!normalized.isGroup && contactSaveStatus.needsIntroduction) {

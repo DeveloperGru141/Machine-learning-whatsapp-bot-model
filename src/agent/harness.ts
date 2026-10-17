@@ -493,6 +493,10 @@ Combine the live tool data in the user's last message with your own knowledge an
         }
       } catch (fbErr: any) {
         console.error('[AgentHarness] Fallback also failed:', fbErr.message);
+        try {
+          const emergencyRecovery = "Network dey do one kind small abeg, but I dey here. Wetin you talk again?";
+          await context.replyText(emergencyRecovery);
+        } catch {}
       }
     } finally {
       try {

@@ -14,32 +14,40 @@ import { BOT_GROUP_INTRO } from '../../security/anti-ban.js';
 export function setupGroupWelcome(sock: WASocket): void {
   sock.ev.on('group-participants.update', async (update) => {
     try {
-      // Only fire for 'add' events
-      if (update.action !== 'add') return;
-
       const groupJid = update.id;
       const botId = sock.user?.id || '';
       const botNumber = botId.split(':')[0] + '@s.whatsapp.net';
       const botLid = sock.user?.lid || '';
       const botLidNormalized = botLid ? botLid.split(':')[0] + '@lid' : '';
 
-      for (const participant of update.participants) {
-        const isBotAdded =
-          participant === botNumber ||
-          (botId && participant === botId) ||
-          (botLid && participant === botLid) ||
-          (botLidNormalized && participant === botLidNormalized);
+      const isBotTargeted = (p: string) =>
+        p === botNumber ||
+        (botId && p === botId) ||
+        (botLid && p === botLid) ||
+        (botLidNormalized && p === botLidNormalized);
 
-        // When the bot itself is added to a group, send the polished introduction
+      // 1. When the bot is added to a group, send the introduction
+      if (update.action === 'add') {
+        const isBotAdded = update.participants.some(isBotTargeted);
         if (isBotAdded) {
           console.log(`[GroupWelcome] 🚀 Bot added to group ${groupJid}! Introducing self with polished welcome message...`);
           await sock.sendMessage(groupJid, { text: BOT_GROUP_INTRO });
           chatLogger.logOutboundMessage(groupJid, BOT_GROUP_INTRO);
-          break;
         }
+      }
 
-        // Anti-Ban & User Policy: Do not unsolicitedly text or tag individual joining members.
-        // The bot only speaks when someone explicitly texts or tags the bot.
+      // 2. When the bot is promoted to Admin, announce elevated admin privileges
+      if (update.action === 'promote') {
+        const isBotPromoted = update.participants.some(isBotTargeted);
+        if (isBotPromoted) {
+          console.log(`[GroupWelcome] 🛡️ Bot PROMOTED to Admin in group ${groupJid}! Elevated admin capabilities activated.`);
+          const adminNotice =
+            '🛡️ *Elevated Group Admin Privileges Active!*\n\n' +
+            'Thanks for making me an admin in this group! I can now help you moderate spam invite links, remove bad actors, lock/unlock the group, update group info, and tag members.\n\n' +
+            'Tag me with *@Forgelabs* anytime you need admin actions sorted.';
+          await sock.sendMessage(groupJid, { text: adminNotice });
+          chatLogger.logOutboundMessage(groupJid, adminNotice);
+        }
       }
     } catch (err: any) {
       console.error('[GroupWelcome] Error in group-participants.update handler:', err?.message || err);

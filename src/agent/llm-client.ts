@@ -204,12 +204,14 @@ export class LLMClient {
     }
   }
 
-  private async callGroqInternal(params: LLMChatParams): Promise<LLMChatResponse> {
+  public async callGroqInternal(params: LLMChatParams): Promise<LLMChatResponse> {
     const configuredModel = params.model || this.getModel();
     const candidateModels = [
       configuredModel,
       'qwen/qwen3.8-27b',
+      'llama-3.3-70b-versatile',
       'openai/gpt-oss-120b',
+      'llama-3.1-8b-instant',
       'openai/gpt-oss-20b',
       'allam-2-7b',
     ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);

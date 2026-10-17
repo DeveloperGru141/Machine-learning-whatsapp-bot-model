@@ -19,13 +19,13 @@ interface ChatLogRow {
 }
 
 export class BatchLearner {
-  public readonly BATCH_SIZE = 20;
+  public readonly BATCH_SIZE = 8;
   private processingChats = new Set<string>();
 
   /**
    * Fast, non-blocking counter increment on each exchange.
    * Does NOT make any LLM calls on single messages.
-   * Triggers a single compressed learning call only once 20 exchanges have accumulated.
+   * Triggers a single compressed learning call once 8 exchanges have accumulated.
    */
   public recordExchange(chatJid: string, senderJid: string): void {
     try {
@@ -44,13 +44,13 @@ export class BatchLearner {
 
       const count = row?.unprocessed_count ?? 0;
 
-      // When threshold of 20 exchanges is reached, run batch analysis after a 30s chat cooldown
+      // When threshold of 8 exchanges is reached, run batch analysis after a 10s chat cooldown
       if (count >= this.BATCH_SIZE && !this.processingChats.has(chatJid)) {
         setTimeout(() => {
           this.processBatch(chatJid, senderJid).catch((err) => {
             console.error(`[BatchLearner] ⚠️ Batch learning error for ${chatJid}:`, err?.message || err);
           });
-        }, 30_000);
+        }, 10_000);
       }
     } catch (err: any) {
       console.error('[BatchLearner] Error recording exchange:', err?.message || err);
@@ -116,7 +116,7 @@ export class BatchLearner {
 
       let response: any;
       try {
-        // Background learning runs on Gemini's generous 1,500 RPD free tier to preserve 100% of Groq tokens for live chat
+        // Try Gemini free tier first
         response = await llmClient.callGeminiInternal({
           messages: [
             { role: 'system', content: systemPrompt },
@@ -125,9 +125,21 @@ export class BatchLearner {
           temperature: 0.3,
         });
       } catch (gemErr) {
-        // If Gemini is unavailable, skip background batch learning silently so Groq interactive tokens are never burned
-        console.warn(`[BatchLearner] Skipping background learning batch to conserve interactive tokens:`, (gemErr as any)?.message || gemErr);
-        return false;
+        // Fallback to Groq using fast lightweight llama-3.1-8b-instant so learning never stops
+        try {
+          response = await llmClient.callGroqInternal({
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: `Chat Transcript:\n${transcript}` },
+            ],
+            model: 'llama-3.1-8b-instant',
+            temperature: 0.3,
+            max_tokens: 150,
+          });
+        } catch (groqErr) {
+          console.warn(`[BatchLearner] Skipping batch: both Gemini and Groq fallback failed:`, (groqErr as any)?.message || groqErr);
+          return false;
+        }
       }
 
       const content = response.choices[0]?.message?.content || '';
