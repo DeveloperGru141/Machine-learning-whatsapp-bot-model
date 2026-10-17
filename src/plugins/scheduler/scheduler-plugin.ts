@@ -542,11 +542,16 @@ export class SchedulerPlugin implements IPlugin {
             const mentionJid = task.sender_jid.includes('@')
               ? task.sender_jid
               : `${task.sender_jid}@s.whatsapp.net`;
-            const senderNumber = mentionJid.split('@')[0];
-            outboundText = `⏰ *REMINDER*\n\nHey @${senderNumber}, you asked me to remind you:\n\n💬 "${task.message}"`;
+            const rawSenderNum = mentionJid.split('@')[0].split(':')[0];
+            const isLid = mentionJid.endsWith('@lid') || rawSenderNum.length > 13;
+            const targetGreeting = isLid ? 'there' : `@${rawSenderNum}`;
+            outboundText = `⏰ *REMINDER*\n\nHey ${targetGreeting}, you asked me to remind you:\n\n💬 "${task.message}"`;
           }
 
-          await socket.sendMessage(task.chat_jid, { text: outboundText });
+          await socket.sendMessage(task.chat_jid, {
+            text: outboundText,
+            mentions: task.sender_jid ? [task.sender_jid] : [],
+          });
           chatLogger.logOutboundMessage(task.chat_jid, outboundText);
 
           // If recurring daily, advance fire_at by 24 hours

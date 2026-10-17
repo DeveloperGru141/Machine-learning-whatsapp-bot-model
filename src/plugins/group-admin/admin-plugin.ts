@@ -136,10 +136,11 @@ export class GroupAdminPlugin implements IPlugin {
     if (userIsAdmin) return false; // Allow admins to post links
 
     try {
-      // Delete the spam link
-      await sock.sendMessage(chatJid, { delete: msg.key });
+      const rawUser = senderJid.split('@')[0].split(':')[0];
+      const isLid = senderJid.endsWith('@lid') || rawUser.length > 13;
+      const userTag = isLid ? 'Member' : `@${rawUser}`;
       await sock.sendMessage(chatJid, {
-        text: `⚠️ @${senderJid.split('@')[0]}, group invite links are not permitted here!`,
+        text: `⚠️ ${userTag}, group invite links are not permitted here!`,
         mentions: [senderJid],
       });
       logAutonomousAction('anti_link_moderation', chatJid, senderJid, 'Autonomously deleted unauthorized group invite link');
@@ -207,9 +208,7 @@ export class GroupAdminPlugin implements IPlugin {
         try {
           const meta = await ctx.sock.groupMetadata(ctx.chatJid);
           const mentions = meta.participants.map((p: any) => p.id);
-          const header = `📢 *GROUP ANNOUNCEMENT*\n\n${args.announcement}\n\n`;
-          const mentionTags = mentions.map((m: any) => `@${m.split('@')[0]}`).join(' ');
-          const fullText = header + mentionTags;
+          const fullText = `📢 *GROUP ANNOUNCEMENT*\n\n${args.announcement.trim()}\n\n_Attention: @everyone (${mentions.length} members)_`;
 
           await ctx.sock.sendMessage(ctx.chatJid, {
             text: fullText,
@@ -261,9 +260,11 @@ export class GroupAdminPlugin implements IPlugin {
 
         try {
           await ctx.sock.groupParticipantsUpdate(ctx.chatJid, [resolved.jid], 'remove');
+          const isLid = resolved.cleanNumber && resolved.cleanNumber.length > 13;
+          const displayLabel = isLid ? 'The specified member' : `@${resolved.cleanNumber}`;
           return {
             success: true,
-            message: `User @${resolved.cleanNumber} has been removed from the group. ${args.reason ? `Reason: ${args.reason}` : ''}`,
+            message: `${displayLabel} has been removed from the group. ${args.reason ? `Reason: ${args.reason}` : ''}`,
           };
         } catch (err: any) {
           return { success: false, message: `Failed to remove user: ${err.message}` };
@@ -336,7 +337,9 @@ export class GroupAdminPlugin implements IPlugin {
 
         try {
           await ctx.sock.groupParticipantsUpdate(ctx.chatJid, [resolved.jid], 'promote');
-          return { success: true, message: `User @${resolved.cleanNumber} has been successfully promoted to group admin.` };
+          const isLid = resolved.cleanNumber && resolved.cleanNumber.length > 13;
+          const displayLabel = isLid ? 'The member' : `@${resolved.cleanNumber}`;
+          return { success: true, message: `${displayLabel} has been successfully promoted to group admin.` };
         } catch (err: any) {
           return { success: false, message: `Failed to promote user: ${err.message}` };
         }
@@ -368,7 +371,9 @@ export class GroupAdminPlugin implements IPlugin {
 
         try {
           await ctx.sock.groupParticipantsUpdate(ctx.chatJid, [resolved.jid], 'demote');
-          return { success: true, message: `Admin @${resolved.cleanNumber} has been demoted to a regular member.` };
+          const isLid = resolved.cleanNumber && resolved.cleanNumber.length > 13;
+          const displayLabel = isLid ? 'The admin' : `@${resolved.cleanNumber}`;
+          return { success: true, message: `${displayLabel} has been demoted to a regular member.` };
         } catch (err: any) {
           return { success: false, message: `Failed to demote user: ${err.message}` };
         }

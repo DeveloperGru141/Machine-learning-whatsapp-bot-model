@@ -49,8 +49,8 @@ export class ContactService {
    */
   public extractPhoneNumber(phoneOrJid: string): string {
     const rawUser = (phoneOrJid || '').split('@')[0].split(':')[0];
-    if (phoneOrJid?.endsWith('@lid')) {
-      return rawUser.replace(/[^0-9]/g, '');
+    if (phoneOrJid?.endsWith('@lid') || rawUser.length > 13) {
+      return '';
     }
     return normalizePhoneNumber(rawUser);
   }

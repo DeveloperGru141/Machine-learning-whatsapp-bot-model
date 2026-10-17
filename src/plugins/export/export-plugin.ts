@@ -91,7 +91,9 @@ export const exportChatTool: BotTool = {
 
         const messageLines = rows.map((row) => {
           const time = new Date(row.timestamp).toISOString().replace('T', ' ').slice(0, 19);
-          const author = row.sender_name || row.sender_jid.split('@')[0];
+          const rawAuthor = row.sender_jid ? row.sender_jid.split('@')[0].split(':')[0] : 'User';
+          const isLidAuthor = row.sender_jid?.endsWith('@lid') || rawAuthor.length > 13;
+          const author = row.sender_name || (isLidAuthor ? 'Member' : rawAuthor);
           let body = row.message_text || '';
 
           if (row.content_type === 'sticker') {

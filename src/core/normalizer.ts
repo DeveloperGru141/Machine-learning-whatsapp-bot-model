@@ -46,7 +46,10 @@ export function normalizeMessage(msg: proto.IWebMessageInfo): NormalizedMessage 
   const chatJid = msg.key.remoteJid;
   const isGroup = chatJid.endsWith('@g.us');
   const senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
-  const senderName = msg.pushName || senderJid.split('@')[0];
+  const rawId = senderJid.split('@')[0].split(':')[0];
+  const isLid = senderJid.endsWith('@lid') || rawId.length > 13;
+  const fallbackName = isLid ? (isGroup ? 'Member' : 'Friend') : rawId;
+  const senderName = (msg.pushName && msg.pushName.trim()) ? msg.pushName.trim() : fallbackName;
 
   let text = '';
   let contentType: 'text' | 'sticker' | 'image' | 'audio' | 'document' | 'video' = 'text';

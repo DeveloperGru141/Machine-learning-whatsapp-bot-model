@@ -166,7 +166,13 @@ export class AnalyticsEngine {
       lines.push('  _(No user activity recorded in window)_');
     } else {
       topUsers.forEach((u, i) => {
-        const displayName = u.name.includes('@') ? `@${u.name.split('@')[0]}` : u.name;
+        let displayName = u.name;
+        if (displayName.includes('@')) {
+          const rawId = displayName.split('@')[0].split(':')[0];
+          displayName = rawId.length > 13 ? 'Member' : `@${rawId}`;
+        } else if (/^\d{13,}$/.test(displayName)) {
+          displayName = 'Member';
+        }
         lines.push(`  ${i + 1}. ${displayName} — ${u.count} msgs`);
       });
     }

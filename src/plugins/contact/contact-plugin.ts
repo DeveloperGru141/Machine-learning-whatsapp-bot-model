@@ -495,9 +495,10 @@ export class ContactPlugin implements IPlugin {
           const stanzaId = sent?.key?.id || `wa_${Date.now()}`;
           const receipt = await whatsAppClient.waitForDeliveryConfirmation(stanzaId, targetJid, 2000);
 
+          const phoneDisplay = targetPhone ? ` (+${targetPhone})` : '';
           return {
             success: true,
-            message: `✅ DELIVERY CONFIRMED to ${targetName} (+${targetPhone || targetJid.split('@')[0]}) | Receipt ID: ${receipt.msgId} | Status: ${receipt.statusLabel} | Message: "${finalDispatchMessage}"`,
+            message: `✅ DELIVERY CONFIRMED to ${targetName}${phoneDisplay} | Receipt ID: ${receipt.msgId} | Status: ${receipt.statusLabel} | Message: "${finalDispatchMessage}"`,
             data: {
               recipient: targetName,
               targetJid,

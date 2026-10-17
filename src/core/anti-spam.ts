@@ -146,31 +146,34 @@ export class AntiSpamFilter {
 
     let action: 'none' | 'warn' | 'mute' | 'kick' = 'warn';
 
+    const isLid = senderJid.endsWith('@lid') || rawNumber.length > 13;
+    const targetTag = isLid ? 'Member' : `@${rawNumber}`;
+
     if (offenses === 1) {
       // 1st offense: warn (send warning message mentioning user)
       action = 'warn';
-      const warningMsg = `⚠️ @${rawNumber}, spam activity detected. Please avoid rapid messages, flooding, or repetitive spam. (Warning 1/3)`;
+      const warningMsg = `⚠️ ${targetTag}, spam activity detected. Please avoid rapid messages, flooding, or repetitive spam. (Warning 1/3)`;
       try {
         await sock.sendMessage(chatJid, {
           text: warningMsg,
           mentions: [senderJid],
         });
-        console.log(`[AntiSpam] Sent 1st warning to @${rawNumber} in ${chatJid}`);
+        console.log(`[AntiSpam] Sent 1st warning to ${targetTag} in ${chatJid}`);
       } catch (err: any) {
-        console.error(`[AntiSpam] Error sending 1st warning to @${rawNumber}:`, err?.message || err);
+        console.error(`[AntiSpam] Error sending 1st warning to ${targetTag}:`, err?.message || err);
       }
     } else if (offenses === 2) {
       // 2nd offense: warn + temporary mute concept (just send stronger warning)
       action = 'mute';
-      const muteMsg = `🚨 @${rawNumber}, this is your second warning (2/3)! You are being placed on temporary mute. Continued spam will result in being kicked from the group.`;
+      const muteMsg = `🚨 ${targetTag}, this is your second warning (2/3)! You are being placed on temporary mute. Continued spam will result in being kicked from the group.`;
       try {
         await sock.sendMessage(chatJid, {
           text: muteMsg,
           mentions: [senderJid],
         });
-        console.log(`[AntiSpam] Sent 2nd warning (mute) to @${rawNumber} in ${chatJid}`);
+        console.log(`[AntiSpam] Sent 2nd warning (mute) to ${targetTag} in ${chatJid}`);
       } catch (err: any) {
-        console.error(`[AntiSpam] Error sending 2nd warning to @${rawNumber}:`, err?.message || err);
+        console.error(`[AntiSpam] Error sending 2nd warning to ${targetTag}:`, err?.message || err);
       }
     } else {
       // 3rd offense: attempt kick if bot is admin
@@ -182,23 +185,23 @@ export class AntiSpamFilter {
           try {
             await sock.groupParticipantsUpdate(chatJid, [senderJid], 'remove');
             await sock.sendMessage(chatJid, {
-              text: `🚫 @${rawNumber} has been removed from the group for repeated spam violations (3/3 warnings).`,
+              text: `🚫 ${targetTag} has been removed from the group for repeated spam violations (3/3 warnings).`,
               mentions: [senderJid],
             });
-            console.log(`[AntiSpam] Successfully kicked @${rawNumber} from ${chatJid}`);
+            console.log(`[AntiSpam] Successfully kicked ${targetTag} from ${chatJid}`);
           } catch (err: any) {
-            console.error(`[AntiSpam] Failed to kick @${rawNumber}:`, err?.message || err);
+            console.error(`[AntiSpam] Failed to kick ${targetTag}:`, err?.message || err);
             await sock.sendMessage(chatJid, {
-              text: `🚨 @${rawNumber} reached 3/3 spam warnings, but I encountered an error removing them. Group admins please inspect!`,
+              text: `🚨 ${targetTag} reached 3/3 spam warnings, but I encountered an error removing them. Group admins please inspect!`,
               mentions: [senderJid],
             });
           }
         } else {
           await sock.sendMessage(chatJid, {
-            text: `🚨 @${rawNumber} reached 3/3 spam warnings! I cannot remove them because I am not an admin in this group.`,
+            text: `🚨 ${targetTag} reached 3/3 spam warnings! I cannot remove them because I am not an admin in this group.`,
             mentions: [senderJid],
           });
-          console.log(`[AntiSpam] Cannot kick @${rawNumber}: bot is not admin in ${chatJid}`);
+          console.log(`[AntiSpam] Cannot kick ${targetTag}: bot is not admin in ${chatJid}`);
         }
       } else {
         // Direct messages

@@ -630,7 +630,16 @@ export function sanitizeAssistantResponse(text: string): string {
     return emojiFound <= 1 ? match : '';
   });
 
-  // Clean double spaces left after removing emojis/clichés
+  // Strict Privacy: Never leak internal WhatsApp LIDs, wa.id, or technical IDs (e.g. 102409552584830, @lid)
+  cleaned = cleaned
+    .replace(/(?:https?:\/\/)?(?:wa\.me|wa\.id)\/(?:10\d{12,14}|\d{14,16})/gi, '')
+    .replace(/\b[a-zA-Z0-9._%+-]+@s\.whatsapp\.net\b/g, '')
+    .replace(/\b[a-zA-Z0-9._%+-]+@lid\b/g, '')
+    .replace(/@10\d{12,14}\b/g, 'my guy')
+    .replace(/\b10\d{12,14}\b/g, '')
+    .replace(/@\d{14,16}\b/g, '');
+
+  // Clean double spaces left after removing emojis/clichés/IDs
   cleaned = cleaned.replace(/[ \t]+/g, ' ').replace(/\s+([.,!?:;])/g, '$1').trim();
 
   return cleaned;

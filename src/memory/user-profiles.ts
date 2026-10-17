@@ -323,16 +323,19 @@ export class UserProfileManager {
         ORDER BY updated_at DESC LIMIT 5
       `).all(userJid) as Array<{ fact: string }>;
 
-      const name = profile?.display_name || 'User';
+      let name = profile?.display_name || 'User';
+      if (name.includes('@') || /^\d{13,}$/.test(name)) {
+        name = 'User';
+      }
       const role = owner ? 'Bot Owner / Superuser (Elevated Privileges)' : 'User';
       const prefs = prefRows.length > 0 ? prefRows.map((p) => p.fact).join('; ') : 'None specified';
       const lang = profile?.preferred_language || 'en';
       const notes = profile?.personality_notes ? ` | Traits: ${profile.personality_notes}` : '';
 
-      return `User: ${name} (${userJid}) | Role: ${role} | Language: ${lang} | Known Facts: ${factCount} | Preferences: [${prefs}]${notes}`;
+      return `User: ${name} | Role: ${role} | Language: ${lang} | Known Facts: ${factCount} | Preferences: [${prefs}]${notes}`;
     } catch (err) {
       console.error(`[UserProfileManager] Error generating profile summary for ${userJid}:`, err);
-      return `User: ${userJid} | Role: ${this.isOwner(userJid) ? 'Owner' : 'User'}`;
+      return `User: User | Role: ${this.isOwner(userJid) ? 'Owner' : 'User'}`;
     }
   }
 }
