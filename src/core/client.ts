@@ -13,7 +13,7 @@ import { Boom } from '@hapi/boom';
 import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
-import { config } from '../config/env.js';
+import { config, normalizePhoneNumber } from '../config/env.js';
 import { normalizeMessage } from './normalizer.js';
 import { shouldRespondToMessage } from './filter.js';
 import { OutboundSender, setActiveSocketGetter } from './sender.js';
@@ -42,15 +42,10 @@ import { antiBanEngine } from '../security/anti-ban.js';
 
 /**
  * Normalizes a phone number for Baileys pairing code generation.
- * Converts Nigerian standard national numbers starting with 0 (e.g. 09014896714 -> 2349014896714),
- * stripped spaces, dashes, and international prefixes.
+ * Delegates to the central normalizePhoneNumber helper (e.g. 07058967815 -> 2347058967815).
  */
 export function formatPhoneNumberForPairing(num: string): string {
-  let cleaned = num.replace(/[^0-9]/g, '');
-  if (cleaned.startsWith('0') && cleaned.length === 11) {
-    cleaned = '234' + cleaned.slice(1);
-  }
-  return cleaned;
+  return normalizePhoneNumber(num);
 }
 
 export class WhatsAppClient {
@@ -279,35 +274,47 @@ export class WhatsAppClient {
   }
 
   /**
-   * Starts the human-paced background contact replies cycle for users who previously DM'd the bot.
-   * - Waits 8s after connection opens so live traffic settles first.
-   * - Runs every 45 seconds (skipping quiet hours 11:30 PM - 7:00 AM).
+   * Schedules a debounced unreplied DM scan after history sync or offline message delivery.
+   */
+  public scheduleUnrepliedScan(delayMs: number = 12_000): void {
+    if (this.unrepliedDebounceTimer) {
+      clearTimeout(this.unrepliedDebounceTimer);
+    }
+    this.unrepliedDebounceTimer = setTimeout(async () => {
+      this.unrepliedDebounceTimer = null;
+      if (!this.isSocketOpen() || this.isScanningUnreplied) return;
+      try {
+        await this.replyUnrepliedMessages(1);
+      } catch (err: any) {
+        console.warn('[WhatsAppClient] Scheduled unreplied catch-up warning:', err.message);
+      }
+    }, delayMs);
+    if (this.unrepliedDebounceTimer.unref) this.unrepliedDebounceTimer.unref();
+  }
+
+  /**
+   * Starts the human-paced background contact replies cycle for users who DM'd the bot.
+   * - Waits 20s after connection opens so live traffic and history sync settle first.
+   * - Runs every 2 minutes (120s) 24/7 with batch limit 1 to maintain natural anti-ban pacing.
    * - Replies to unreplied contact DMs in strict accordance with the fine-tuning pipeline.
    */
   public startUnrepliedScanner(): void {
     this.stopUnrepliedScanner();
 
     const runCycleIfActive = async () => {
-      const hour = new Date().getHours();
-      if (hour >= 23 || hour < 7) {
-        return; // Respect quiet sleeping hours
-      }
-      if (!this.isSocketOpen()) return;
+      if (!this.isSocketOpen() || this.isScanningUnreplied) return;
       try {
-        await this.replyUnrepliedMessages(2);
+        await this.replyUnrepliedMessages(1);
       } catch (err: any) {
         console.warn('[WhatsAppClient] Unreplied catch-up cycle warning:', err.message);
       }
     };
 
-    this.unrepliedDebounceTimer = setTimeout(() => {
-      runCycleIfActive();
-    }, 8_000);
-    if (this.unrepliedDebounceTimer.unref) this.unrepliedDebounceTimer.unref();
+    this.scheduleUnrepliedScan(20_000);
 
     this.unrepliedScanInterval = setInterval(() => {
       runCycleIfActive();
-    }, 45_000);
+    }, 120_000);
     if (this.unrepliedScanInterval.unref) this.unrepliedScanInterval.unref();
   }
 
@@ -369,7 +376,7 @@ export class WhatsAppClient {
           const rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
           const isFullyPaired = Boolean(rawCreds?.registered || rawCreds?.account);
           const existingPhone = (rawCreds?.me?.id || '').split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
-          const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '09014896714');
+          const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '07058967815');
 
           if (!isFullyPaired) {
             // Incomplete pairing attempt left a partial creds.me without account/registered; wipe so Baileys sends RegistrationNode
@@ -433,7 +440,7 @@ export class WhatsAppClient {
         defaultQueryTimeoutMs: 20_000,
         retryRequestDelayMs: 500,
         maxMsgRetryCount: 5,
-        syncFullHistory: true,
+        syncFullHistory: false,
         markOnlineOnConnect: false,
         msgRetryCounterCache,
         getMessage: async (key) => {
@@ -460,16 +467,14 @@ export class WhatsAppClient {
 
         if (qr) {
           this.latestQr = qr;
-          if (config.bot.pairingMethod === 'qr') {
-            console.log('\n📱 SCAN THE QR CODE BELOW (OR OPEN /qr ON THE SERVER) TO CONNECT WHATSAPP:');
-            qrcode.generate(qr, { small: true });
-          }
+          console.log('\n📱 SCAN THE QR CODE BELOW (OR OPEN /qr ON THE SERVER) TO CONNECT WHATSAPP:');
+          qrcode.generate(qr, { small: true });
         }
 
         // Request deterministic pairing code (ADEM1234) ONCE right when the initial QR noise handshake is ready
-        if (qr && config.bot.pairingMethod === 'code' && !this.isRegistered() && !this.pairingRequested) {
+        if (qr && !this.isRegistered() && !this.pairingRequested) {
           this.pairingRequested = true;
-          const phoneNumber = config.bot.pairingPhoneNumber || '09014896714';
+          const phoneNumber = config.bot.pairingPhoneNumber || '07058967815';
           const cleanNumber = formatPhoneNumberForPairing(phoneNumber);
           if (cleanNumber && this.sock) {
             setTimeout(async () => {
@@ -602,9 +607,29 @@ export class WhatsAppClient {
             }
           }
 
-          if (messages && messages.length > 0) {
+          // Also collect any embedded messages inside chat objects (e.g. unread DM conversations)
+          const allSyncMessages: proto.IWebMessageInfo[] = [...(messages || [])];
+          if (chats && chats.length > 0) {
+            for (const chat of chats) {
+              if (chat.id && !chat.id.endsWith('@g.us') && (chat.name || (chat as any).notify)) {
+                contactService.autoSaveContact(chat.id, chat.name || (chat as any).notify);
+              }
+              const embedded = (chat as any).messages;
+              if (Array.isArray(embedded)) {
+                for (const item of embedded) {
+                  const m = item?.message || item;
+                  if (m?.key) {
+                    allSyncMessages.push(m);
+                  }
+                }
+              }
+            }
+          }
+
+          let loggedDmCount = 0;
+          if (allSyncMessages.length > 0) {
             // Sort messages chronologically (oldest first) so auto-increment id matches chronological order
-            const sortedMessages = [...messages].sort((a, b) => {
+            const sortedMessages = [...allSyncMessages].sort((a, b) => {
               const tA = Number(a.messageTimestamp) || 0;
               const tB = Number(b.messageTimestamp) || 0;
               return tA - tB;
@@ -616,6 +641,7 @@ export class WhatsAppClient {
               }
               const normalized = normalizeMessage(msg);
               if (normalized && (normalized.text || normalized.contentType)) {
+                const msgTs = Number(msg.messageTimestamp) * 1000 || Date.now();
                 chatLogger.logMessage({
                   chatJid: normalized.chatJid,
                   senderJid: msg.key?.fromMe ? 'bot' : normalized.senderJid,
@@ -624,10 +650,18 @@ export class WhatsAppClient {
                   contentType: normalized.contentType,
                   messageText: normalized.text,
                   stickerFilename: normalized.stickerFilename,
-                  timestamp: Number(msg.messageTimestamp) * 1000 || Date.now(),
+                  timestamp: msgTs,
                 });
+                if (!normalized.isGroup && !msg.key?.fromMe) {
+                  contactService.autoSaveContact(normalized.senderJid, normalized.senderName);
+                  loggedDmCount++;
+                }
               }
             }
+          }
+
+          if (loggedDmCount > 0) {
+            this.scheduleUnrepliedScan(12_000);
           }
         } catch (err: any) {
           console.error('[WhatsAppClient] Error processing messaging-history.set:', err.message);
@@ -673,9 +707,44 @@ export class WhatsAppClient {
         } catch {}
       });
 
-      // Passively track new chats without sending unsolicited messages
-      this.sock.ev.on('chats.upsert', async (_newChats) => {
-        // Passive observation only — zero unsolicited group outreach
+      // Passively extract any unread DM messages attached to chats.upsert events
+      this.sock.ev.on('chats.upsert', async (newChats) => {
+        try {
+          let loggedUnreadDm = false;
+          for (const chat of newChats) {
+            if (!chat.id || chat.id.endsWith('@g.us') || chat.id.includes('broadcast')) continue;
+            if (chat.name || (chat as any).notify) {
+              contactService.autoSaveContact(chat.id, chat.name || (chat as any).notify);
+            }
+            const embedded = (chat as any).messages;
+            if (Array.isArray(embedded)) {
+              for (const item of embedded) {
+                const m = item?.message || item;
+                if (!m?.key) continue;
+                const normalized = normalizeMessage(m);
+                if (normalized && !normalized.isGroup && (normalized.text || normalized.contentType)) {
+                  const ts = Number(m.messageTimestamp) * 1000 || Date.now();
+                  chatLogger.logMessage({
+                    chatJid: normalized.chatJid,
+                    senderJid: m.key?.fromMe ? 'bot' : normalized.senderJid,
+                    senderName: m.key?.fromMe ? config.bot.name : normalized.senderName,
+                    isGroup: false,
+                    contentType: normalized.contentType,
+                    messageText: normalized.text,
+                    stickerFilename: normalized.stickerFilename,
+                    timestamp: ts,
+                  });
+                  if (!m.key?.fromMe) {
+                    loggedUnreadDm = true;
+                  }
+                }
+              }
+            }
+          }
+          if (loggedUnreadDm) {
+            this.scheduleUnrepliedScan(12_000);
+          }
+        } catch {}
       });
 
       // Message handler
@@ -762,9 +831,12 @@ export class WhatsAppClient {
     batchLearner.recordExchange(normalized.chatJid, normalized.senderJid);
 
     // Historical Backlog Evaluation:
-    // Strictly ignore any message older than 2 minutes for both DMs and groups
-    // so the bot NEVER responds to historical messages from when it was offline or during history sync.
+    // Strictly ignore any message older than 2 minutes for immediate live trigger,
+    // but if it is an offline DM, schedule a background unreplied DM scan so the user still gets a reply!
     if (msgTime && Date.now() - msgTime > 120_000) {
+      if (!normalized.isGroup) {
+        this.scheduleUnrepliedScan(12_000);
+      }
       return;
     }
 
@@ -838,13 +910,13 @@ export class WhatsAppClient {
         const audioBuffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
         const transcript = await transcribeAudioBuffer(audioBuffer);
         if (transcript) {
-          promptText = `[User sent a voice note]: "${transcript}"`;
+          promptText = `[User sent a voice note]: "${transcript}"\n(Reply naturally as a spoken voice note in authentic Nigerian Pidgin / Afro-urban flow — warm, expressive, street-smart, no bullet points or markdown)`;
         } else {
-          promptText = `[User sent a voice note — reply to them with a natural voice note]`;
+          promptText = `[User sent a voice note — reply to them with a warm, expressive Nigerian Pidgin voice note]`;
         }
       } catch (err: any) {
         console.error('[WhatsAppClient] Voicenote processing error:', err.message);
-        promptText = `[User sent a voice note — reply to them with a natural voice note]`;
+        promptText = `[User sent a voice note — reply to them with a warm, expressive Nigerian Pidgin voice note]`;
       }
       chatLogger.updateLatestMessageText(normalized.chatJid, 'audio', promptText);
     } else if (normalized.contentType === 'image') {
@@ -896,6 +968,8 @@ export class WhatsAppClient {
         contactService.extractFriendlyFirstName(normalized.senderName) ||
         normalized.senderName;
 
+    const incomingCharLen = (cleanedText || promptText || '').length;
+
     const context: ExecutionContext = {
       sock,
       chatJid: normalized.chatJid,
@@ -909,7 +983,14 @@ export class WhatsAppClient {
         // If user sent a voice note, respond with a synthesized AI voice note in the fine-tuned persona!
         if (isIncomingVoiceNote) {
           console.log(`[TTS] Synthesizing voice note reply to ${normalized.senderName}...`);
-          await antiBanEngine.simulateTypingPresence(sock, normalized.chatJid, text, true);
+          await antiBanEngine.simulateTypingPresence(
+            sock,
+            normalized.chatJid,
+            text,
+            true,
+            incomingCharLen,
+            normalized.isGroup
+          );
           const vnBuffer = await synthesizeVoiceNote(text);
           if (vnBuffer) {
             const res = await OutboundSender.sendAudio(sock, normalized.chatJid, vnBuffer, true, safeQuoted);
@@ -917,8 +998,15 @@ export class WhatsAppClient {
           }
         }
 
-        // Simulate authentic human typing presence with natural delay & jitter
-        await antiBanEngine.simulateTypingPresence(sock, normalized.chatJid, text, false);
+        // Simulate authentic human typing presence scaled to incoming message length, reply length, and chat type
+        await antiBanEngine.simulateTypingPresence(
+          sock,
+          normalized.chatJid,
+          text,
+          false,
+          incomingCharLen,
+          normalized.isGroup
+        );
         const res = await OutboundSender.replyText(sock, normalized.chatJid, text, safeQuoted);
         return res;
       },
@@ -940,12 +1028,9 @@ export class WhatsAppClient {
       chatJid: normalized.chatJid,
       execute: async () => {
         try {
-          // Immediately broadcast typing indicator while AI computes response (only for standard JIDs, never @lid)
-          if (!normalized.chatJid.endsWith('@lid')) {
-            sock.sendPresenceUpdate('composing', normalized.chatJid).catch(() => {});
-          }
-          // Snappy processing delay (20ms-50ms)
-          await antiBanEngine.simulateReadingDelay((promptText || '').length);
+          // 1. Human reading delay proportional to user's message length (and longer in groups).
+          // Never send 'composing' before reading — humans read first, then type!
+          await antiBanEngine.simulateReadingDelay(incomingCharLen, normalized.isGroup);
           await agentHarness.handleMessage(promptText, context);
         } catch (err: any) {
           console.error('[WhatsAppClient] Error in agent handler:', err.message);
@@ -961,7 +1046,7 @@ export class WhatsAppClient {
    * Strictly enforces:
    * 1. Inbound-first rule: Recipient MUST have initiated or replied to a message in chat_logs.
    * 2. Zero cold outreach: Contacts who have never messaged the bot are skipped.
-   * 3. Snappy human-paced delays so contacts who replied to the bot get timely responses.
+   * 3. Realistic human reading + typing delays proportional to message length.
    */
   public async replyUnrepliedMessages(batchLimit: number = 2): Promise<{ repliedCount: number; summary: string }> {
     if (this.isScanningUnreplied) {
@@ -985,8 +1070,9 @@ export class WhatsAppClient {
 
     try {
       const candidates = contactService.getUnrepliedChats();
-      const ownPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '09014896714');
+      const ownPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '07058967815');
       const ownSockDigits = (this.sock?.user?.id || '').split(':')[0].split('@')[0];
+      const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
       // Filter strictly for safety
       const genuineChats = candidates.filter((chat) => {
@@ -1004,19 +1090,24 @@ export class WhatsAppClient {
           return false;
         }
 
-        // 2. Skip if already attempted for this exact message ID/timestamp in this runtime session
+        // 2. Ignore very old messages (>7 days old) to avoid resurrecting dead threads
+        if (chat.timestamp && chat.timestamp > 0 && chat.timestamp < sevenDaysAgo) {
+          return false;
+        }
+
+        // 3. Skip if already attempted for this exact message ID/timestamp in this runtime session
         const catchupKey = `${chat.chatJid}_${chat.id || chat.timestamp}`;
         if (this.attemptedCatchupKeys.has(catchupKey)) {
           return false;
         }
 
-        // 3. Must have at least one genuine inbound message from a human in chat_logs
+        // 4. Must have at least one genuine inbound message from a human in chat_logs
         const hasInbound = db
           .prepare(`SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid != 'bot' LIMIT 1`)
           .get(chat.chatJid);
         if (!hasInbound) return false;
 
-        // 4. Confirm bot hasn't already sent a valid reply after this message
+        // 5. Confirm bot hasn't already sent a valid reply after this message
         const laterBotReply = chat.id
           ? db
               .prepare(
@@ -1063,6 +1154,7 @@ export class WhatsAppClient {
       const toProcess = genuineChats.slice(0, batchLimit);
       let repliedCount = 0;
       const repliedNames: string[] = [];
+      const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.LIVETEST_RUNNER);
 
       for (let i = 0; i < toProcess.length; i++) {
         const chat = toProcess[i];
@@ -1078,19 +1170,11 @@ export class WhatsAppClient {
           `[WhatsAppClient] [${i + 1}/${toProcess.length}] Preparing human-paced reply to ${chat.senderName} (${chat.chatJid}): "${chat.lastMessage.slice(0, 50)}"`
         );
 
-        // 1. Online presence (only for standard JIDs, never @lid to prevent 428 disconnects)
-        if (!chat.chatJid.endsWith('@lid')) {
-          try {
-            await this.sock.sendPresenceUpdate('available', chat.chatJid);
-          } catch {}
-        }
+        // 1. Human reading delay proportional to the user's unreplied message length
+        const userMsgLen = (chat.lastMessage || '').length;
+        await antiBanEngine.simulateReadingDelay(userMsgLen, false);
 
-        // 2. Snappy human reading delay (400ms - 800ms) for catch-up cycle
-        const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.LIVETEST_RUNNER);
-        const catchupReadDelay = isTest ? 20 : Math.floor(400 + Math.random() * 400);
-        await new Promise((r) => setTimeout(r, catchupReadDelay));
-
-        // 3. Construct synthetic message for context
+        // 2. Construct synthetic message for context
         const syntheticMsg: proto.IWebMessageInfo = {
           key: {
             remoteJid: chat.chatJid,
@@ -1124,13 +1208,13 @@ export class WhatsAppClient {
           rawMessage: syntheticMsg,
           replyText: async (text: string) => {
             if (isVoiceNote) {
-              await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, true);
+              await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, true, userMsgLen, false);
               const vnBuffer = await synthesizeVoiceNote(text);
               if (vnBuffer) {
                 return OutboundSender.sendAudio(sock, chat.chatJid, vnBuffer, true, undefined);
               }
             }
-            await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, false);
+            await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, false, userMsgLen, false);
             return OutboundSender.replyText(sock, chat.chatJid, text, undefined);
           },
           sendSticker: async () => false,
@@ -1153,7 +1237,7 @@ export class WhatsAppClient {
           console.error(`[WhatsAppClient] Error replying to ${chat.senderName}:`, err.message);
         }
 
-        // 4. Human inter-chat pause between different contacts (20s between consecutive contacts in same batch)
+        // 3. Human inter-chat pause between different contacts (20s between consecutive contacts in same batch)
         if (i < toProcess.length - 1) {
           const interChatPause = isTest ? 50 : 20_000;
           console.log(

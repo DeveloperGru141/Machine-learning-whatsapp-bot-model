@@ -5,9 +5,7 @@ import { contactService } from '../../memory/contact-service.js';
 import { whatsAppClient } from '../../core/client.js';
 import { config } from '../../config/env.js';
 import { db } from '../../memory/db.js';
-import { chatLogger } from '../../memory/chat-logger.js';
 import { OutboundSender } from '../../core/sender.js';
-import { userProfileManager } from '../../memory/user-profiles.js';
 
 export class ContactPlugin implements IPlugin {
   name = 'ContactManager';
@@ -440,8 +438,7 @@ export class ContactPlugin implements IPlugin {
           console.log(`[ContactPlugin] 📨 Sending outbound message to ${targetName} (${targetJid}): "${rawMessage.slice(0, 60)}..."`);
 
           // Send message through OutboundSender with explicit command authorization
-          const isAuthorized = userProfileManager.isOwner(ctx.senderJid) || true;
-          const sent = await OutboundSender.replyText(ctx.sock, targetJid, rawMessage, undefined, isAuthorized);
+          const sent = await OutboundSender.replyText(ctx.sock, targetJid, rawMessage, undefined, true);
           if (!sent) {
             return {
               success: false,

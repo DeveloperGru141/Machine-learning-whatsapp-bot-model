@@ -26,7 +26,7 @@ const envSchema = z.object({
     val.split(',').map((s) => s.trim()).filter(Boolean)
   ),
   PAIRING_METHOD: z.enum(['code', 'qr']).default('qr'),
-  PAIRING_PHONE_NUMBER: z.string().default('09014896714'),
+  PAIRING_PHONE_NUMBER: z.string().default('07058967815'),
   SESSIONS_DIR: z.string().default('./sessions'),
   DATABASE_PATH: z.string().default('./data/bot.sqlite'),
 });
@@ -101,7 +101,7 @@ export const config = {
     voice: process.env.BOT_VOICE || 'en-NG-AbeoNeural',
     owners: normalizedOwners,
     pairingMethod: (process.env.PAIRING_METHOD as 'code' | 'qr') || 'qr',
-    pairingPhoneNumber: normalizePhoneNumber(process.env.PAIRING_PHONE_NUMBER || '09014896714'),
+    pairingPhoneNumber: normalizePhoneNumber(process.env.PAIRING_PHONE_NUMBER || '07058967815'),
   },
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',

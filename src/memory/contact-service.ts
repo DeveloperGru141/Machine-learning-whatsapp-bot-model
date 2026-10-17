@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { db } from './db.js';
-import { config } from '../config/env.js';
+import { config, normalizePhoneNumber } from '../config/env.js';
 
 export interface ContactRecord {
   id: number;
@@ -45,20 +45,14 @@ export class ContactService {
   }
 
   /**
-   * Extracts pure digits from a phone number or JID, converting 11-digit Nigerian numbers (08..., 07..., 09...) to 234...
+   * Extracts pure digits from a phone number or JID, delegating to normalizePhoneNumber for standard phone numbers.
    */
   public extractPhoneNumber(phoneOrJid: string): string {
     const rawUser = (phoneOrJid || '').split('@')[0].split(':')[0];
-    let digits = rawUser.replace(/[^0-9]/g, '');
-    if (
-      !phoneOrJid.endsWith('@lid') &&
-      digits.startsWith('0') &&
-      digits.length === 11 &&
-      /^0[789][01]\d{8}$/.test(digits)
-    ) {
-      digits = '234' + digits.slice(1);
+    if (phoneOrJid?.endsWith('@lid')) {
+      return rawUser.replace(/[^0-9]/g, '');
     }
-    return digits;
+    return normalizePhoneNumber(rawUser);
   }
 
   /**
@@ -372,6 +366,7 @@ export class ContactService {
 
   /**
    * Retrieves all non-group chats where the latest recorded message was from a user (awaiting bot reply).
+   * Orders by newest timestamp first so active/recent unreplied DMs are answered promptly.
    */
   public getUnrepliedChats(): UnrepliedChat[] {
     try {
@@ -389,6 +384,10 @@ export class ContactService {
             ROW_NUMBER() OVER (PARTITION BY chat_jid ORDER BY timestamp DESC, id DESC) as rn
           FROM chat_logs
           WHERE is_group = 0
+            AND chat_jid NOT LIKE '%@g.us'
+            AND chat_jid NOT LIKE '%broadcast%'
+            AND chat_jid NOT LIKE '2347058967815%'
+            AND chat_jid NOT LIKE '2349014896714%'
             AND NOT (
               sender_jid = 'bot'
               AND (
@@ -403,9 +402,9 @@ export class ContactService {
           AND sender_jid != 'bot'
           AND (
             (message_text IS NOT NULL AND TRIM(message_text) != '')
-            OR content_type = 'audio'
+            OR content_type IN ('audio', 'image', 'video', 'document', 'sticker')
           )
-        ORDER BY timestamp ASC;
+        ORDER BY timestamp DESC;
       `;
       const rows = db.prepare(sql).all() as Array<{
         id: number;
@@ -417,18 +416,30 @@ export class ContactService {
         content_type: string;
       }>;
 
-      return rows.map((r) => ({
-        id: r.id,
-        chatJid: r.chat_jid,
-        senderJid: r.sender_jid,
-        senderName: r.sender_name || 'Friend',
-        lastMessage:
-          r.message_text && r.message_text.trim()
-            ? r.message_text
-            : '[User sent a voice note — reply to them with a warm, natural voice note]',
-        timestamp: r.timestamp,
-        contentType: r.content_type || 'text',
-      }));
+      return rows.map((r) => {
+        let fallbackText = '[User sent a message]';
+        if (r.content_type === 'audio') {
+          fallbackText = '[User sent a voice note — reply to them with a warm, natural Nigerian Pidgin voice note]';
+        } else if (r.content_type === 'image') {
+          fallbackText = '[User sent an image — acknowledge it warmly]';
+        } else if (r.content_type === 'sticker') {
+          fallbackText = '[User sent a sticker — react with a short witty reply]';
+        } else if (r.content_type === 'video') {
+          fallbackText = '[User sent a video]';
+        } else if (r.content_type === 'document') {
+          fallbackText = '[User sent a document]';
+        }
+
+        return {
+          id: r.id,
+          chatJid: r.chat_jid,
+          senderJid: r.sender_jid,
+          senderName: r.sender_name || 'Friend',
+          lastMessage: r.message_text && r.message_text.trim() ? r.message_text : fallbackText,
+          timestamp: r.timestamp,
+          contentType: r.content_type || 'text',
+        };
+      });
     } catch (err) {
       console.error('[ContactService] Error finding unreplied chats:', err);
       return [];

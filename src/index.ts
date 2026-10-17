@@ -118,7 +118,7 @@ function startHealthServer() {
         res.end(
           JSON.stringify({
             status: registered ? 'already_connected' : 'awaiting_qr_scan',
-            pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2349014896714'}`,
+            pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2347058967815'}`,
             pairingCode,
             qr,
           })
@@ -147,7 +147,7 @@ function startHealthServer() {
 <body>
   <div class="card">
     <h1>${config.bot.name}</h1>
-    <p>Link WhatsApp (+${config.bot.pairingPhoneNumber || '2349014896714'}) via QR Scan or Pairing Code</p>
+    <p>Link WhatsApp (+${config.bot.pairingPhoneNumber || '2347058967815'}) via QR Scan or Pairing Code</p>
     <div id="qr-container" class="qr-box">
       ${
         registered
@@ -162,7 +162,7 @@ function startHealthServer() {
     </div>
     <div><span id="status-badge" class="badge">${registered ? '🟢 Connected' : '⏳ Waiting for Link (Auto-refreshes live)'}</span></div>
     <div class="steps">
-      1. Open <b>WhatsApp</b> on your phone (<b>09014896714</b>)<br/>
+      1. Open <b>WhatsApp</b> on your phone (<b>07058967815</b>)<br/>
       2. Tap <b>Settings (or ⋮) &rarr; Linked Devices &rarr; Link a Device</b><br/>
       3. Scan the QR code above OR tap <b>"Link with phone number instead"</b> and enter the code shown above.
     </div>
@@ -207,7 +207,7 @@ function startHealthServer() {
         status: 'ok',
         bot: config.bot.name,
         creator: config.bot.creator,
-        pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2349014896714'}`,
+        pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2347058967815'}`,
         whatsappRegistered: whatsAppClient.isRegistered(),
         whatsappConnected: whatsAppClient.isSocketOpen() || report.isConnected,
         qr: whatsAppClient.getLatestQr(),

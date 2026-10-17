@@ -49,44 +49,70 @@ export class AntiBanEngine {
   // Rate limiting & cooldown tracking
   private lastDispatchTimes: Map<string, number> = new Map(); // chatJid -> timestamp
   private recentGlobalDispatches: number[] = []; // timestamps of recent dispatches within 60s
-  private readonly maxGlobalPerMinute = 35; // Max 35 messages/min across all chats
-  private readonly minPerChatCooldownMs = 250; // Snappy 0.25s between consecutive messages to the same chat
-  private readonly minGlobalGapMs = 150; // Minimum 0.15s gap between any two outbound messages
+  private readonly maxGlobalPerMinute = 12; // Safe human cap: max 12 messages/min across all chats
+  private readonly minPerChatCooldownMs = 3500; // Minimum 3.5s between consecutive messages to the same chat
+  private readonly minGlobalGapMs = 1800; // Minimum 1.8s gap between any two outbound messages
 
   /**
-   * Calculates a snappy reading delay based on incoming message length.
-   * Ultra-responsive 20ms-50ms processing window.
+   * Calculates an authentic human reading delay proportional to the length of the message
+   * sent by the user (and longer in group chats).
+   * - Short DM (15 chars): ~1.8s - 2.6s reading time
+   * - Medium DM (100 chars): ~4.2s - 5.2s reading time
+   * - Long DM/Group message (250+ chars): ~6.5s - 8.5s reading time
    */
-  public calculateReadingDelay(incomingTextLength: number = 0): number {
+  public calculateReadingDelay(incomingTextLength: number = 0, isGroup: boolean = false): number {
     if (isLivetestRunner()) return 10;
 
-    const baseMs = 20;
-    const jitter = Math.floor(Math.random() * 30);
-    return baseMs + jitter;
+    const cleanLen = Math.max(1, Math.min(incomingTextLength || 20, 400));
+    const baseMs = isGroup ? 2000 : 1200;
+    const perCharMs = isGroup ? 34 : 28;
+    const rawDelay = baseMs + cleanLen * perCharMs;
+    const jitter = Math.floor(Math.random() * 800);
+    const maxCap = isGroup ? 8500 : 7000;
+    return Math.min(maxCap, rawDelay + jitter);
   }
 
   /**
-   * Calculates typing presence delay for a fast, crisp response time.
-   * Keeps "typing..." active for 150ms-280ms so WhatsApp displays presence
-   * while delivering replies almost instantaneously.
+   * Calculates realistic human typing delay based on BOTH how long the user's message was
+   * (cognitive formulation time) AND how long the bot's reply is (~42-48ms per character),
+   * with extra caution in group chats so WhatsApp never flags automated burst replies.
    */
-  public calculateTypingDelay(responseTextLength: number = 0): number {
+  public calculateTypingDelay(
+    responseTextLength: number = 0,
+    incomingTextLength: number = 0,
+    isGroup: boolean = false
+  ): number {
     if (isLivetestRunner()) return 20;
 
-    const baseMs = 150;
-    const jitter = Math.floor(Math.random() * 130);
-    return baseMs + jitter;
+    const replyLen = Math.max(10, Math.min(responseTextLength || 40, 350));
+    const userLen = Math.max(0, Math.min(incomingTextLength || 20, 300));
+
+    const baseMs = isGroup ? 2400 : 1600;
+    const replyTypingMs = replyLen * (isGroup ? 46 : 40);
+    const userComprehensionMs = userLen * (isGroup ? 18 : 14);
+    const rawTotal = baseMs + replyTypingMs + userComprehensionMs;
+
+    // Add +/- 18% natural human rhythm variance
+    const varianceFactor = 0.85 + Math.random() * 0.33;
+    const computed = Math.floor(rawTotal * varianceFactor);
+
+    const minFloor = isGroup ? 3000 : 2200;
+    const maxCeiling = isGroup ? 13000 : 10500;
+    return Math.max(minFloor, Math.min(maxCeiling, computed));
   }
 
   /**
-   * Simulates active presence: sends 'composing' (or 'recording'), waits human delay,
-   * then sends 'paused'.
+   * Simulates active human presence: sends 'composing' (or 'recording'), waits a realistic
+   * human typing duration proportional to message length (with a mid-sentence thinking pause
+   * on longer messages), then sends 'paused'.
    */
   public async simulateTypingPresence(
     sock: WASocket,
     chatJid: string,
     responseText: string,
-    isVoiceNote: boolean = false
+    isVoiceNote: boolean = false,
+    incomingTextLength: number = 0,
+    isGroup: boolean = false
   ): Promise<void> {
     if (!sock) return;
 
@@ -95,20 +121,40 @@ export class AntiBanEngine {
     // Sending presence to linked/privacy IDs (@lid) triggers server 428 Precondition Required / Connection Terminated!
     const canSendPresence = !chatJid.endsWith('@lid') && !chatJid.endsWith('@broadcast');
 
+    const delay = isVoiceNote
+      ? isLivetestRunner()
+        ? 50
+        : Math.min(9000, Math.max(2800, Math.floor(responseText.length * 48 + incomingTextLength * 15)))
+      : this.calculateTypingDelay(responseText.length, incomingTextLength, isGroup || chatJid.endsWith('@g.us'));
+
+    console.log(
+      `[AntiBan] ⏳ Simulating human ${isVoiceNote ? 'recording' : 'typing'} (${delay}ms, userMsg=${incomingTextLength}c, reply=${responseText.length}c) to ${chatJid}...`
+    );
+
     if (canSendPresence) {
       try {
         await sock.sendPresenceUpdate(presenceType, chatJid);
-      } catch {
-        // Non-critical if presence fails
-      }
+      } catch {}
     }
 
-    const delay = isVoiceNote
-      ? (isLivetestRunner() ? 50 : Math.min(2000, Math.max(1000, Math.floor(responseText.length * 15))))
-      : this.calculateTypingDelay(responseText.length);
+    // For longer typing durations (> 5.2s) outside tests, simulate a natural brief pause mid-typing like a real human thinking
+    if (!isLivetestRunner() && !isVoiceNote && delay > 5200 && canSendPresence) {
+      const firstLeg = Math.floor(delay * 0.58);
+      const pauseDuration = Math.floor(450 + Math.random() * 400);
+      const secondLeg = Math.max(800, delay - firstLeg - pauseDuration);
 
-    console.log(`[AntiBan] ⏳ Simulating human typing (${delay}ms) to ${chatJid}...`);
-    await new Promise((r) => setTimeout(r, delay));
+      await new Promise((r) => setTimeout(r, firstLeg));
+      try {
+        await sock.sendPresenceUpdate('paused', chatJid);
+      } catch {}
+      await new Promise((r) => setTimeout(r, pauseDuration));
+      try {
+        await sock.sendPresenceUpdate(presenceType, chatJid);
+      } catch {}
+      await new Promise((r) => setTimeout(r, secondLeg));
+    } else {
+      await new Promise((r) => setTimeout(r, delay));
+    }
 
     if (canSendPresence) {
       try {
@@ -118,10 +164,13 @@ export class AntiBanEngine {
   }
 
   /**
-   * Simulates human reading delay before the bot begins generating its answer.
+   * Simulates human reading delay proportional to the user's message length before the bot starts typing.
    */
-  public async simulateReadingDelay(incomingTextLength: number = 0): Promise<void> {
-    const delay = this.calculateReadingDelay(incomingTextLength);
+  public async simulateReadingDelay(incomingTextLength: number = 0, isGroup: boolean = false): Promise<void> {
+    const delay = this.calculateReadingDelay(incomingTextLength, isGroup);
+    console.log(
+      `[AntiBan] 👀 Simulating human reading time (${delay}ms for ${incomingTextLength} chars, group=${isGroup})...`
+    );
     await new Promise((r) => setTimeout(r, delay));
   }
 
