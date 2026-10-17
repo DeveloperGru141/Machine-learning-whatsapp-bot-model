@@ -11,8 +11,8 @@ export interface ManagedContextResult {
 }
 
 export class ContextManager {
-  private readonly TOTAL_CONTEXT_BUDGET = 2000;
-  private readonly RAW_HISTORY_MIN_MESSAGES = 4;
+  private readonly TOTAL_CONTEXT_BUDGET = 6000;
+  private readonly RAW_HISTORY_MIN_MESSAGES = 6;
   private activeSummarizations = new Set<string>();
 
   /**
@@ -120,12 +120,12 @@ export class ContextManager {
     const rawMessages: Array<{ role: string; content: string }> = [];
 
     try {
-      // Fetch up to 8 recent chat logs to keep context crisp and conserve daily token quota
+      // Fetch up to 25 recent chat logs to maintain rich conversational context and continuity
       const rawRows = db.prepare(`
         SELECT sender_name, message_text, content_type, timestamp, sender_jid
         FROM chat_logs
         WHERE chat_jid = ?
-        ORDER BY id DESC LIMIT 8
+        ORDER BY id DESC LIMIT 25
       `).all(chatJid) as Array<{
         sender_name: string | null;
         message_text: string | null;

@@ -365,45 +365,70 @@ export class ContactPlugin implements IPlugin {
           let targetName = args.name?.trim() || rawRecipient;
           let targetPhone = '';
 
-          // 1. Check if recipient is directly a phone number
-          const cleanDigits = contactService.extractPhoneNumber(rawRecipient);
-          if (cleanDigits && cleanDigits.length >= 7 && cleanDigits.length <= 15) {
-            targetPhone = cleanDigits;
-            targetJid = `${cleanDigits}@s.whatsapp.net`;
-            const saved = contactService.getContact(cleanDigits);
-            if (saved) {
-              targetName = saved.custom_name || saved.display_name || targetName;
-            } else if (args.name && args.name.trim() && !/^\+?\d+$/.test(args.name.trim())) {
-              contactService.saveContact(cleanDigits, args.name.trim());
-              targetName = args.name.trim();
+          // 0. Check if recipient refers to "last guy", "the last person", "guy wey u message", etc.
+          const isRelativeRef =
+            /^(the\s+)?(last|previous)\s+(guy|person|contact|number|one|dude)|(guy\s+(wey|that|u|you))|^(him|her|them)$/i.test(rawRecipient);
+
+          if (isRelativeRef) {
+            try {
+              const lastOutbound = db.prepare(`
+                SELECT chat_jid FROM chat_logs
+                WHERE sender_jid = 'bot' AND is_group = 0 AND chat_jid != ?
+                ORDER BY id DESC LIMIT 1
+              `).get(ctx.chatJid) as { chat_jid: string } | undefined;
+
+              if (lastOutbound && lastOutbound.chat_jid) {
+                targetJid = lastOutbound.chat_jid;
+                targetPhone = contactService.extractPhoneNumber(targetJid);
+                const saved = contactService.getContact(targetPhone || targetJid);
+                targetName = saved?.custom_name || saved?.display_name || (targetPhone ? `+${targetPhone}` : targetJid);
+              }
+            } catch (err) {
+              console.warn('[ContactPlugin] Error finding last messaged contact:', err);
             }
-          } else {
-            // 2. Look up in contactService by name or nickname
-            const saved = contactService.getContact(rawRecipient);
-            if (saved) {
-              targetName = saved.custom_name || saved.display_name || rawRecipient;
-              targetPhone = saved.phone_number;
-              if (saved.phone_number && saved.phone_number.length <= 15 && !saved.phone_number.startsWith('0')) {
-                targetJid = `${saved.phone_number}@s.whatsapp.net`;
-              } else {
-                targetJid = saved.jid;
+          }
+
+          if (!targetJid) {
+            // 1. Check if recipient is directly a phone number
+            const cleanDigits = contactService.extractPhoneNumber(rawRecipient);
+            if (cleanDigits && cleanDigits.length >= 7 && cleanDigits.length <= 15) {
+              targetPhone = cleanDigits;
+              targetJid = `${cleanDigits}@s.whatsapp.net`;
+              const saved = contactService.getContact(cleanDigits);
+              if (saved) {
+                targetName = saved.custom_name || saved.display_name || targetName;
+              } else if (args.name && args.name.trim() && !/^\+?\d+$/.test(args.name.trim())) {
+                contactService.saveContact(cleanDigits, args.name.trim());
+                targetName = args.name.trim();
               }
             } else {
-              // 3. Fallback search in SQLite contacts table
-              const row = db.prepare(`
-                SELECT * FROM contacts
-                WHERE display_name LIKE ? OR custom_name LIKE ? OR notes LIKE ?
-                ORDER BY CASE WHEN jid LIKE '%@s.whatsapp.net' THEN 0 ELSE 1 END
-                LIMIT 1
-              `).get(`%${rawRecipient}%`, `%${rawRecipient}%`, `%${rawRecipient}%`) as any;
-
-              if (row) {
-                targetName = row.custom_name || row.display_name || rawRecipient;
-                targetPhone = row.phone_number;
-                if (row.phone_number && row.phone_number.length <= 15) {
-                  targetJid = `${row.phone_number}@s.whatsapp.net`;
+              // 2. Look up in contactService by name or nickname
+              const saved = contactService.getContact(rawRecipient);
+              if (saved) {
+                targetName = saved.custom_name || saved.display_name || rawRecipient;
+                targetPhone = saved.phone_number;
+                if (saved.phone_number && saved.phone_number.length <= 15 && !saved.phone_number.startsWith('0')) {
+                  targetJid = `${saved.phone_number}@s.whatsapp.net`;
                 } else {
-                  targetJid = row.jid;
+                  targetJid = saved.jid;
+                }
+              } else {
+                // 3. Fallback search in SQLite contacts table
+                const row = db.prepare(`
+                  SELECT * FROM contacts
+                  WHERE display_name LIKE ? OR custom_name LIKE ? OR notes LIKE ?
+                  ORDER BY CASE WHEN jid LIKE '%@s.whatsapp.net' THEN 0 ELSE 1 END
+                  LIMIT 1
+                `).get(`%${rawRecipient}%`, `%${rawRecipient}%`, `%${rawRecipient}%`) as any;
+
+                if (row) {
+                  targetName = row.custom_name || row.display_name || rawRecipient;
+                  targetPhone = row.phone_number;
+                  if (row.phone_number && row.phone_number.length <= 15) {
+                    targetJid = `${row.phone_number}@s.whatsapp.net`;
+                  } else {
+                    targetJid = row.jid;
+                  }
                 }
               }
             }
@@ -417,7 +442,7 @@ export class ContactPlugin implements IPlugin {
           }
 
           // Pre-validate on WhatsApp to prevent USync 428 connection closure and resolve canonical JID
-          const lookupTarget = targetPhone || cleanDigits || targetJid.split('@')[0];
+          const lookupTarget = targetPhone || targetJid.split('@')[0];
           try {
             if (ctx.sock?.onWhatsApp && !targetJid.endsWith('@lid')) {
               const onWa = await ctx.sock.onWhatsApp(lookupTarget);

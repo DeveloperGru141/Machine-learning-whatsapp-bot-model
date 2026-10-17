@@ -1,4 +1,5 @@
 import { config } from '../config/env.js';
+import { db } from '../memory/db.js';
 import { memoryService } from '../memory/memory-service.js';
 import { styleAdapter } from '../learning/style-adapter.js';
 import { batchLearner } from '../learning/batch-learner.js';
@@ -37,6 +38,23 @@ export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boo
       .join('\n');
   }
 
+  // Lookup the most recent external contact messaged by the bot outside this chat
+  let lastMessagedContactInfo = '';
+  try {
+    const lastOutbound = db.prepare(`
+      SELECT chat_jid, message_text, timestamp FROM chat_logs
+      WHERE sender_jid = 'bot' AND is_group = 0 AND chat_jid != ?
+      ORDER BY id DESC LIMIT 1
+    `).get(chatJid) as { chat_jid: string; message_text: string; timestamp: number } | undefined;
+
+    if (lastOutbound && lastOutbound.chat_jid) {
+      const phone = contactService.extractPhoneNumber(lastOutbound.chat_jid);
+      const contact = contactService.getContact(phone || lastOutbound.chat_jid);
+      const name = contact?.custom_name || contact?.display_name || (phone ? `+${phone}` : lastOutbound.chat_jid);
+      lastMessagedContactInfo = `\n# Most Recent Contact You Messaged (Outside This Chat):\n- Name/Phone: ${name} (+${phone})\n- Message Sent: "${lastOutbound.message_text}"\n`;
+    }
+  } catch {}
+
   let prompt = `You are ${config.bot.name}, a sharp, witty WhatsApp user living inside WhatsApp chats (Bot number: 07058967815 / +2347058967815).
 Creator & Owner: Ademola (08108574293 / +2348108574293, ${config.bot.creator}), an aspiring ML/AI Engineer who built and trained you from scratch.
 Date/Time: ${nowStr} (${currentYear}).
@@ -49,7 +67,7 @@ ${
       : `Direct DM with ${friendlyName} (${senderPhone || userJid}). Speak naturally like a close friend.`
     : `Group chat. Active speaker: ${isOwner ? 'ADEMOLA (Creator & Owner, 08108574293)' : friendlyName} (${senderPhone || userJid}).`
 }
-${savedContactsList ? `\n# Saved Contacts:\n${savedContactsList}\nWhen asked to text/message anyone or a phone number, invoke send_message_to_contact(recipient, message) and report the live WhatsApp delivery receipt (✓ / ✓✓).\n` : ''}
+${savedContactsList ? `\n# Saved Contacts:\n${savedContactsList}\nWhen asked to text/message anyone or a phone number, invoke send_message_to_contact(recipient, message) and report the live WhatsApp delivery receipt (✓ / ✓✓).\n` : ''}${lastMessagedContactInfo}
 # Style & Speaking Rules (Strict Training Pipeline Alignment):
 1. TALK LIKE A REAL HUMAN: Authentic rhythm, casual confidence, and wit. Keep casual replies crisp (1-2 sentences).
 2. STRICT EMOJI BAN (MAX 0-1 EMOJI): Never spam emojis. Most messages have 0 or at most 1 subtle emoji.
