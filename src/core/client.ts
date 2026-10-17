@@ -25,7 +25,6 @@ import { batchLearner } from '../learning/batch-learner.js';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { transcribeAudioBuffer } from './transcription.js';
 import { analyzeImageBuffer } from './vision.js';
-import { synthesizeVoiceNote } from './tts.js';
 import { requestQueue } from './queue.js';
 import { groupAdminPlugin } from '../plugins/group-admin/admin-plugin.js';
 import { setupGroupWelcome } from '../plugins/group-admin/welcome.js';
@@ -928,13 +927,13 @@ export class WhatsAppClient {
         const audioBuffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
         const transcript = await transcribeAudioBuffer(audioBuffer);
         if (transcript) {
-          promptText = `[User sent a voice note]: "${transcript}"\n(Reply naturally as a spoken voice note in authentic Nigerian Pidgin / Afro-urban flow — warm, expressive, street-smart, no bullet points or markdown)`;
+          promptText = `[User sent a voice message]: "${transcript}"\n(Respond clearly and naturally with a text reply in authentic Nigerian WhatsApp flow)`;
         } else {
-          promptText = `[User sent a voice note — reply to them with a warm, expressive Nigerian Pidgin voice note]`;
+          promptText = `[User sent a voice message — reply with a natural text response]`;
         }
       } catch (err: any) {
         console.error('[WhatsAppClient] Voicenote processing error:', err.message);
-        promptText = `[User sent a voice note — reply to them with a warm, expressive Nigerian Pidgin voice note]`;
+        promptText = `[User sent a voice message — reply with a natural text response]`;
       }
       chatLogger.updateLatestMessageText(normalized.chatJid, 'audio', promptText);
     } else if (normalized.contentType === 'image') {
@@ -997,24 +996,6 @@ export class WhatsAppClient {
       rawMessage: msg,
       replyText: async (text: string) => {
         const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
-
-        // If user sent a voice note, respond with a synthesized AI voice note in the fine-tuned persona!
-        if (isIncomingVoiceNote) {
-          console.log(`[TTS] Synthesizing voice note reply to ${normalized.senderName}...`);
-          await antiBanEngine.simulateTypingPresence(
-            sock,
-            normalized.chatJid,
-            text,
-            true,
-            incomingCharLen,
-            normalized.isGroup
-          );
-          const vnBuffer = await synthesizeVoiceNote(text);
-          if (vnBuffer) {
-            const res = await OutboundSender.sendAudio(sock, normalized.chatJid, vnBuffer, true, safeQuoted);
-            return res;
-          }
-        }
 
         // Simulate authentic human typing presence scaled to incoming message length, reply length, and chat type
         await antiBanEngine.simulateTypingPresence(
@@ -1225,13 +1206,6 @@ export class WhatsAppClient {
           isGroup: false,
           rawMessage: syntheticMsg,
           replyText: async (text: string) => {
-            if (isVoiceNote) {
-              await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, true, userMsgLen, false);
-              const vnBuffer = await synthesizeVoiceNote(text);
-              if (vnBuffer) {
-                return OutboundSender.sendAudio(sock, chat.chatJid, vnBuffer, true, undefined);
-              }
-            }
             await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, false, userMsgLen, false);
             return OutboundSender.replyText(sock, chat.chatJid, text, undefined);
           },

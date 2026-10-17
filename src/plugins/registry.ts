@@ -211,19 +211,7 @@ export class PluginRegistry {
       selected.add('generate_image');
     }
 
-    // 8. Voice Notes
-    if (
-      text.includes('voice note') ||
-      text.includes('voicenote') ||
-      text.includes('voice') ||
-      text.includes('vn') ||
-      text.includes('audio') ||
-      text.includes('speak')
-    ) {
-      selected.add('send_voice_note');
-    }
-
-    // 9. Video/Audio Downloaders, Link Summaries, & Document Reading
+    // 8. Video/Audio Downloaders, Link Summaries, & Document Reading
     if (
       text.includes('http') ||
       text.includes('link') ||

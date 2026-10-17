@@ -20,7 +20,6 @@ export class PluginHotReloader {
     ['MemoryRecall', 'src/plugins/memory-search/memory-plugin.ts'],
     ['DatasetExporter', 'src/learning/dataset-exporter.ts'],
     ['WebSearch', 'src/plugins/web-search/search-plugin.ts'],
-    ['VoiceNotePlugin', 'src/plugins/voice-note/voice-plugin.ts'],
   ]);
 
   /**

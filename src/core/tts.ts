@@ -167,6 +167,14 @@ export function formatPidginPhonetics(rawText: string): string {
  * Transcodes to native OGG Opus (48kHz mono VoIP) so WhatsApp plays it as a real PTT voice note.
  */
 export async function synthesizeVoiceNote(
+  _text: string,
+  _voice?: string
+): Promise<Buffer | null> {
+  console.log('[TTS] Voice note synthesis is deactivated per system configuration.');
+  return null;
+}
+
+export async function oldSynthesizeVoiceNote(
   text: string,
   voice: string = config.bot.voice || 'en-NG-AbeoNeural'
 ): Promise<Buffer | null> {

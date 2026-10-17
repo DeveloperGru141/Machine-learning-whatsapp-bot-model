@@ -107,6 +107,9 @@ export const config = {
     apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',
     model: process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
   },
+  huggingface: {
+    apiKey: process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || '',
+  },
   paths: {
     sessions: path.resolve(process.env.SESSIONS_DIR || './sessions'),
     database: path.resolve(process.env.DATABASE_PATH || './data/bot.sqlite'),

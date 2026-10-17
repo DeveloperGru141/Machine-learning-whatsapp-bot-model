@@ -106,48 +106,62 @@ export class ImageGenPlugin implements IPlugin {
                 }
               }
 
-              console.warn('[ImageGen] ⚠️ Google image quota limit reached (free tier limit is 0 for image models). Falling back to ultra-high quality FLUX Realism engine...');
+              console.warn('[ImageGen] ⚠️ Google image generation failed or quota reached.');
             } catch (bananaErr: any) {
-              console.warn(`[ImageGen] Google engine error: ${bananaErr.message}. Falling back...`);
+              console.warn(`[ImageGen] Google engine error: ${bananaErr.message}`);
             }
-          } else {
-            console.log('[ImageGen] Note: GEMINI_API_KEY not configured. Using high-resolution FLUX Realism engine.');
           }
 
-          // 2. High-Resolution Photorealistic FLUX Realism Engine
-          console.log('[ImageGen] Generating via high-resolution FLUX Realism engine with automatic prompt enhancement...');
-          const enhancedPrompt = encodeURIComponent(`${args.prompt}, 8k resolution, award winning photography, ultra-detailed, photorealistic masterpiece, sharp focus, natural lighting`);
+          // 2. High-Resolution FLUX Engine via Hugging Face Inference API
+          const hfToken = config.huggingface?.apiKey || process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY;
+          if (hfToken) {
+            console.log('[ImageGen] 🚀 Generating via HuggingFace FLUX.1 engine...');
+            const hfModels = [
+              'black-forest-labs/FLUX.1-schnell',
+              'black-forest-labs/FLUX.1-dev',
+              'stabilityai/stable-diffusion-xl-base-1.0',
+            ];
 
-          const fallbackEngines = [
-            `https://image.pollinations.ai/prompt/${enhancedPrompt}?model=flux-realism&width=1024&height=1024&nologo=true&enhance=true&private=true&seed=${Math.floor(Math.random() * 1000000)}`,
-            `https://image.pollinations.ai/prompt/${enhancedPrompt}?model=flux-pro&width=1024&height=1024&nologo=true&enhance=true&private=true&seed=${Math.floor(Math.random() * 1000000)}`,
-            `https://image.pollinations.ai/prompt/${enhancedPrompt}?model=flux&width=1024&height=1024&nologo=true&enhance=true&private=true&seed=${Math.floor(Math.random() * 1000000)}`,
-          ];
+            for (const hfModel of hfModels) {
+              try {
+                const res = await fetch(`https://router.huggingface.co/hf-inference/models/${hfModel}`, {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${hfToken}`,
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({
+                    inputs: args.prompt,
+                  }),
+                  signal: AbortSignal.timeout(35000),
+                });
 
-          for (const engineUrl of fallbackEngines) {
-            try {
-              const res = await fetch(engineUrl, { signal: AbortSignal.timeout(25000) });
-              if (res.ok) {
-                const arrayBuffer = await res.arrayBuffer();
-                const buffer = Buffer.from(arrayBuffer);
-                if (buffer.length > 5000) {
-                  const caption = args.caption || `🎨 "${args.prompt}"`;
-                  await ctx.sendImage(buffer, caption);
-                  console.log(`[ImageGen] ✅ FLUX Realism image successfully delivered (${buffer.length} bytes).`);
-                  return {
-                    success: true,
-                    message: 'Image generated and delivered successfully to WhatsApp chat.',
-                  };
+                if (res.ok) {
+                  const arrayBuffer = await res.arrayBuffer();
+                  const buffer = Buffer.from(arrayBuffer);
+                  if (buffer.length > 5000) {
+                    const caption = args.caption || `🎨 "${args.prompt}" (${hfModel.split('/')[1]})`;
+                    await ctx.sendImage(buffer, caption);
+                    console.log(`[ImageGen] ✅ HuggingFace ${hfModel} image successfully delivered (${buffer.length} bytes).`);
+                    return {
+                      success: true,
+                      message: `Image generated via ${hfModel.split('/')[1]} and sent to WhatsApp chat.`,
+                    };
+                  }
+                } else {
+                  const errText = await res.text();
+                  console.warn(`[ImageGen] HuggingFace ${hfModel} returned ${res.status}: ${errText.slice(0, 120)}`);
                 }
+              } catch (hfErr: any) {
+                console.warn(`[ImageGen] HuggingFace error on ${hfModel}: ${hfErr.message}`);
               }
-            } catch (err: any) {
-              console.warn(`[ImageGen] Fallback engine error: ${err.message}, trying next...`);
             }
           }
 
           return {
             success: false,
-            message: 'Image generation failed across all available engines. Please try again with a different visual prompt.',
+            message:
+              'Image generation could not be completed: Google AI Studio requires billing enabled for image generation (free tier limit is 0), or provide a valid HF_TOKEN in your environment for FLUX. Pollinations AI has been deactivated.',
           };
         } catch (err: any) {
           console.error('[ImageGen] Critical error:', err.message);

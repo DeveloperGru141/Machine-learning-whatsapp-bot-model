@@ -41,6 +41,11 @@ export function extractInlineToolCalls(rawContent: string): {
       return;
     }
 
+    if (parsed.tool_calls && Array.isArray(parsed.tool_calls)) {
+      for (const tc of parsed.tool_calls) normalizeParsedJsonTool(tc);
+      return;
+    }
+
     const fnName =
       typeof parsed.name === 'string'
         ? parsed.name
@@ -48,9 +53,11 @@ export function extractInlineToolCalls(rawContent: string): {
           ? parsed.function
           : typeof parsed.tool === 'string'
             ? parsed.tool
-            : typeof parsed.function?.name === 'string'
-              ? parsed.function.name
-              : null;
+            : typeof parsed.tool_name === 'string'
+              ? parsed.tool_name
+              : typeof parsed.function?.name === 'string'
+                ? parsed.function.name
+                : null;
 
     if (!fnName) return;
 
@@ -67,7 +74,10 @@ export function extractInlineToolCalls(rawContent: string): {
       delete rest.name;
       delete rest.function;
       delete rest.tool;
-      rawArgs = rest;
+      delete rest.tool_name;
+      delete rest.id;
+      delete rest.type;
+      rawArgs = Object.keys(rest).length > 0 ? rest : {};
     }
 
     let argsString = '{}';
@@ -134,19 +144,86 @@ export function extractInlineToolCalls(rawContent: string): {
     return '';
   });
 
-  // 3. Match standalone JSON object containing {"function": "...", "arguments": {...}} if no tags were used
-  if (toolCalls.length === 0 && (working.includes('"function"') || working.includes('"tool_call"'))) {
-    const standaloneJsonRegex = /\{\s*"(?:function|name)"\s*:\s*"([a-zA-Z0-9_]+)"\s*,\s*"(?:arguments|args|parameters)"\s*:\s*(\{[\s\S]*?\})\s*\}/g;
-    working = working.replace(standaloneJsonRegex, (fullMatch) => {
+  // 3. Match markdown code blocks containing tool JSON: ```json ... ``` or ``` ... ```
+  const codeBlockRegex = /```(?:json|tool_call)?\s*([\s\S]*?)```/gi;
+  working = working.replace(codeBlockRegex, (fullMatch, blockInner: string) => {
+    const trimmed = (blockInner || '').trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
       try {
-        const parsed = JSON.parse(fullMatch);
-        normalizeParsedJsonTool(parsed);
-        return '';
-      } catch {
-        return fullMatch;
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === 'object') {
+          const prevCount = toolCalls.length;
+          normalizeParsedJsonTool(parsed);
+          if (toolCalls.length > prevCount) {
+            return ''; // Strip codeblock containing executed tool call
+          }
+        }
+      } catch {}
+    }
+    return fullMatch;
+  });
+
+  // 4. Match standalone balanced JSON blocks containing {"name": "...", "arguments": ...} anywhere in text
+  const extractBalancedJsonBlocks = (text: string) => {
+    let i = 0;
+    while (i < text.length) {
+      if (text[i] === '{' || text[i] === '[') {
+        const openChar = text[i];
+        const closeChar = openChar === '{' ? '}' : ']';
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        const start = i;
+        for (let j = i; j < text.length; j++) {
+          const char = text[j];
+          if (escape) {
+            escape = false;
+            continue;
+          }
+          if (char === '\\') {
+            escape = true;
+            continue;
+          }
+          if (char === '"') {
+            inString = !inString;
+            continue;
+          }
+          if (!inString) {
+            if (char === openChar) depth++;
+            else if (char === closeChar) {
+              depth--;
+              if (depth === 0) {
+                const raw = text.slice(start, j + 1);
+                try {
+                  const parsed = JSON.parse(raw);
+                  if (parsed && typeof parsed === 'object') {
+                    const isTool =
+                      parsed.name ||
+                      parsed.function ||
+                      parsed.tool ||
+                      parsed.tool_name ||
+                      parsed.tool_calls ||
+                      (Array.isArray(parsed) && parsed.length > 0 && (parsed[0]?.name || parsed[0]?.function));
+                    if (isTool) {
+                      normalizeParsedJsonTool(parsed);
+                      text = text.slice(0, start) + text.slice(j + 1);
+                      i = Math.max(0, start - 1);
+                      break;
+                    }
+                  }
+                } catch {}
+                break;
+              }
+            }
+          }
+        }
       }
-    });
-  }
+      i++;
+    }
+    return text;
+  };
+
+  working = extractBalancedJsonBlocks(working);
 
   return {
     toolCalls,
@@ -197,7 +274,6 @@ export class AgentHarness {
     const executedToolKeys = new Set<string>();
     const executedToolNames = new Set<string>();
     const toolOutputs: string[] = [];
-    let voiceNoteSentSuccessfully = false;
 
     try {
       const activeTools = tools.length > 0 ? (tools as any) : undefined;
@@ -213,12 +289,12 @@ export class AgentHarness {
 
       const message = choice.message;
 
-      // Parse inline <tool_call>...</tool_call> or <function=...> from message.content if the model emitted XML/JSON tags
+      // Parse inline <tool_call>...</tool_call> or raw JSON tool calls from message.content if the model emitted text
       if ((!message.tool_calls || message.tool_calls.length === 0) && message.content) {
         const extracted = extractInlineToolCalls(message.content);
         if (extracted.toolCalls.length > 0) {
           console.log(
-            `[AgentHarness] 🔧 Parsed ${extracted.toolCalls.length} inline <tool_call> block(s) from model response.`
+            `[AgentHarness] 🔧 Parsed ${extracted.toolCalls.length} inline tool call(s) from model response.`
           );
           message.tool_calls = extracted.toolCalls;
           message.content = extracted.cleanedContent;
@@ -252,10 +328,6 @@ export class AgentHarness {
             context
           );
 
-          if (toolName === 'send_voice_note' && toolResult.success) {
-            voiceNoteSentSuccessfully = true;
-          }
-
           let outputEntry = `[${toolName} result]: ${toolResult.message || JSON.stringify(toolResult)}`;
           if (
             typeof toolResult.data === 'string' &&
@@ -272,21 +344,11 @@ export class AgentHarness {
       if (message.tool_calls && message.tool_calls.length > 0) {
         await runToolCallList(message.tool_calls);
 
-        // When send_voice_note succeeded, the OGG Opus voice note is ALREADY sent and logged!
-        if (voiceNoteSentSuccessfully) {
-          console.log(`[AgentHarness] ✅ Voice note dispatched via send_voice_note; complete.`);
-          analyticsEngine.trackEvent('message_sent', { type: 'voice_note' }, context.chatJid, context.senderJid);
-          try {
-            await context.sock.sendPresenceUpdate('paused', context.chatJid);
-          } catch {}
-          return;
-        }
-
         // Synthesize final natural WhatsApp response from the gathered tool results without re-triggering tool calls.
         const synthesisSystem = `${messages[0]?.content || ''}
 
 # Answering With Live Tool Data:
-Combine the live tool data in the user's last message with your own knowledge and answer directly and confidently in 1-3 sentences, in the same voice as the exemplars above. Do NOT output <tool_call> tags. If send_message_to_contact succeeded, explicitly confirm who you messaged and its WhatsApp delivery status (✓ / ✓✓).`;
+Combine the live tool data in the user's last message with your own knowledge and answer directly and confidently in 1-3 sentences, in the same voice as the exemplars above. Do NOT output <tool_call> tags or raw JSON. If send_message_to_contact succeeded, explicitly confirm who you messaged and its WhatsApp delivery status (✓ / ✓✓).`;
         const historyContext = messages.slice(1, -1);
         const synthesisRes = await this.callLLM({
           messages: [
@@ -333,6 +395,30 @@ Combine the live tool data in the user's last message with your own knowledge an
       } else {
         // Direct text reply from the LLM
         const rawContent = message.content || '';
+
+        // Double check: did the model leak a tool call that wasn't extracted earlier?
+        const inlineCheck = extractInlineToolCalls(rawContent);
+        if (inlineCheck.toolCalls.length > 0) {
+          console.log(
+            `[AgentHarness] 🔧 Intercepted ${inlineCheck.toolCalls.length} inline tool call(s) in direct reply branch! Executing now...`
+          );
+          await runToolCallList(inlineCheck.toolCalls);
+
+          if (inlineCheck.cleanedContent && inlineCheck.cleanedContent.trim()) {
+            const replyText = sanitizeAssistantResponse(inlineCheck.cleanedContent);
+            if (replyText) {
+              await context.replyText(replyText);
+            }
+          } else if (toolOutputs.length > 0) {
+            const fallbackConfirm = sanitizeAssistantResponse(
+              toolOutputs[toolOutputs.length - 1].replace(/^\[[^\]]+\]:\s*/, '')
+            );
+            if (fallbackConfirm) {
+              await context.replyText(fallbackConfirm);
+            }
+          }
+          return;
+        }
 
         if (rawContent && rawContent.trim()) {
           const replyText = sanitizeAssistantResponse(rawContent);
@@ -505,6 +591,18 @@ export function sanitizeAssistantResponse(text: string): string {
     .replace(/<\/tool_call>/gi, '')
     .replace(/<function=[^>]+>[\s\S]*?(?:<\/function>|$)/gi, '')
     .trim();
+
+  // Defense-in-depth: Never let raw tool call JSON objects or fences reach WhatsApp chat
+  if (
+    /^\s*\{[\s\S]*"(?:name|function|tool|tool_name)"\s*:\s*"[a-zA-Z0-9_]+"[\s\S]*\}\s*$/i.test(cleaned) ||
+    /^\s*\{[\s\S]*"(?:arguments|parameters|prompt)"\s*:\s*\{[\s\S]*\}\s*$/i.test(cleaned) ||
+    /^\s*```(?:json)?\s*\{[\s\S]*"(?:name|function|tool)"[\s\S]*\}\s*```\s*$/i.test(cleaned) ||
+    cleaned.startsWith('{"name":') ||
+    cleaned.startsWith('{"function":') ||
+    cleaned.startsWith('{"tool":')
+  ) {
+    return '';
+  }
 
   // Strip robotic preamble clichés (peel chained preambles like "Sure thing! As an AI, ...")
   const preambleRegex =
