@@ -6,6 +6,7 @@ import { whatsAppClient } from '../../core/client.js';
 import { config } from '../../config/env.js';
 import { db } from '../../memory/db.js';
 import { OutboundSender } from '../../core/sender.js';
+import { antiBanEngine } from '../../security/anti-ban.js';
 
 export class ContactPlugin implements IPlugin {
   name = 'ContactManager';
@@ -460,10 +461,30 @@ export class ContactPlugin implements IPlugin {
             console.warn(`[ContactPlugin] onWhatsApp check warning for ${lookupTarget}:`, waErr.message);
           }
 
-          console.log(`[ContactPlugin] 📨 Sending outbound message to ${targetName} (${targetJid}): "${rawMessage.slice(0, 60)}..."`);
+          // Cold Contact Safety:
+          // If recipient is NOT in saved contacts and has never messaged the bot,
+          // ensure clear attribution so the stranger does not tap "Block & Report" on WhatsApp.
+          let hasInboundHistory = false;
+          try {
+            const row = db.prepare(`SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid != 'bot' LIMIT 1`).get(targetJid);
+            hasInboundHistory = Boolean(row);
+          } catch {}
+
+          const isSavedContact = Boolean(targetPhone && contactService.getContact(targetPhone));
+          let finalDispatchMessage = rawMessage;
+          if (!hasInboundHistory && !isSavedContact && !rawMessage.toLowerCase().includes('ademola')) {
+            finalDispatchMessage = `${rawMessage}\n\n— Sent on behalf of Ademola (08108574293) via Forgelabs`;
+          }
+
+          console.log(`[ContactPlugin] 📨 Sending outbound message to ${targetName} (${targetJid}): "${finalDispatchMessage.slice(0, 60)}..."`);
+
+          // Simulate realistic human typing presence before dispatching to cold/direct contacts
+          try {
+            await antiBanEngine.simulateTypingPresence(ctx.sock, targetJid, finalDispatchMessage, false, 0, false);
+          } catch {}
 
           // Send message through OutboundSender with explicit command authorization
-          const sent = await OutboundSender.replyText(ctx.sock, targetJid, rawMessage, undefined, true);
+          const sent = await OutboundSender.replyText(ctx.sock, targetJid, finalDispatchMessage, undefined, true);
           if (!sent) {
             return {
               success: false,
@@ -476,7 +497,7 @@ export class ContactPlugin implements IPlugin {
 
           return {
             success: true,
-            message: `✅ DELIVERY CONFIRMED to ${targetName} (+${targetPhone || targetJid.split('@')[0]}) | Receipt ID: ${receipt.msgId} | Status: ${receipt.statusLabel} | Message: "${rawMessage}"`,
+            message: `✅ DELIVERY CONFIRMED to ${targetName} (+${targetPhone || targetJid.split('@')[0]}) | Receipt ID: ${receipt.msgId} | Status: ${receipt.statusLabel} | Message: "${finalDispatchMessage}"`,
             data: {
               recipient: targetName,
               targetJid,
