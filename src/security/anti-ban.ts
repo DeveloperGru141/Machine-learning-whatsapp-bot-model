@@ -49,33 +49,29 @@ export class AntiBanEngine {
   // Rate limiting & cooldown tracking
   private lastDispatchTimes: Map<string, number> = new Map(); // chatJid -> timestamp
   private recentGlobalDispatches: number[] = []; // timestamps of recent dispatches within 60s
-  private readonly maxGlobalPerMinute = 12; // Safe human cap: max 12 messages/min across all chats
-  private readonly minPerChatCooldownMs = 3500; // Minimum 3.5s between consecutive messages to the same chat
-  private readonly minGlobalGapMs = 1800; // Minimum 1.8s gap between any two outbound messages
+  private readonly maxGlobalPerMinute = 15; // Safe human cap: max 15 messages/min across all chats
+  private readonly minPerChatCooldownMs = 2000; // Snappy 2s cooldown between messages to the same chat
+  private readonly minGlobalGapMs = 1200; // 1.2s gap between consecutive dispatches
 
   /**
    * Calculates an authentic human reading delay proportional to the length of the message
-   * sent by the user (and longer in group chats).
-   * - Short DM (15 chars): ~1.8s - 2.6s reading time
-   * - Medium DM (100 chars): ~4.2s - 5.2s reading time
-   * - Long DM/Group message (250+ chars): ~6.5s - 8.5s reading time
+   * sent by the user (~1.2s - 3.5s for groups, ~1.5s - 5.5s for DMs).
    */
   public calculateReadingDelay(incomingTextLength: number = 0, isGroup: boolean = false): number {
     if (isLivetestRunner()) return 10;
 
-    const cleanLen = Math.max(1, Math.min(incomingTextLength || 20, 400));
-    const baseMs = isGroup ? 2000 : 1200;
-    const perCharMs = isGroup ? 34 : 28;
+    const cleanLen = Math.max(1, Math.min(incomingTextLength || 20, 300));
+    const baseMs = isGroup ? 1200 : 1200;
+    const perCharMs = isGroup ? 16 : 24;
     const rawDelay = baseMs + cleanLen * perCharMs;
-    const jitter = Math.floor(Math.random() * 800);
-    const maxCap = isGroup ? 8500 : 7000;
+    const jitter = Math.floor(Math.random() * 500);
+    const maxCap = isGroup ? 3200 : 5500;
     return Math.min(maxCap, rawDelay + jitter);
   }
 
   /**
    * Calculates realistic human typing delay based on BOTH how long the user's message was
-   * (cognitive formulation time) AND how long the bot's reply is (~42-48ms per character),
-   * with extra caution in group chats so WhatsApp never flags automated burst replies.
+   * and how long the bot's reply is (~25-36ms per character).
    */
   public calculateTypingDelay(
     responseTextLength: number = 0,
@@ -84,20 +80,20 @@ export class AntiBanEngine {
   ): number {
     if (isLivetestRunner()) return 20;
 
-    const replyLen = Math.max(10, Math.min(responseTextLength || 40, 350));
-    const userLen = Math.max(0, Math.min(incomingTextLength || 20, 300));
+    const replyLen = Math.max(10, Math.min(responseTextLength || 40, 300));
+    const userLen = Math.max(0, Math.min(incomingTextLength || 20, 250));
 
-    const baseMs = isGroup ? 2400 : 1600;
-    const replyTypingMs = replyLen * (isGroup ? 46 : 40);
-    const userComprehensionMs = userLen * (isGroup ? 18 : 14);
+    const baseMs = isGroup ? 1400 : 1500;
+    const replyTypingMs = replyLen * (isGroup ? 25 : 36);
+    const userComprehensionMs = userLen * (isGroup ? 10 : 12);
     const rawTotal = baseMs + replyTypingMs + userComprehensionMs;
 
-    // Add +/- 18% natural human rhythm variance
-    const varianceFactor = 0.85 + Math.random() * 0.33;
+    // Add +/- 15% natural human rhythm variance
+    const varianceFactor = 0.88 + Math.random() * 0.24;
     const computed = Math.floor(rawTotal * varianceFactor);
 
-    const minFloor = isGroup ? 3000 : 2200;
-    const maxCeiling = isGroup ? 13000 : 10500;
+    const minFloor = isGroup ? 1800 : 2000;
+    const maxCeiling = isGroup ? 5500 : 8500;
     return Math.max(minFloor, Math.min(maxCeiling, computed));
   }
 

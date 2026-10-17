@@ -1,5 +1,6 @@
 import type { proto } from '@whiskeysockets/baileys';
 import { unwrapMessage } from './normalizer.js';
+import { config } from '../config/env.js';
 
 export interface TriggerCheckResult {
   shouldRespond: boolean;
@@ -52,7 +53,7 @@ export function shouldRespondToMessage(
   // Unwrap any ephemeral / viewOnce / documentWithCaption wrapper so group mentions & quotes work in all group types
   const m: any = unwrapMessage(msg.message) || msg.message;
 
-  // Check 1: Was the bot @mentioned?
+  // Check 1: Was the bot @mentioned via WhatsApp protocol contextInfo?
   const contextInfo =
     m?.extendedTextMessage?.contextInfo ||
     m?.imageMessage?.contextInfo ||
@@ -71,16 +72,34 @@ export function shouldRespondToMessage(
   const quotedParticipant = contextInfo?.participant;
   const isQuoted = isBotMatch(quotedParticipant);
 
-  if (isMentioned || isQuoted) {
-    // Remove the @bot mention tag from the text for cleaner LLM reasoning
+  // Check 3: Was the bot called by name or phone number in text?
+  const textLower = (rawText || '').toLowerCase().trim();
+  const botConfigName = (config.bot.name || 'forgelabs').toLowerCase();
+  const pairingDigits = (config.bot.pairingPhoneNumber || '07058967815').replace(/[^0-9]/g, '');
+  const cleanPhoneDigits = cleanPhoneId || '2347058967815';
+  const cleanLidDigits = cleanLidId || '83954564632610';
+
+  const textTriggerRegex = new RegExp(
+    `(^|\\s|@)(${botConfigName}|forgelabs|assistant|bot|${cleanPhoneDigits}|${pairingDigits}|${cleanLidDigits})\\b`,
+    'i'
+  );
+  const isNameCalled = textTriggerRegex.test(textLower);
+
+  if (isMentioned || isQuoted || isNameCalled) {
+    // Remove the @bot mention tag and name callout from the text for cleaner LLM reasoning
     let cleaned = rawText;
     for (const jid of mentionedJidList) {
       const num = jid.split('@')[0];
       cleaned = cleaned.replace(new RegExp(`@${num}`, 'g'), '').trim();
     }
-    return { shouldRespond: true, cleanedText: cleaned };
+    cleaned = cleaned
+      .replace(new RegExp(`^@?(${botConfigName}|forgelabs|bot)[:,-]?\\s*`, 'i'), '')
+      .replace(new RegExp(`@(${botConfigName}|forgelabs|bot|${cleanPhoneDigits}|${pairingDigits}|${cleanLidDigits})`, 'gi'), '')
+      .trim();
+
+    return { shouldRespond: true, cleanedText: cleaned || rawText.trim() };
   }
 
-  // In groups, if neither tagged nor quoted, do not reply (passive observation only)
+  // In groups, if neither tagged nor quoted nor called by name, do not reply (passive observation only)
   return { shouldRespond: false, cleanedText: rawText };
 }

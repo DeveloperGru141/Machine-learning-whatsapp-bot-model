@@ -55,6 +55,17 @@ export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boo
     }
   } catch {}
 
+  // Active group chats in memory
+  let groupChatsInfo = '';
+  try {
+    const groupRows = db.prepare(`
+      SELECT DISTINCT chat_jid FROM chat_logs WHERE is_group = 1 ORDER BY id DESC LIMIT 5
+    `).all() as Array<{ chat_jid: string }>;
+    if (groupRows.length > 0) {
+      groupChatsInfo = `\n# Active Groups in Memory:\n` + groupRows.map((g) => `- Group JID: ${g.chat_jid}`).join('\n') + `\nIf asked which group you are in or which group you dey, acknowledge your active groups or invoke list_joined_groups.\n`;
+    }
+  } catch {}
+
   let prompt = `You are ${config.bot.name}, a sharp, witty WhatsApp user living inside WhatsApp chats (Bot number: 07058967815 / +2347058967815).
 Creator & Owner: Ademola (08108574293 / +2348108574293, ${config.bot.creator}), an aspiring ML/AI Engineer who built and trained you from scratch.
 Date/Time: ${nowStr} (${currentYear}).
@@ -67,7 +78,7 @@ ${
       : `Direct DM with ${friendlyName} (${senderPhone || userJid}). Speak naturally like a close friend.`
     : `Group chat. Active speaker: ${isOwner ? 'ADEMOLA (Creator & Owner, 08108574293)' : friendlyName} (${senderPhone || userJid}).`
 }
-${savedContactsList ? `\n# Saved Contacts:\n${savedContactsList}\nWhen asked to text/message anyone or a phone number, invoke send_message_to_contact(recipient, message) and report the live WhatsApp delivery receipt (✓ / ✓✓).\n` : ''}${lastMessagedContactInfo}
+${savedContactsList ? `\n# Saved Contacts:\n${savedContactsList}\nWhen asked to text/message anyone or a phone number, invoke send_message_to_contact(recipient, message) and report the live WhatsApp delivery receipt (✓ / ✓✓).\n` : ''}${lastMessagedContactInfo}${groupChatsInfo}
 # Style & Speaking Rules (Strict Training Pipeline Alignment):
 1. TALK LIKE A REAL HUMAN: Authentic rhythm, casual confidence, and wit. Keep casual replies crisp (1-2 sentences).
 2. STRICT EMOJI BAN (MAX 0-1 EMOJI): Never spam emojis. Most messages have 0 or at most 1 subtle emoji.

@@ -82,6 +82,36 @@ export class GroupAdminPlugin implements IPlugin {
 
   tools: BotTool[] = [
     {
+      name: 'list_joined_groups',
+      description: 'Lists all WhatsApp groups that the bot is currently a member of, along with their names and member counts. Use whenever someone asks what groups you are in, which group you dey, or asks for a list of groups.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          if (!ctx.sock?.groupFetchAllParticipating) {
+            return { success: false, message: 'Socket not available to fetch groups.' };
+          }
+          const groups = await ctx.sock.groupFetchAllParticipating();
+          const list = Object.values(groups) as any[];
+          if (list.length === 0) {
+            return { success: true, message: 'I am not currently in any WhatsApp groups.' };
+          }
+          const formatted = list
+            .map((g, i) => `${i + 1}. *${g.subject}* (${g.participants?.length || 0} members)`)
+            .join('\n');
+          return {
+            success: true,
+            message: `👥 *I dey inside ${list.length} group(s):*\n\n${formatted}`,
+            data: list.map((g) => ({ id: g.id, subject: g.subject, memberCount: g.participants?.length || 0 })),
+          };
+        } catch (err: any) {
+          return { success: false, message: `Failed to fetch groups: ${err.message}` };
+        }
+      },
+    },
+    {
       name: 'tag_all',
       description: 'Mentions/tags every member in the group with an announcement or summary.',
       parameters: {
