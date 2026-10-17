@@ -78,7 +78,8 @@ export class WhatsAppClient {
   }
 
   public isRegistered(): boolean {
-    return Boolean(this.sock?.authState?.creds?.registered);
+    const creds = this.sock?.authState?.creds;
+    return Boolean(creds?.registered || creds?.account || creds?.me?.id);
   }
 
   /**
@@ -327,13 +328,13 @@ export class WhatsAppClient {
         }
 
         // Request deterministic pairing code (ADEM1234) ONCE right when the initial QR noise handshake is ready
-        if (qr && config.bot.pairingMethod === 'code' && !this.sock?.authState?.creds?.registered && !this.pairingRequested) {
+        if (qr && config.bot.pairingMethod === 'code' && !this.isRegistered() && !this.pairingRequested) {
           this.pairingRequested = true;
           const phoneNumber = config.bot.pairingPhoneNumber || '09014896714';
           const cleanNumber = formatPhoneNumberForPairing(phoneNumber);
           if (cleanNumber && this.sock) {
             setTimeout(async () => {
-              if (!this.sock || this.sock.authState?.creds?.registered) return;
+              if (!this.sock || this.isRegistered()) return;
               try {
                 console.log(`[WhatsAppClient] Requesting clean pairing code for +${cleanNumber}...`);
                 const code = await this.sock.requestPairingCode(cleanNumber, 'ADEM1234');
