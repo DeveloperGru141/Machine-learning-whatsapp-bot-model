@@ -1,4 +1,5 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from './types.js';
+import { db } from '../memory/db.js';
 
 export class PluginRegistry {
   private plugins: Map<string, IPlugin> = new Map();
@@ -86,9 +87,32 @@ export class PluginRegistry {
    * Passing 25+ tool definitions to LLMs causes 30s+ grammar evaluation latency.
    * Passing 0-5 tools reduces inference time to 400ms-900ms while ensuring tools are never missed.
    */
-  public getRelevantToolDefinitions(userMessage: string, isGroup?: boolean): any[] {
+  public getRelevantToolDefinitions(userMessage: string, isGroup?: boolean, chatJid?: string): any[] {
     const text = (userMessage || '').toLowerCase();
     const selected = new Set<string>();
+
+    let recentChatContext = '';
+    if (chatJid) {
+      try {
+        const recentRows = db.prepare(`
+          SELECT message_text FROM chat_logs
+          WHERE chat_jid = ?
+          ORDER BY id DESC LIMIT 5
+        `).all(chatJid) as Array<{ message_text: string | null }>;
+        recentChatContext = recentRows.map((r) => r.message_text || '').join(' ').toLowerCase();
+      } catch {}
+    }
+
+    const isContinuation =
+      /^(do that|do it|do so|send it|send am|send the message|send the message to him|send to him|ping him|message him|proceed|yes|yes please|confirm|make you send am|send now|go ahead)$/i.test(
+        text.trim()
+      ) ||
+      (text.split(/\s+/).length <= 4 &&
+        (text.includes('send') ||
+          text.includes('message') ||
+          text.includes('ping') ||
+          text.includes('text') ||
+          text.includes('do')));
 
     // 1. Diagnostics, Status, & Bot Health
     if (
@@ -134,8 +158,11 @@ export class PluginRegistry {
 
     // 4. Contact Management, Direct Messaging & Unreplied Catch-Up
     const hasPhoneNumber = /\+?\d[\d\s-]{7,}\d/.test(text);
+    const recentHasPhone = /\+?\d[\d\s-]{7,}\d/.test(recentChatContext);
     if (
       hasPhoneNumber ||
+      isContinuation ||
+      (recentHasPhone && (text.includes('him') || text.includes('her') || text.includes('them') || text.includes('that') || text.includes('number'))) ||
       text.includes('message') ||
       text.includes('msg') ||
       text.includes('text') ||

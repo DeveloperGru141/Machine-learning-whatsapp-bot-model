@@ -42,8 +42,32 @@ export class ContactPlugin implements IPlugin {
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
         try {
-          // If no phone number provided, save current sender
-          const targetPhone = args.phone_number || ctx.senderJid;
+          let targetPhone = args.phone_number;
+          if (!targetPhone) {
+            // Check if a phone number was mentioned in recent messages in this chat
+            try {
+              const recentInChat = db.prepare(`
+                SELECT message_text FROM chat_logs
+                WHERE chat_jid = ?
+                ORDER BY id DESC LIMIT 6
+              `).all(ctx.chatJid) as Array<{ message_text: string | null }>;
+
+              for (const r of recentInChat) {
+                const txt = r.message_text || '';
+                const phoneMatch = txt.match(/(?:(?:\+|00)?234|0)\s*[789][01]\s*(?:[\s-]?\d{3,4}){2}|\+?\d[\d\s-]{9,}\d/);
+                if (phoneMatch) {
+                  const extracted = contactService.extractPhoneNumber(phoneMatch[0]);
+                  if (extracted) {
+                    targetPhone = extracted;
+                    break;
+                  }
+                }
+              }
+            } catch {}
+          }
+          if (!targetPhone) {
+            targetPhone = ctx.senderJid;
+          }
           const result = contactService.saveContact(targetPhone, args.name, args.notes);
 
           if (!result.success || !result.contact) {
@@ -193,10 +217,10 @@ export class ContactPlugin implements IPlugin {
           }
 
           let cleanPhone = contactService.extractPhoneNumber(targetPhone);
-          const isLid = ctx.senderJid.endsWith('@lid') || (targetPhone && targetPhone.endsWith('@lid')) || cleanPhone.length > 13;
+          const isLid = ctx.senderJid.endsWith('@lid') || (targetPhone && targetPhone.endsWith('@lid')) || !cleanPhone || cleanPhone.length > 15 || /^10\d{13,}$/.test(cleanPhone);
           if (isLid) {
             const saved = contactService.getContact(ctx.senderJid);
-            if (saved && saved.phone_number && !saved.jid.endsWith('@lid') && saved.phone_number.length <= 13) {
+            if (saved && saved.phone_number && !saved.jid.endsWith('@lid') && saved.phone_number.length <= 15) {
               cleanPhone = saved.phone_number;
             } else {
               return {
@@ -309,19 +333,19 @@ export class ContactPlugin implements IPlugin {
     {
       name: 'send_message_to_contact',
       description:
-        'Sends a direct WhatsApp text message to someone in the bot address book or to any phone number, and verifies live WhatsApp delivery confirmation. Use this tool whenever a user asks to message someone, text someone, relay a message to a contact, or tell a person something.',
+        'Sends a direct WhatsApp text message to ANY phone number (e.g. "+234 913 191 8009", "09131918009") or contact name, and verifies live WhatsApp delivery confirmation. Does NOT require the number to be saved in the address book first. Use this tool immediately whenever a user asks to message, text, tell, or ping any phone number or contact.',
       parameters: {
         type: 'object',
         properties: {
           recipient: {
             type: 'string',
             description:
-              'The name of the contact in the address book (e.g. "Micah", "David") or their phone number with country code (e.g. "+2349126433601", "09126433601").',
+              'The phone number with country code (e.g. "+234 913 191 8009", "09131918009") or contact name in the address book. Any phone number can be messaged directly without saving first.',
           },
           phone: {
             type: 'string',
             description:
-              'Optional alias for recipient phone number (e.g. "+2349126433601", "09126433601").',
+              'Optional alias for recipient phone number (e.g. "+234 913 191 8009", "09131918009").',
           },
           message: {
             type: 'string',
@@ -345,7 +369,7 @@ export class ContactPlugin implements IPlugin {
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
         try {
-          const rawRecipient = (
+          let rawRecipient = (
             args.recipient ||
             args.phone ||
             args.phone_number ||
@@ -354,54 +378,81 @@ export class ContactPlugin implements IPlugin {
             args.contact ||
             ''
           ).trim();
-          const rawMessage = (args.message || args.text || args.content || '').trim();
-
-          if (!rawRecipient || !rawMessage) {
-            return {
-              success: false,
-              message: 'Both recipient (name or phone number) and message are required to send a message.',
-            };
-          }
+          let rawMessage = (args.message || args.text || args.content || '').trim();
 
           let targetJid = '';
           let targetName = args.name?.trim() || rawRecipient;
           let targetPhone = '';
 
-          // 0. Check if recipient refers to "last guy", "the last person", "guy wey u message", etc.
+          // 0. Check if recipient is a relative reference ("him", "her", "them", "that number", "last guy") or empty
           const isRelativeRef =
-            /^(the\s+)?(last|previous)\s+(guy|person|contact|number|one|dude)|(guy\s+(wey|that|u|you))|^(him|her|them)$/i.test(rawRecipient);
+            /^(the\s+)?(last|previous)\s+(guy|person|contact|number|one|dude)|(guy\s+(wey|that|u|you))|^(him|her|them|that\s+number)$/i.test(rawRecipient);
 
-          if (isRelativeRef) {
+          if (isRelativeRef || !rawRecipient || rawRecipient === 'undefined') {
+            // First check recent messages in THIS chat for any phone number mentioned
             try {
-              const lastOutbound = db.prepare(`
-                SELECT chat_jid FROM chat_logs
-                WHERE sender_jid = 'bot' AND is_group = 0 AND chat_jid != ?
-                ORDER BY id DESC LIMIT 1
-              `).get(ctx.chatJid) as { chat_jid: string } | undefined;
+              const recentInChat = db.prepare(`
+                SELECT message_text FROM chat_logs
+                WHERE chat_jid = ?
+                ORDER BY id DESC LIMIT 8
+              `).all(ctx.chatJid) as Array<{ message_text: string | null }>;
 
-              if (lastOutbound && lastOutbound.chat_jid) {
-                targetJid = lastOutbound.chat_jid;
-                targetPhone = contactService.extractPhoneNumber(targetJid);
-                const saved = contactService.getContact(targetPhone || targetJid);
-                targetName = saved?.custom_name || saved?.display_name || (targetPhone ? `+${targetPhone}` : targetJid);
+              for (const r of recentInChat) {
+                const txt = r.message_text || '';
+                const phoneMatch = txt.match(/(?:(?:\+|00)?234|0)\s*[789][01]\s*(?:[\s-]?\d{3,4}){2}|\+?\d[\d\s-]{9,}\d/);
+                if (phoneMatch) {
+                  const extracted = contactService.extractPhoneNumber(phoneMatch[0]);
+                  if (extracted && extracted.length >= 7 && extracted.length <= 15) {
+                    targetPhone = extracted;
+                    targetJid = `${extracted}@s.whatsapp.net`;
+                    const saved = contactService.getContact(extracted);
+                    targetName = saved?.custom_name || saved?.display_name || `+${extracted}`;
+                    break;
+                  }
+                }
               }
             } catch (err) {
-              console.warn('[ContactPlugin] Error finding last messaged contact:', err);
+              console.warn('[ContactPlugin] Error scanning recent chat for phone number:', err);
+            }
+
+            // Fallback: check last outbound contact messaged in another chat
+            if (!targetJid) {
+              try {
+                const lastOutbound = db.prepare(`
+                  SELECT chat_jid FROM chat_logs
+                  WHERE sender_jid = 'bot' AND is_group = 0 AND chat_jid != ?
+                  ORDER BY id DESC LIMIT 1
+                `).get(ctx.chatJid) as { chat_jid: string } | undefined;
+
+                if (lastOutbound && lastOutbound.chat_jid) {
+                  targetJid = lastOutbound.chat_jid;
+                  targetPhone = contactService.extractPhoneNumber(targetJid);
+                  const saved = contactService.getContact(targetPhone || targetJid);
+                  targetName = saved?.custom_name || saved?.display_name || (targetPhone ? `+${targetPhone}` : targetJid);
+                }
+              } catch (err) {
+                console.warn('[ContactPlugin] Error finding last messaged contact:', err);
+              }
             }
           }
 
-          if (!targetJid) {
-            // 1. Check if recipient is directly a phone number
-            const cleanDigits = contactService.extractPhoneNumber(rawRecipient);
-            if (cleanDigits && cleanDigits.length >= 7 && cleanDigits.length <= 15) {
-              targetPhone = cleanDigits;
-              targetJid = `${cleanDigits}@s.whatsapp.net`;
-              const saved = contactService.getContact(cleanDigits);
+          // 1. Direct phone extraction if recipient has digits or matches phone pattern
+          if (!targetJid && rawRecipient) {
+            // Check if rawRecipient contains a phone number pattern anywhere
+            const phoneMatch = rawRecipient.match(/(?:(?:\+|00)?234|0)\s*[789][01]\s*(?:[\s-]?\d{3,4}){2}|\+?\d[\d\s-]{9,}\d/);
+            const digits = phoneMatch ? contactService.extractPhoneNumber(phoneMatch[0]) : contactService.extractPhoneNumber(rawRecipient);
+
+            if (digits && digits.length >= 7 && digits.length <= 15) {
+              targetPhone = digits;
+              targetJid = `${digits}@s.whatsapp.net`;
+              const saved = contactService.getContact(digits);
               if (saved) {
                 targetName = saved.custom_name || saved.display_name || targetName;
               } else if (args.name && args.name.trim() && !/^\+?\d+$/.test(args.name.trim())) {
-                contactService.saveContact(cleanDigits, args.name.trim());
+                contactService.saveContact(digits, args.name.trim());
                 targetName = args.name.trim();
+              } else {
+                targetName = `+${digits}`;
               }
             } else {
               // 2. Look up in contactService by name or nickname
@@ -436,30 +487,71 @@ export class ContactPlugin implements IPlugin {
             }
           }
 
+          // 4. Recover message content if message is empty or generic confirmation ("do that", "send it", "send the message")
+          const isGenericMessage = !rawMessage || /^(do that|do it|do so|send it|send am|send the message|send the message to him|proceed|yes|confirm)$/i.test(rawMessage);
+          if (isGenericMessage) {
+            try {
+              const recentInChat = db.prepare(`
+                SELECT message_text FROM chat_logs
+                WHERE chat_jid = ?
+                ORDER BY id DESC LIMIT 8
+              `).all(ctx.chatJid) as Array<{ message_text: string | null }>;
+
+              for (const r of recentInChat) {
+                const txt = r.message_text || '';
+                // Check for quotes: “Ademola said he should greet Amina”
+                const quoteMatch = txt.match(/[\u201c"']([^\u201c\u201d"']{3,})[\u201d"']/);
+                if (quoteMatch && quoteMatch[1] && !quoteMatch[1].toLowerCase().includes('message')) {
+                  rawMessage = quoteMatch[1].trim();
+                  break;
+                }
+                const tellMatch = txt.match(/(?:tell|inform|warn|ask)\s+(?:him|her|them|am)\s+(?:say|that\s+)?(.+)/i);
+                if (tellMatch && tellMatch[1]) {
+                  rawMessage = tellMatch[1].trim();
+                  break;
+                }
+              }
+            } catch {}
+          }
+
+          // Clean up leading conversational prefixes from message body
+          let cleanMessage = rawMessage
+            .replace(/^(?:tell|inform|warn|ask)\s+(?:him|her|them|am)\s+(?:say|that\s+)?/i, '')
+            .replace(/^(?:say|that)\s+/i, '')
+            .trim();
+          if (!cleanMessage) cleanMessage = rawMessage;
+
           if (!targetJid) {
             // Smart Fallback: Check if the recipient name matches a WhatsApp group!
             const matchedGroup = findKnownGroup(rawRecipient);
             if (matchedGroup && ctx.sock) {
-              await ctx.sock.sendMessage(matchedGroup.group_jid, { text: rawMessage });
+              await ctx.sock.sendMessage(matchedGroup.group_jid, { text: cleanMessage });
               chatLogger.logMessage({
                 chatJid: matchedGroup.group_jid,
                 senderJid: 'bot',
                 senderName: config.bot.name,
                 isGroup: true,
                 contentType: 'text',
-                messageText: rawMessage,
+                messageText: cleanMessage,
                 timestamp: Date.now(),
               });
               return {
                 success: true,
-                message: `✅ Message sent to group "${matchedGroup.subject}": "${rawMessage}"`,
+                message: `✅ Message sent to group "${matchedGroup.subject}": "${cleanMessage}"`,
                 data: { groupJid: matchedGroup.group_jid, subject: matchedGroup.subject },
               };
             }
 
             return {
               success: false,
-              message: `Could not find a contact matching "${rawRecipient}" in the address book. Please specify their phone number so I can send the message.`,
+              message: `Could not determine who to message. Please provide their phone number (e.g. +234 913 191 8009) or contact name.`,
+            };
+          }
+
+          if (!cleanMessage) {
+            return {
+              success: false,
+              message: `Recipient ${targetName} resolved, but no message text was provided to send.`,
             };
           }
 
@@ -492,9 +584,9 @@ export class ContactPlugin implements IPlugin {
           } catch {}
 
           const isSavedContact = Boolean(targetPhone && contactService.getContact(targetPhone));
-          let finalDispatchMessage = rawMessage;
-          if (!hasInboundHistory && !isSavedContact && !rawMessage.toLowerCase().includes('ademola')) {
-            finalDispatchMessage = `${rawMessage}\n\n— Sent on behalf of Ademola (08108574293) via Forgelabs`;
+          let finalDispatchMessage = cleanMessage;
+          if (!hasInboundHistory && !isSavedContact && !cleanMessage.toLowerCase().includes('ademola')) {
+            finalDispatchMessage = `${cleanMessage}\n\n— Sent on behalf of Ademola (08108574293) via Forgelabs`;
           }
 
           console.log(`[ContactPlugin] 📨 Sending outbound message to ${targetName} (${targetJid}): "${finalDispatchMessage.slice(0, 60)}..."`);

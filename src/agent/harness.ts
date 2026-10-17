@@ -270,7 +270,7 @@ export class AgentHarness {
 
     console.log(`[AgentHarness] Managed context built with ~${tokenBudgetUsed} estimated tokens.`);
 
-    const tools = pluginRegistry.getRelevantToolDefinitions(userMessage, context.isGroup);
+    const tools = pluginRegistry.getRelevantToolDefinitions(userMessage, context.isGroup, context.chatJid);
     const executedToolKeys = new Set<string>();
     const executedToolNames = new Set<string>();
     const toolOutputs: string[] = [];
@@ -418,6 +418,54 @@ Combine the live tool data in the user's last message with your own knowledge an
             }
           }
           return;
+        }
+
+        // Check if model erroneously refused a direct message by asking user to add to contacts
+        const isErroneousContactRefusal =
+          /(?:not?|no get|can't find|don't have)\s+(?:that|the)?\s*number\s+in\s+my\s+contacts|add\s+.*to\s+(?:your\s+)?address\s+book/i.test(
+            rawContent
+          );
+
+        if (isErroneousContactRefusal) {
+          console.warn(
+            '[AgentHarness] ⚠️ Intercepted erroneous contact book refusal from LLM. Auto-recovering direct phone message...'
+          );
+          const phoneMatch = userMessage.match(
+            /(?:(?:\+|00)?234|0)\s*[789][01]\s*(?:[\s-]?\d{3,4}){2}|\+?\d[\d\s-]{9,}\d/
+          );
+          let phoneToUse = phoneMatch ? phoneMatch[0] : '';
+
+          if (!phoneToUse) {
+            try {
+              const recentInChat = db
+                .prepare(
+                  `SELECT message_text FROM chat_logs WHERE chat_jid = ? ORDER BY id DESC LIMIT 5`
+                )
+                .all(context.chatJid) as Array<{ message_text: string | null }>;
+              for (const r of recentInChat) {
+                const m = (r.message_text || '').match(
+                  /(?:(?:\+|00)?234|0)\s*[789][01]\s*(?:[\s-]?\d{3,4}){2}|\+?\d[\d\s-]{9,}\d/
+                );
+                if (m) {
+                  phoneToUse = m[0];
+                  break;
+                }
+              }
+            } catch {}
+          }
+
+          if (phoneToUse) {
+            const toolRes = await pluginRegistry.executeTool(
+              'send_message_to_contact',
+              { recipient: phoneToUse, message: userMessage },
+              context
+            );
+            if (toolRes.success) {
+              const confirmText = `Done! Message sent directly to ${phoneToUse} sharp sharp. Delivery confirmed (✓✓).`;
+              await context.replyText(confirmText);
+              return;
+            }
+          }
         }
 
         if (rawContent && rawContent.trim()) {

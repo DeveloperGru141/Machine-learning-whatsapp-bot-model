@@ -48,11 +48,18 @@ export class ContactService {
    * Extracts pure digits from a phone number or JID, delegating to normalizePhoneNumber for standard phone numbers.
    */
   public extractPhoneNumber(phoneOrJid: string): string {
-    const rawUser = (phoneOrJid || '').split('@')[0].split(':')[0];
-    if (phoneOrJid?.endsWith('@lid') || rawUser.length > 13) {
+    if (!phoneOrJid) return '';
+    const trimmed = phoneOrJid.trim();
+    if (trimmed.endsWith('@lid') || trimmed.includes('@lid')) {
       return '';
     }
-    return normalizePhoneNumber(rawUser);
+    const cleanUser = trimmed.split('@')[0].split(':')[0];
+    const digits = normalizePhoneNumber(cleanUser);
+    // WhatsApp LIDs are 15-digit internal identifiers starting with '10' (e.g. 102409552584830)
+    if (/^10\d{13,}$/.test(digits)) {
+      return '';
+    }
+    return digits;
   }
 
   /**
@@ -323,7 +330,7 @@ export class ContactService {
    */
   public generateVCard(displayName: string, phoneNumber: string, notes?: string, jid?: string): string {
     const cleanDigits = this.extractPhoneNumber(phoneNumber);
-    const isLid = (jid && jid.endsWith('@lid')) || cleanDigits.length > 13;
+    const isLid = (jid && jid.endsWith('@lid')) || !cleanDigits || /^10\d{13,}$/.test(cleanDigits);
     const lines = [
       'BEGIN:VCARD',
       'VERSION:3.0',
