@@ -17,6 +17,7 @@ import { llmClient } from '../../agent/llm-client.js';
 import { healthMonitor } from '../../core/health-monitor.js';
 import { db } from '../../memory/db.js';
 import { config, normalizePhoneNumber } from '../../config/env.js';
+import { userProfileManager } from '../../memory/user-profiles.js';
 
 let activeSocket: WASocket | null = null;
 
@@ -79,7 +80,6 @@ export function buildBotHealthReport(): string {
     `• *Uptime*: ${uptimeHours}h ${uptimeMinutes}m\n` +
     `• *WhatsApp Socket*: ${report.isConnected ? 'Connected & Online 🟢' : 'Active / Ready 🟢'}\n` +
     `• *LLM Engine*: ${llmClient.getModel()} (Auto-Failover Active)\n` +
-    `• *Media Engine*: Nano Banana (Google Gemini 3 Image) 🟢\n` +
     `• *Database & Memory*: SQLite WAL (${totalChatLogs} messages, ${totalContacts} contacts indexed)\n` +
     `• *Daily Broadcasts*: ${activeBroadcastsCount} active group/owner routines\n` +
     `• *Anti-Ban Safety*: 100% compliant (Zero blocks/cooldown violations)\n` +
@@ -853,6 +853,13 @@ export class SchedulerPlugin implements IPlugin {
         properties: {},
       },
       execute: async (_args: {}, _ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!userProfileManager.isOwner(_ctx.senderJid)) {
+          return {
+            success: true,
+            message: '🟢 Forgelabs assistant is online, healthy, and operational.',
+          };
+        }
+
         try {
           const reportText = buildBotHealthReport();
           return {

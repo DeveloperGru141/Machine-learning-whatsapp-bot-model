@@ -3,6 +3,7 @@ import path from 'path';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { db } from '../../memory/db.js';
 import { config } from '../../config/env.js';
+import { userProfileManager } from '../../memory/user-profiles.js';
 
 interface ChatLogRow {
   id: number;
@@ -38,6 +39,24 @@ export const exportChatTool: BotTool = {
     args: { format?: 'txt' | 'json'; limit?: number },
     ctx: ExecutionContext
   ): Promise<ToolResult> => {
+    if (ctx.isGroup) {
+      const isOwner = userProfileManager.isOwner(ctx.senderJid);
+      if (!isOwner) {
+        try {
+          const meta = await ctx.sock.groupMetadata(ctx.chatJid);
+          const p = meta.participants.find((m: any) => m.id === ctx.senderJid);
+          if (p?.admin !== 'admin' && p?.admin !== 'superadmin') {
+            return {
+              success: false,
+              message: 'Permission denied: Only group admins or the bot creator can export group chat history.',
+            };
+          }
+        } catch {
+          return { success: false, message: 'Permission denied: Could not verify admin status.' };
+        }
+      }
+    }
+
     const format = args.format === 'json' ? 'json' : 'txt';
     const limit = Math.min(Math.max(Number(args.limit) || 100, 1), 1000);
 

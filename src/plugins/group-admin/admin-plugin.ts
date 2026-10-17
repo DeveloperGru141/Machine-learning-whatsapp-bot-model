@@ -479,6 +479,90 @@ export class GroupAdminPlugin implements IPlugin {
         }
       },
     },
+    {
+      name: 'join_group',
+      description: 'Joins a WhatsApp group using an invite link or invite code (e.g., https://chat.whatsapp.com/ABC123xyz or ABC123xyz). Can be called in DMs or groups whenever someone shares a group invite link.',
+      parameters: {
+        type: 'object',
+        properties: {
+          invite_link: {
+            type: 'string',
+            description: 'The WhatsApp group invite URL (https://chat.whatsapp.com/...) or the 22-character invite code.',
+          },
+        },
+        required: ['invite_link'],
+      },
+      execute: async (args: { invite_link: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const raw = (args.invite_link || '').trim();
+          const match = raw.match(/(?:chat\.whatsapp\.com\/)?([a-zA-Z0-9_-]{20,24})/);
+          const inviteCode = match ? match[1] : raw.replace(/https?:\/\/chat\.whatsapp\.com\//, '').trim();
+
+          if (!inviteCode || inviteCode.length < 15) {
+            return {
+              success: false,
+              message: 'Invalid group invite link or code. Please provide a valid WhatsApp group link (https://chat.whatsapp.com/...).',
+            };
+          }
+
+          // Fetch group info first to verify link and get group subject
+          let groupInfo: any = null;
+          try {
+            groupInfo = await ctx.sock.groupGetInviteInfo(inviteCode);
+          } catch (err: any) {
+            const errMsg = String(err?.message || err);
+            if (errMsg.includes('404') || errMsg.includes('gone') || errMsg.includes('not-authorized')) {
+              return { success: false, message: 'Could not access the group: The invite link has expired or was revoked.' };
+            }
+          }
+
+          // Accept invite and join
+          let groupJid: string | undefined;
+          try {
+            groupJid = await ctx.sock.groupAcceptInvite(inviteCode);
+          } catch (joinErr: any) {
+            const joinMsg = String(joinErr?.message || joinErr);
+            if (joinMsg.includes('409') || joinMsg.includes('already')) {
+              const subject = groupInfo?.subject ? ` "${groupInfo.subject}"` : '';
+              return { success: true, message: `I am already a member of this group${subject}! 🤝` };
+            }
+            throw joinErr;
+          }
+
+          const groupTitle = groupInfo?.subject || 'the group';
+
+          logAutonomousAction('joined_group', groupJid || 'group', ctx.senderJid, `Joined group "${groupTitle}" via invite link`);
+
+          // Send a warm greeting into the newly joined group
+          if (groupJid) {
+            try {
+              await ctx.sock.sendMessage(groupJid, {
+                text: `👋 Hello everyone! I'm Forgelabs assistant, glad to be here with you all. Feel free to tag me if you need help with anything!`,
+              });
+            } catch (greetErr) {
+              console.warn('[GroupAdmin] Greet error after joining group:', greetErr);
+            }
+          }
+
+          const memberCount = groupInfo?.size ? ` (${groupInfo.size} members)` : '';
+          return {
+            success: true,
+            message: `🎉 Successfully joined "${groupTitle}"${memberCount}!`,
+            data: {
+              groupJid,
+              subject: groupTitle,
+              participants: groupInfo?.size,
+            },
+          };
+        } catch (err: any) {
+          console.error('[GroupAdmin] Error joining group:', err);
+          return {
+            success: false,
+            message: `Failed to join group: ${err?.message || 'The link may have expired or was revoked.'}`,
+          };
+        }
+      },
+    },
   ];
 }
 

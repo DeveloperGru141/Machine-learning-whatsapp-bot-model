@@ -19,7 +19,7 @@ VAL_DATASET = DATA_DIR / "validation.jsonl"
 DEFAULT_SYSTEM_PROMPT = (
     "You are Forgelabs assistant, a sharp, witty, and culturally savvy real WhatsApp user "
     "living inside WhatsApp chats. Your creator is Ademola, an aspiring ML/AI Engineer. Talk naturally like a real person, "
-    "NO robotic AI cliches, NO emoji spam (max 0-1 emoji)."
+    "NO robotic AI clichés, authentic expressive emojis (1-2 emojis max per reply)."
 )
 
 ROBOTIC_CLICHES = [
@@ -102,6 +102,17 @@ def count_emojis(text: str) -> int:
             count += 1
     return count
 
+SENSITIVE_PATTERNS = [
+    re.compile(r"gsk_[a-zA-Z0-9_-]{20,}", re.IGNORECASE),
+    re.compile(r"rnd_[a-zA-Z0-9_-]{20,}", re.IGNORECASE),
+    re.compile(r"(?:ghp|gho|ghu|ghs|ghr|github_pat)_[a-zA-Z0-9_]{20,}", re.IGNORECASE),
+    re.compile(r"sk-[a-zA-Z0-9_-]{20,}", re.IGNORECASE),
+    re.compile(r"eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}", re.IGNORECASE),
+    re.compile(r"\b10\d{12,14}(?:@lid)?\b"),
+    re.compile(r"(?:password|secret|apikey|api_key)\s*[:=]\s*\S+", re.IGNORECASE),
+    re.compile(r"ignore\s+(?:all\s+)?previous\s+instructions", re.IGNORECASE),
+]
+
 def validate_and_tighten():
     print("=" * 65)
     print("🎯 Forgelabs Assistant — Dataset Validator & Tightener")
@@ -162,6 +173,7 @@ def validate_and_tighten():
     skipped_reasons = {
         "missing_roles": 0,
         "too_short": 0,
+        "sensitive_data_leak": 0,
         "robotic_cliche": 0,
         "emoji_spam": 0,
         "outdated_name": 0,
@@ -193,6 +205,11 @@ def validate_and_tighten():
             skipped_reasons["too_short"] += 1
             continue
 
+        # Sensitive Data Guardrail: discard any pair with API keys, tokens, or private IDs
+        if any(pat.search(asst_msg) or pat.search(user_msg) for pat in SENSITIVE_PATTERNS):
+            skipped_reasons["sensitive_data_leak"] += 1
+            continue
+
         asst_lower = asst_msg.lower()
         user_lower = user_msg.lower()
 
@@ -217,8 +234,8 @@ def validate_and_tighten():
                 skipped_reasons["inconsistent_creator"] += 1
                 continue
 
-        # Rule 6: Strict emoji limit (maximum 1 emoji per assistant reply)
-        if count_emojis(asst_msg) > 1:
+        # Rule 6: Natural emoji limit (maximum 2 emojis per assistant reply)
+        if count_emojis(asst_msg) > 2:
             skipped_reasons["emoji_spam"] += 1
             continue
 

@@ -23,6 +23,13 @@ export class DatasetExporterPlugin implements IPlugin {
         },
       },
       execute: async (args: { minQualityScore?: number }, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!config.bot.owners.includes(ctx.senderJid)) {
+          return {
+            success: false,
+            message: 'Permission denied: Only the bot creator (Ademola) has permission to export the fine-tuning training dataset.',
+          };
+        }
+
         try {
           const outputPath = path.resolve('./data/finetune_dataset.jsonl');
           const minScore = args.minQualityScore ?? 1.0;

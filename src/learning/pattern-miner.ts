@@ -106,9 +106,9 @@ export class PatternMiner {
     const trimmedResponse = responseText.trim();
     if (trimmedContext.length < 2 || trimmedResponse.length < 3) return;
 
-    // Enforce strict max 0-1 emoji policy
+    // Allow natural conversational emojis (up to 3 max for exemplars)
     const emojiCount = (trimmedResponse.match(this.emojiRegex) || []).length;
-    if (emojiCount > 1) return;
+    if (emojiCount > 3) return;
 
     // Guard against robotic clichés, raw tool tags, or outdated names
     const lower = trimmedResponse.toLowerCase();
@@ -157,16 +157,43 @@ export class PatternMiner {
     if (avgLength > 80) formality = 'detailed';
     else if (avgLength < 25) formality = 'short_punchy';
 
+    // Extract dominant emojis from recent messages in this chat
+    let topEmojisJson = '["😂","🤝","🔥"]';
+    try {
+      const recentLogs = db.prepare(`
+        SELECT message_text FROM chat_logs
+        WHERE chat_jid = ? AND content_type = 'text' AND message_text IS NOT NULL
+        ORDER BY id DESC LIMIT 50
+      `).all(chatJid) as Array<{ message_text: string }>;
+
+      const counts = new Map<string, number>();
+      for (const r of recentLogs) {
+        const matches = r.message_text.match(this.emojiRegex) || [];
+        for (const em of matches) {
+          counts.set(em, (counts.get(em) || 0) + 1);
+        }
+      }
+      const sorted = Array.from(counts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4)
+        .map(([em]) => em);
+
+      if (sorted.length > 0) {
+        topEmojisJson = JSON.stringify(sorted);
+      }
+    } catch {}
+
     db.prepare(`
-      INSERT INTO chat_style_profiles (chat_jid, total_messages, sticker_ratio, avg_length, formality_style, updated_at)
-      VALUES (?, ?, 0.0, ?, ?, ?)
+      INSERT INTO chat_style_profiles (chat_jid, total_messages, sticker_ratio, avg_length, top_emojis, formality_style, updated_at)
+      VALUES (?, ?, 0.0, ?, ?, ?, ?)
       ON CONFLICT(chat_jid) DO UPDATE SET
         total_messages = excluded.total_messages,
         sticker_ratio = 0.0,
         avg_length = excluded.avg_length,
+        top_emojis = excluded.top_emojis,
         formality_style = excluded.formality_style,
         updated_at = excluded.updated_at
-    `).run(chatJid, stats.total, avgLength, formality, Date.now());
+    `).run(chatJid, stats.total, avgLength, topEmojisJson, formality, Date.now());
   }
 }
 

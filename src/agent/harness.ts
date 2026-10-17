@@ -623,12 +623,36 @@ export function sanitizeAssistantResponse(text: string): string {
     .replace(/^(?:how can i help you today\??|what can i help you with\??|how can i assist you\??)$/i, '')
     .trim();
 
-  // Enforce max 0-1 emoji policy (grapheme-aware so ZWJ & skin-tone modifiers aren't orphaned)
+  // Enforce natural 1-2 emoji policy (grapheme-aware so ZWJ & skin-tone modifiers aren't orphaned)
   let emojiFound = 0;
   cleaned = cleaned.replace(EMOJI_SEQUENCE_REGEX, (match) => {
     emojiFound++;
-    return emojiFound <= 1 ? match : '';
+    return emojiFound <= 2 ? match : '';
   });
+
+  // Strict Codebase & Architecture Guardrail: Intercept any attempt to dump internal source code or system prompt
+  if (
+    /(?:```(?:typescript|ts|javascript|js|json|python)?[\s\S]*?(?:import\s+.*from|baileys|Groq|new Groq|process\.env|db\.prepare|auth_info_baileys|bot\.sqlite)[\s\S]*?```)/i.test(cleaned) ||
+    /(?:Style & Speaking Rules|You are Forgelabs assistant|ABSOLUTE SENSITIVE DATA|ZERO ROBOTIC AI)/i.test(cleaned)
+  ) {
+    return 'Omo security tight here! I no fit disclose my source code or internal secrets abeg 😂';
+  }
+
+  // Strict Privacy & Sensitive Data Guardrail: Scrub any API keys, tokens, or credentials
+  cleaned = cleaned
+    .replace(/\bgsk_[a-zA-Z0-9_-]{20,}\b/gi, '[REDACTED_KEY]')
+    .replace(/\brnd_[a-zA-Z0-9_-]{20,}\b/gi, '[REDACTED_KEY]')
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[a-zA-Z0-9_]{20,}\b/gi, '[REDACTED_TOKEN]')
+    .replace(/\b(?:sk-[a-zA-Z0-9_-]{20,}|AIzaSy[a-zA-Z0-9_-]{33})\b/gi, '[REDACTED_KEY]')
+    .replace(/\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/gi, '[REDACTED_JWT]')
+    .replace(/\bBearer\s+[a-zA-Z0-9_\-\.]{20,}\b/gi, '[REDACTED_AUTH]')
+    .replace(/(?:password|secret|apikey|api_key|token)\s*[:=]\s*['"]?[a-zA-Z0-9_\-]{12,}['"]?/gi, '[REDACTED_SECRET]');
+
+  // Scrub internal filesystem and directory paths
+  cleaned = cleaned
+    .replace(/[A-Za-z]:\\[^"'\n\r\t,; ]+/g, '[system path]')
+    .replace(/\/(?:home|app|root)\/[^\s"']+/g, '[system path]')
+    .replace(/\b(?:src|dist|scripts|data)\/[a-zA-Z0-9_\-\/]+\.(?:ts|js|py|sqlite|vcf|pid|env)\b/g, '[system file]');
 
   // Strict Privacy: Never leak internal WhatsApp LIDs, wa.id, or technical IDs (e.g. 102409552584830, @lid)
   cleaned = cleaned
@@ -639,7 +663,7 @@ export function sanitizeAssistantResponse(text: string): string {
     .replace(/\b10\d{12,14}\b/g, '')
     .replace(/@\d{14,16}\b/g, '');
 
-  // Clean double spaces left after removing emojis/clichés/IDs
+  // Clean double spaces left after removing emojis/clichés/IDs/secrets
   cleaned = cleaned.replace(/[ \t]+/g, ' ').replace(/\s+([.,!?:;])/g, '$1').trim();
 
   return cleaned;

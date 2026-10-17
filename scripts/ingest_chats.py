@@ -170,6 +170,22 @@ def parse_msgstore_sqlite(msgstore_path: Path):
         print(f"⚠️ Error reading {msgstore_path.name}: {e}")
         return []
 
+SENSITIVE_DATA_PATTERNS = [
+    re.compile(r"gsk_[a-zA-Z0-9_-]{20,}", re.IGNORECASE),
+    re.compile(r"rnd_[a-zA-Z0-9_-]{20,}", re.IGNORECASE),
+    re.compile(r"(?:ghp|gho|ghu|ghs|ghr|github_pat)_[a-zA-Z0-9_]{20,}", re.IGNORECASE),
+    re.compile(r"sk-[a-zA-Z0-9_-]{20,}", re.IGNORECASE),
+    re.compile(r"eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}", re.IGNORECASE),
+    re.compile(r"\b10\d{12,14}(?:@lid)?\b"),
+    re.compile(r"(?:password|secret|apikey|api_key)\s*[:=]\s*\S+", re.IGNORECASE),
+]
+
+def contains_sensitive_data(text: str) -> bool:
+    for pat in SENSITIVE_DATA_PATTERNS:
+        if pat.search(text):
+            return True
+    return False
+
 def ingest_turns(conn: sqlite3.Connection, turns: list, chat_name: str):
     """Processes turns into dialogue exemplars, training pairs, and knowledge."""
     cursor = conn.cursor()
@@ -177,8 +193,8 @@ def ingest_turns(conn: sqlite3.Connection, turns: list, chat_name: str):
 
     system_prompt = (
         "You are Forgelabs assistant, a sharp, witty, and culturally savvy real WhatsApp user "
-        "living inside WhatsApp chats. Your creator is ADEMOLA. Talk naturally like a real person, "
-        "NO robotic AI cliches, NO emoji spam (max 0-1 emoji)."
+        "living inside WhatsApp chats. Your creator is Ademola. Talk naturally like a real person, "
+        "NO robotic AI clichés, authentic expressive emojis (1-2 emojis max per reply)."
     )
 
     now = int(datetime.now().timestamp() * 1000)
@@ -192,6 +208,9 @@ def ingest_turns(conn: sqlite3.Connection, turns: list, chat_name: str):
             resp_text = turn_b["text"]
 
             if len(user_text) < 2 or len(resp_text) < 2:
+                continue
+
+            if contains_sensitive_data(user_text) or contains_sensitive_data(resp_text):
                 continue
 
             cursor.execute("""

@@ -108,7 +108,7 @@ export class BatchLearner {
         'You are an ML behavioral analysis engine for an intelligent WhatsApp assistant.\n' +
         'Analyze the following transcript of chat exchanges.\n' +
         'Extract exactly 3 concise, high-value bullet points of learned behavioral data about the user or group.\n' +
-        'Focus on: communication tone preferences (casual, slang, formal), recurring interests or projects, and response style.\n' +
+        'Focus on: communication tone preferences (casual, slang, formal), recurring interests or projects, emoji usage patterns (favorite emojis, reaction vibes), and response style.\n' +
         'Strictly format output as 3 bullet points starting with "- ":\n' +
         '- [Point 1]\n' +
         '- [Point 2]\n' +

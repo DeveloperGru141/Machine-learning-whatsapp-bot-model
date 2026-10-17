@@ -44,22 +44,32 @@ export class StyleAdapter {
   public getStyleContext(chatJid: string, incomingText?: string): StyleAdapterContext {
     // 1. Fetch learned profile for this chat
     const profile = db.prepare(`
-      SELECT sticker_ratio, avg_length, formality_style
+      SELECT sticker_ratio, avg_length, formality_style, top_emojis
       FROM chat_style_profiles
       WHERE chat_jid = ?
-    `).get(chatJid) as unknown as { sticker_ratio: number; avg_length: number; formality_style: string } | undefined;
+    `).get(chatJid) as unknown as { sticker_ratio: number; avg_length: number; formality_style: string; top_emojis?: string } | undefined;
+
+    let learnedEmojis = '😂 🤝 🔥';
+    if (profile?.top_emojis) {
+      try {
+        const parsed = JSON.parse(profile.top_emojis);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          learnedEmojis = parsed.join(' ');
+        }
+      } catch {}
+    }
 
     let styleGuidance = '';
     if (profile) {
       if (profile.formality_style === 'short_punchy') {
-        styleGuidance = `Chat Cadence: Short, snappy (1-2 sentences). Pure Nigerian WhatsApp flow, zero AI cliches, 0-1 emoji max.`;
+        styleGuidance = `Chat Cadence: Short, snappy (1-2 sentences). Pure Nigerian WhatsApp flow, zero AI clichés. Learned Emoji Pattern: [${learnedEmojis}]. Include at least one fitting contextual emoji where natural (1-2 emojis max).`;
       } else if (profile.formality_style === 'detailed') {
-        styleGuidance = `Chat Cadence: Clear and punchy. Explain simply without robotic jargon, 0-1 emoji max.`;
+        styleGuidance = `Chat Cadence: Clear and punchy. Explain simply without robotic jargon. Learned Emoji Pattern: [${learnedEmojis}]. Include at least one fitting contextual emoji where natural (1-2 emojis max).`;
       } else {
-        styleGuidance = `Chat Cadence: Authentic WhatsApp banter. Sharp, witty, friendly friend vibe, 0-1 emoji max.`;
+        styleGuidance = `Chat Cadence: Authentic WhatsApp banter. Sharp, witty, friendly friend vibe. Learned Emoji Pattern: [${learnedEmojis}]. Include at least one fitting contextual emoji where natural (1-2 emojis max).`;
       }
     } else {
-      styleGuidance = `Chat Cadence: Natural WhatsApp peer flow. Crisp, witty, zero customer-service tropes, 0-1 emoji max.`;
+      styleGuidance = `Chat Cadence: Natural WhatsApp peer flow. Crisp, witty, zero customer-service tropes. Learned Emoji Pattern: [${learnedEmojis}]. Include at least one fitting contextual emoji where natural (1-2 emojis max).`;
     }
 
     // 2. Fetch targeted few-shot exemplars: Match user intent first, then backfill general exemplars

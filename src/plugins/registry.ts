@@ -294,6 +294,17 @@ export class PluginRegistry {
       }
     }
 
+    // 11. Group Joining via Invite Link (Available in BOTH DMs and Groups!)
+    if (
+      text.includes('chat.whatsapp.com') ||
+      text.includes('join') ||
+      text.includes('invite') ||
+      text.includes('enter group')
+    ) {
+      selected.add('join_group');
+      selected.add('list_joined_groups');
+    }
+
     return Array.from(selected)
       .map((name) => this.tools.get(name))
       .filter((t): t is BotTool => Boolean(t))
@@ -319,6 +330,9 @@ export class PluginRegistry {
       schedule_reminder: 'set_reminder',
       post_status: 'post_whatsapp_status',
       reply_unreplied: 'reply_unreplied_messages',
+      join_group_via_invite_link: 'join_group',
+      join_whatsapp_group: 'join_group',
+      accept_group_invite: 'join_group',
     };
 
     const resolvedName = aliasMap[name] || name;

@@ -1,6 +1,7 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { memoryService } from '../../memory/memory-service.js';
 import { db, getRecentAutonomousActions } from '../../memory/db.js';
+import { userProfileManager } from '../../memory/user-profiles.js';
 
 export class MemoryPlugin implements IPlugin {
   name = 'MemoryRecall';
@@ -94,6 +95,13 @@ export class MemoryPlugin implements IPlugin {
         },
       },
       execute: async (args: { limit?: number }, _ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!userProfileManager.isOwner(_ctx.senderJid)) {
+          return {
+            success: false,
+            message: 'Permission denied: Cross-chat situational activity is confidential and only accessible to the bot owner (Ademola).',
+          };
+        }
+
         try {
           const limit = Math.min(Math.max(Number(args.limit) || 20, 5), 50);
 
