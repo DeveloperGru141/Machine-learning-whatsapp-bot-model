@@ -108,14 +108,18 @@ let healthServer: http.Server | null = null;
 function startHealthServer() {
   const port = Number(process.env.PORT) || 3000;
   healthServer = http.createServer(async (req, res) => {
-    if (req.url === '/pair') {
-      const code = await whatsAppClient.requestFreshPairingCode();
+    if (req.url && req.url.startsWith('/pair')) {
+      const forceReset = req.url.includes('refresh=1');
+      const code = await whatsAppClient.requestFreshPairingCode(forceReset);
+      const formattedCode = code && code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
-          status: whatsAppClient.isSocketOpen() ? 'already_connected' : 'awaiting_pairing',
+          status: whatsAppClient.isRegistered() ? 'already_connected' : 'awaiting_pairing',
           pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2349014896714'}`,
           pairingCode: code || whatsAppClient.getLatestPairingCode(),
+          formattedPairingCode: formattedCode,
+          refreshUrl: '/pair?refresh=1',
         })
       );
       return;
@@ -128,6 +132,7 @@ function startHealthServer() {
         bot: config.bot.name,
         creator: config.bot.creator,
         pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2349014896714'}`,
+        whatsappRegistered: whatsAppClient.isRegistered(),
         whatsappConnected: whatsAppClient.isSocketOpen() || report.isConnected,
         pairingCode: whatsAppClient.getLatestPairingCode(),
         activeModel: llmClient.getModel(),

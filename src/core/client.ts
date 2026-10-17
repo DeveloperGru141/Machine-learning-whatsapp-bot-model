@@ -64,6 +64,7 @@ export class WhatsAppClient {
   private isScanningUnreplied = false;
   private pairingRequested = false;
   private latestPairingCode: string | null = null;
+  private latestPairingCodeAt = 0;
   private attemptedCatchupKeys: Set<string> = new Set();
   private messageStore: Map<string, any> = new Map();
 
@@ -71,21 +72,58 @@ export class WhatsAppClient {
     return this.latestPairingCode;
   }
 
-  public async requestFreshPairingCode(): Promise<string | null> {
-    if (!this.sock || this.sock.authState?.creds?.registered) {
+  public isRegistered(): boolean {
+    return Boolean(this.sock?.authState?.creds?.registered);
+  }
+
+  /**
+   * Returns the current valid pairing code for the active socket, or performs a clean
+   * session reset if forceReset is true (or if no code has been generated yet).
+   * Never calls requestPairingCode twice on the same authState to avoid corrupting noise keys.
+   */
+  public async requestFreshPairingCode(forceReset: boolean = false): Promise<string | null> {
+    if (this.isRegistered()) {
       return null;
     }
-    const cleanNumber = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '09014896714');
-    if (!cleanNumber) return null;
-    try {
-      const code = await this.sock.requestPairingCode(cleanNumber);
-      this.latestPairingCode = code;
-      console.log(`\n📱 [WhatsAppClient] FRESH PAIRING CODE FOR +${cleanNumber}: ${code}\n`);
-      return code;
-    } catch (err: any) {
-      console.warn(`[WhatsAppClient] Could not request fresh pairing code:`, err.message);
+
+    // If we already have a fresh code on the current uncorrupted socket (<150s old) and not forcing reset, return it directly!
+    if (!forceReset && this.latestPairingCode && Date.now() - this.latestPairingCodeAt < 150_000) {
       return this.latestPairingCode;
     }
+
+    // If forcing a refresh (or no code yet after waiting), perform a clean session wipe & fresh socket start
+    if (forceReset) {
+      console.log('[WhatsAppClient] 🔄 Force-refreshing pairing session with clean noise credentials...');
+      try {
+        if (this.sock) {
+          this.sock.ev.removeAllListeners('connection.update');
+          this.sock.ev.removeAllListeners('creds.update');
+          this.sock.ev.removeAllListeners('messages.upsert');
+          try {
+            this.sock.end(undefined);
+          } catch {}
+          this.sock = null;
+        }
+        if (fs.existsSync(config.paths.sessions)) {
+          fs.rmSync(config.paths.sessions, { recursive: true, force: true });
+        }
+      } catch {}
+      this.pairingRequested = false;
+      this.latestPairingCode = null;
+      this.latestPairingCodeAt = 0;
+      this.isConnecting = false;
+      await this.start();
+    }
+
+    // Wait up to 12 seconds for the fresh socket's QR handshake to generate the single clean pairing code
+    for (let i = 0; i < 24; i++) {
+      if (this.latestPairingCode) {
+        return this.latestPairingCode;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    return this.latestPairingCode;
   }
 
   private startKeepAlive(): void {
@@ -218,8 +256,9 @@ export class WhatsAppClient {
         generateHighQualityLinkPreview: true,
         browser: Browsers.ubuntu('Chrome'),
         keepAliveIntervalMs: 30_000,
-        connectTimeoutMs: 20_000,
-        defaultQueryTimeoutMs: 15_000,
+        connectTimeoutMs: 60_000,
+        qrTimeout: 180_000,
+        defaultQueryTimeoutMs: 20_000,
         retryRequestDelayMs: 500,
         maxMsgRetryCount: 5,
         syncFullHistory: false,
@@ -243,39 +282,28 @@ export class WhatsAppClient {
       // Save auth credentials whenever updated
       this.sock.ev.on('creds.update', saveCreds);
 
-      // Pairing Code Flow (Link with phone number instead of QR)
-      if (config.bot.pairingMethod === 'code' && !this.sock.authState.creds.registered && !this.pairingRequested) {
-        this.pairingRequested = true;
-        setTimeout(async () => {
-          if (this.sock?.authState?.creds?.registered) return;
+      // Connection lifecycle management
+      this.sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
 
-          let phoneNumber = config.bot.pairingPhoneNumber;
-          if (!phoneNumber && process.stdin.isTTY) {
-            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-            phoneNumber = await new Promise<string>((resolve) => {
-              rl.question('\n📱 Enter your WhatsApp phone number with country code (e.g. 09014896714 or 2349014896714): ', (answer) => {
-                rl.close();
-                resolve(answer.trim());
-              });
-            });
-          } else if (!phoneNumber) {
-            console.warn(
-              '⚠️ [WhatsAppClient] Headless server mode detected without PAIRING_PHONE_NUMBER or existing session. Set PAIRING_PHONE_NUMBER in .env or copy ./sessions to the server.'
-            );
-            this.pairingRequested = false;
-            return;
-          }
+        if (qr && config.bot.pairingMethod === 'qr') {
+          console.log('\n📱 SCAN THE QR CODE BELOW TO CONNECT WHATSAPP:');
+          qrcode.generate(qr, { small: true });
+        }
 
+        // Request pairing code ONCE right when the initial QR noise handshake is ready
+        if (qr && config.bot.pairingMethod === 'code' && !this.sock?.authState?.creds?.registered && !this.pairingRequested) {
+          this.pairingRequested = true;
+          const phoneNumber = config.bot.pairingPhoneNumber || '09014896714';
           const cleanNumber = formatPhoneNumberForPairing(phoneNumber);
           if (cleanNumber && this.sock) {
-            let retries = 0;
-            const maxRetries = 3;
-            while (retries < maxRetries) {
+            setTimeout(async () => {
+              if (!this.sock || this.sock.authState?.creds?.registered) return;
               try {
-                retries++;
-                console.log(`[WhatsAppClient] Requesting pairing code for +${cleanNumber} (Attempt ${retries}/${maxRetries})...`);
+                console.log(`[WhatsAppClient] Requesting clean pairing code for +${cleanNumber}...`);
                 const code = await this.sock.requestPairingCode(cleanNumber);
                 this.latestPairingCode = code;
+                this.latestPairingCodeAt = Date.now();
                 console.log('\n======================================================');
                 console.log(`📱 YOUR WHATSAPP PAIRING CODE: ${code}`);
                 console.log('------------------------------------------------------');
@@ -285,27 +313,12 @@ export class WhatsAppClient {
                 console.log('3. Tap "Link with phone number instead"');
                 console.log(`4. Enter code: ${code}`);
                 console.log('======================================================\n');
-                break;
               } catch (err: any) {
-                console.error(`[WhatsAppClient] Error requesting pairing code (attempt ${retries}):`, err.message);
-                if (retries < maxRetries) {
-                  await new Promise((resolve) => setTimeout(resolve, 3000));
-                } else {
-                  this.pairingRequested = false;
-                }
+                console.error(`[WhatsAppClient] Error requesting pairing code:`, err.message);
+                this.pairingRequested = false;
               }
-            }
+            }, 1200);
           }
-        }, 3000);
-      }
-
-      // Connection lifecycle management
-      this.sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        if (qr && config.bot.pairingMethod === 'qr') {
-          console.log('\n📱 SCAN THE QR CODE BELOW TO CONNECT WHATSAPP:');
-          qrcode.generate(qr, { small: true });
         }
 
         if (connection === 'close') {
