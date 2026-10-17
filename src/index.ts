@@ -110,6 +110,7 @@ function startHealthServer() {
   healthServer = http.createServer(async (req, res) => {
     if (req.url && (req.url.startsWith('/qr') || req.url.startsWith('/pair'))) {
       const qr = whatsAppClient.getLatestQr();
+      const pairingCode = whatsAppClient.getLatestPairingCode();
       const registered = whatsAppClient.isRegistered();
 
       if (req.url.includes('json=1')) {
@@ -118,6 +119,7 @@ function startHealthServer() {
           JSON.stringify({
             status: registered ? 'already_connected' : 'awaiting_qr_scan',
             pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2349014896714'}`,
+            pairingCode,
             qr,
           })
         );
@@ -129,14 +131,15 @@ function startHealthServer() {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>${config.bot.name} • WhatsApp QR Pairing</title>
+  <title>${config.bot.name} • WhatsApp Pairing & QR</title>
   <style>
     body { font-family: system-ui, -apple-system, sans-serif; background: #0b141a; color: #e9edef; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; text-align: center; }
-    .card { background: #111b21; border: 1px solid #222e35; border-radius: 16px; padding: 32px; max-width: 420px; width: 100%; box-shadow: 0 12px 32px rgba(0,0,0,0.45); }
+    .card { background: #111b21; border: 1px solid #222e35; border-radius: 16px; padding: 32px; max-width: 440px; width: 100%; box-shadow: 0 12px 32px rgba(0,0,0,0.45); }
     h1 { font-size: 20px; margin: 0 0 8px; color: #00a884; }
-    p { font-size: 14px; color: #8696a0; margin: 6px 0 20px; line-height: 1.5; }
+    p { font-size: 14px; color: #8696a0; margin: 6px 0 18px; line-height: 1.5; }
     .qr-box { background: #ffffff; padding: 16px; border-radius: 12px; display: inline-block; min-width: 280px; min-height: 280px; }
     .qr-box img { width: 280px; height: 280px; display: block; }
+    .code-box { margin-top: 16px; padding: 12px 18px; background: #1f2c34; border: 1px solid #00a884; border-radius: 10px; font-size: 22px; font-weight: 800; letter-spacing: 3px; color: #00a884; }
     .badge { display: inline-block; padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; margin-top: 18px; background: #1f2c34; color: #00a884; }
     .steps { text-align: left; font-size: 13px; color: #d1d7db; margin-top: 20px; background: #1f2c34; padding: 14px 18px; border-radius: 10px; line-height: 1.7; }
   </style>
@@ -144,7 +147,7 @@ function startHealthServer() {
 <body>
   <div class="card">
     <h1>${config.bot.name}</h1>
-    <p>Scan with WhatsApp (+${config.bot.pairingPhoneNumber || '2349014896714'}) to link instantly</p>
+    <p>Link WhatsApp (+${config.bot.pairingPhoneNumber || '2349014896714'}) via QR Scan or Pairing Code</p>
     <div id="qr-container" class="qr-box">
       ${
         registered
@@ -154,11 +157,14 @@ function startHealthServer() {
           : '<div style="color:#111b21;padding:110px 20px;font-weight:600;">Generating fresh QR code...</div>'
       }
     </div>
-    <div><span id="status-badge" class="badge">${registered ? '🟢 Connected' : '⏳ Waiting for QR Scan (Auto-refreshes live)'}</span></div>
+    <div id="code-container" class="code-box" style="${registered || !pairingCode ? 'display:none;' : ''}">
+      CODE: <span id="pair-code-text">${pairingCode || 'ADEM1234'}</span>
+    </div>
+    <div><span id="status-badge" class="badge">${registered ? '🟢 Connected' : '⏳ Waiting for Link (Auto-refreshes live)'}</span></div>
     <div class="steps">
       1. Open <b>WhatsApp</b> on your phone (<b>09014896714</b>)<br/>
-      2. Tap <b>Settings (or ⋮) &rarr; Linked Devices</b><br/>
-      3. Tap <b>Link a Device</b> and point your camera at this QR code
+      2. Tap <b>Settings (or ⋮) &rarr; Linked Devices &rarr; Link a Device</b><br/>
+      3. Scan the QR code above OR tap <b>"Link with phone number instead"</b> and enter the code shown above.
     </div>
   </div>
   <script>
@@ -169,10 +175,17 @@ function startHealthServer() {
         const data = await res.json();
         const container = document.getElementById('qr-container');
         const badge = document.getElementById('status-badge');
+        const codeBox = document.getElementById('code-container');
+        const codeText = document.getElementById('pair-code-text');
         if (data.whatsappRegistered) {
           container.innerHTML = '<div style="color:#00a884;padding:90px 20px;font-weight:700;font-size:18px;">✅ WhatsApp Connected & Active!</div>';
           badge.textContent = '🟢 Connected & Registered';
+          if (codeBox) codeBox.style.display = 'none';
           return;
+        }
+        if (data.pairingCode && codeBox && codeText) {
+          codeBox.style.display = 'block';
+          codeText.textContent = data.pairingCode;
         }
         if (data.qr && data.qr !== lastQr) {
           lastQr = data.qr;
@@ -225,16 +238,14 @@ function startHealthServer() {
   healthServer.listen(port, '0.0.0.0', () => {
     console.log(`🌐 [HealthServer] Production health endpoint listening on http://0.0.0.0:${port}/health`);
   });
-  healthServer.unref();
 
-  // Render Free Tier anti-sleep self-pinger (every 10 minutes)
-  if (process.env.RENDER_EXTERNAL_URL) {
-    const keepAliveUrl = `${process.env.RENDER_EXTERNAL_URL.replace(/\/$/, '')}/health`;
-    const renderPingTimer = setInterval(() => {
-      fetch(keepAliveUrl, { signal: AbortSignal.timeout(8_000) }).catch(() => {});
-    }, 10 * 60 * 1000);
-    renderPingTimer.unref();
-  }
+  // Render Free Tier anti-sleep self-pinger (every 5 minutes)
+  const renderUrl = process.env.RENDER_EXTERNAL_URL || 'https://forgelabs-whatsapp-bot.onrender.com';
+  const keepAliveUrl = `${renderUrl.replace(/\/$/, '')}/health`;
+  const renderPingTimer = setInterval(() => {
+    fetch(keepAliveUrl, { signal: AbortSignal.timeout(8_000) }).catch(() => {});
+  }, 5 * 60 * 1000);
+  renderPingTimer.unref();
 }
 
 const cleanupLock = () => {

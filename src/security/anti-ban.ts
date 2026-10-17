@@ -49,32 +49,32 @@ export class AntiBanEngine {
   // Rate limiting & cooldown tracking
   private lastDispatchTimes: Map<string, number> = new Map(); // chatJid -> timestamp
   private recentGlobalDispatches: number[] = []; // timestamps of recent dispatches within 60s
-  private readonly maxGlobalPerMinute = 30; // Max 30 messages/min across all chats
-  private readonly minPerChatCooldownMs = 800; // Snappy 0.8s between consecutive messages to the same chat
-  private readonly minGlobalGapMs = 500; // Minimum 0.5s gap between any two outbound messages
+  private readonly maxGlobalPerMinute = 35; // Max 35 messages/min across all chats
+  private readonly minPerChatCooldownMs = 250; // Snappy 0.25s between consecutive messages to the same chat
+  private readonly minGlobalGapMs = 150; // Minimum 0.15s gap between any two outbound messages
 
   /**
-   * Calculates a realistic human reading delay based on incoming message length.
-   * Snappy 100ms-180ms processing window to hit the 2.0s total response target.
+   * Calculates a snappy reading delay based on incoming message length.
+   * Ultra-responsive 20ms-50ms processing window.
    */
   public calculateReadingDelay(incomingTextLength: number = 0): number {
-    if (isLivetestRunner()) return 20;
+    if (isLivetestRunner()) return 10;
 
-    const baseMs = 100;
-    const jitter = Math.floor(Math.random() * 80);
+    const baseMs = 20;
+    const jitter = Math.floor(Math.random() * 30);
     return baseMs + jitter;
   }
 
   /**
-   * Calculates typing presence delay to achieve a crisp 2.0s total response time.
-   * Keeps "typing..." active for 700ms-1000ms so WhatsApp displays authentic human presence
-   * while the message arrives within 2 seconds.
+   * Calculates typing presence delay for a fast, crisp response time.
+   * Keeps "typing..." active for 150ms-280ms so WhatsApp displays presence
+   * while delivering replies almost instantaneously.
    */
   public calculateTypingDelay(responseTextLength: number = 0): number {
-    if (isLivetestRunner()) return 50;
+    if (isLivetestRunner()) return 20;
 
-    const baseMs = 700;
-    const jitter = Math.floor(Math.random() * 300);
+    const baseMs = 150;
+    const jitter = Math.floor(Math.random() * 130);
     return baseMs + jitter;
   }
 

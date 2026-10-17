@@ -246,12 +246,49 @@ export class LLMClient {
           const res = await client.chat.completions.create(buildPayload(modelName));
           const choice = res.choices[0];
           if (choice?.message) {
-            if (!choice.message.content && (choice.message as any).reasoning) {
+            if (
+              !choice.message.content &&
+              (!choice.message.tool_calls || choice.message.tool_calls.length === 0) &&
+              (choice.message as any).reasoning
+            ) {
               choice.message.content = (choice.message as any).reasoning;
             }
           }
           return res as unknown as LLMChatResponse;
         } catch (err: any) {
+          const failedGen =
+            err?.error?.failed_generation ||
+            err?.error?.error?.failed_generation ||
+            (typeof err?.message === 'string' && err.message.includes('failed_generation')
+              ? (() => {
+                  try {
+                    const jsonStart = err.message.indexOf('{');
+                    if (jsonStart >= 0) {
+                      const parsed = JSON.parse(err.message.slice(jsonStart));
+                      return parsed?.error?.failed_generation || parsed?.failed_generation;
+                    }
+                  } catch {}
+                  return null;
+                })()
+              : null);
+
+          if (failedGen && typeof failedGen === 'string') {
+            console.log(
+              `[LLMClient] 🛠️ Recovered inline tool generation from ${modelName}: ${failedGen.slice(0, 120)}`
+            );
+            return {
+              choices: [
+                {
+                  message: {
+                    role: 'assistant',
+                    content: failedGen,
+                  },
+                  finish_reason: 'stop',
+                },
+              ],
+            };
+          }
+
           const isRateLimit =
             err?.status === 429 ||
             String(err?.message || err).includes('429') ||

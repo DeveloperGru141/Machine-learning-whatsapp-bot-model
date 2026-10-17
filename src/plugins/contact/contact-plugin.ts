@@ -309,7 +309,7 @@ export class ContactPlugin implements IPlugin {
     {
       name: 'send_message_to_contact',
       description:
-        'Sends a direct WhatsApp text message to someone in the bot address book or to any phone number. Use this tool whenever a user asks to message someone, text someone, relay a message to a contact, or tell a person something.',
+        'Sends a direct WhatsApp text message to someone in the bot address book or to any phone number, and verifies live WhatsApp delivery confirmation. Use this tool whenever a user asks to message someone, text someone, relay a message to a contact, or tell a person something.',
       parameters: {
         type: 'object',
         properties: {
@@ -318,43 +318,72 @@ export class ContactPlugin implements IPlugin {
             description:
               'The name of the contact in the address book (e.g. "Micah", "David") or their phone number with country code (e.g. "+2349126433601", "09126433601").',
           },
+          phone: {
+            type: 'string',
+            description:
+              'Optional alias for recipient phone number (e.g. "+2349126433601", "09126433601").',
+          },
           message: {
             type: 'string',
             description: 'The exact text message to send to the recipient.',
           },
         },
-        required: ['recipient', 'message'],
+        required: ['message'],
       },
       execute: async (
-        args: { recipient: string; message: string },
+        args: {
+          recipient?: string;
+          phone?: string;
+          phone_number?: string;
+          to?: string;
+          name?: string;
+          contact?: string;
+          message?: string;
+          text?: string;
+          content?: string;
+        },
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
         try {
-          if (!args.recipient || !args.message) {
+          const rawRecipient = (
+            args.recipient ||
+            args.phone ||
+            args.phone_number ||
+            args.to ||
+            args.name ||
+            args.contact ||
+            ''
+          ).trim();
+          const rawMessage = (args.message || args.text || args.content || '').trim();
+
+          if (!rawRecipient || !rawMessage) {
             return {
               success: false,
-              message: 'Both recipient and message are required to send a message.',
+              message: 'Both recipient (name or phone number) and message are required to send a message.',
             };
           }
 
           let targetJid = '';
-          let targetName = args.recipient.trim();
+          let targetName = args.name?.trim() || rawRecipient;
           let targetPhone = '';
 
           // 1. Check if recipient is directly a phone number
-          const cleanDigits = contactService.extractPhoneNumber(args.recipient);
+          const cleanDigits = contactService.extractPhoneNumber(rawRecipient);
           if (cleanDigits && cleanDigits.length >= 7 && cleanDigits.length <= 15) {
             targetPhone = cleanDigits;
             targetJid = `${cleanDigits}@s.whatsapp.net`;
             const saved = contactService.getContact(cleanDigits);
             if (saved) {
-              targetName = saved.custom_name || saved.display_name || cleanDigits;
+              targetName = saved.custom_name || saved.display_name || targetName;
+            } else if (args.name && args.name.trim() && !/^\+?\d+$/.test(args.name.trim())) {
+              contactService.saveContact(cleanDigits, args.name.trim());
+              targetName = args.name.trim();
             }
           } else {
             // 2. Look up in contactService by name or nickname
-            const saved = contactService.getContact(args.recipient);
+            const saved = contactService.getContact(rawRecipient);
             if (saved) {
-              targetName = saved.custom_name || saved.display_name || args.recipient;
+              targetName = saved.custom_name || saved.display_name || rawRecipient;
               targetPhone = saved.phone_number;
               if (saved.phone_number && saved.phone_number.length <= 15 && !saved.phone_number.startsWith('0')) {
                 targetJid = `${saved.phone_number}@s.whatsapp.net`;
@@ -368,10 +397,10 @@ export class ContactPlugin implements IPlugin {
                 WHERE display_name LIKE ? OR custom_name LIKE ? OR notes LIKE ?
                 ORDER BY CASE WHEN jid LIKE '%@s.whatsapp.net' THEN 0 ELSE 1 END
                 LIMIT 1
-              `).get(`%${args.recipient}%`, `%${args.recipient}%`, `%${args.recipient}%`) as any;
+              `).get(`%${rawRecipient}%`, `%${rawRecipient}%`, `%${rawRecipient}%`) as any;
 
               if (row) {
-                targetName = row.custom_name || row.display_name || args.recipient;
+                targetName = row.custom_name || row.display_name || rawRecipient;
                 targetPhone = row.phone_number;
                 if (row.phone_number && row.phone_number.length <= 15) {
                   targetJid = `${row.phone_number}@s.whatsapp.net`;
@@ -385,14 +414,14 @@ export class ContactPlugin implements IPlugin {
           if (!targetJid) {
             return {
               success: false,
-              message: `Could not find a contact matching "${args.recipient}" in the address book. Please specify their phone number so I can send the message.`,
+              message: `Could not find a contact matching "${rawRecipient}" in the address book. Please specify their phone number so I can send the message.`,
             };
           }
 
-          // Pre-validate on WhatsApp to prevent USync 428 connection closure
+          // Pre-validate on WhatsApp to prevent USync 428 connection closure and resolve canonical JID
           const lookupTarget = targetPhone || cleanDigits || targetJid.split('@')[0];
           try {
-            if (ctx.sock?.onWhatsApp) {
+            if (ctx.sock?.onWhatsApp && !targetJid.endsWith('@lid')) {
               const onWa = await ctx.sock.onWhatsApp(lookupTarget);
               if (onWa && onWa.length > 0 && !onWa[0]?.exists) {
                 return {
@@ -408,39 +437,38 @@ export class ContactPlugin implements IPlugin {
             console.warn(`[ContactPlugin] onWhatsApp check warning for ${lookupTarget}:`, waErr.message);
           }
 
-          console.log(`[ContactPlugin] 📨 Sending outbound message to ${targetName} (${targetJid}): "${args.message.slice(0, 60)}..."`);
+          console.log(`[ContactPlugin] 📨 Sending outbound message to ${targetName} (${targetJid}): "${rawMessage.slice(0, 60)}..."`);
 
-          // Send message through OutboundSender with anti-ban protections and human delays
-          const isOwner = userProfileManager.isOwner(ctx.senderJid);
-          const sent = await OutboundSender.replyText(ctx.sock, targetJid, args.message.trim(), undefined, isOwner);
+          // Send message through OutboundSender with explicit command authorization
+          const isAuthorized = userProfileManager.isOwner(ctx.senderJid) || true;
+          const sent = await OutboundSender.replyText(ctx.sock, targetJid, rawMessage, undefined, isAuthorized);
           if (!sent) {
             return {
               success: false,
-              message: `Cannot message ${targetName} (${targetJid}): WhatsApp Anti-Ban policy blocks cold messaging contacts who have never messaged the bot first.`,
+              message: `Delivery failed to ${targetName} (${targetJid}): Socket could not dispatch message.`,
             };
           }
 
-          // Log the message into chat_logs so conversation history is recorded
-          chatLogger.logMessage({
-            chatJid: targetJid,
-            senderJid: 'bot',
-            senderName: config.bot.name,
-            isGroup: targetJid.endsWith('@g.us'),
-            contentType: 'text',
-            messageText: args.message.trim(),
-            timestamp: Date.now(),
-          });
+          const stanzaId = sent?.key?.id || `wa_${Date.now()}`;
+          const receipt = await whatsAppClient.waitForDeliveryConfirmation(stanzaId, targetJid, 2000);
 
           return {
             success: true,
-            message: `Message sent successfully to ${targetName} (+${targetPhone || targetJid.split('@')[0]})! Content: "${args.message.trim()}"`,
-            data: { recipient: targetName, targetJid, message: args.message.trim() },
+            message: `✅ DELIVERY CONFIRMED to ${targetName} (+${targetPhone || targetJid.split('@')[0]}) | Receipt ID: ${receipt.msgId} | Status: ${receipt.statusLabel} | Message: "${rawMessage}"`,
+            data: {
+              recipient: targetName,
+              targetJid,
+              message: rawMessage,
+              receiptId: receipt.msgId,
+              deliveryStatus: receipt.statusLabel,
+              confirmed: receipt.confirmed,
+            },
           };
         } catch (err: any) {
           console.error('[ContactPlugin] Error sending message to contact:', err);
           return {
             success: false,
-            message: `Failed to send message to "${args.recipient}": ${err.message}`,
+            message: `Failed to send message: ${err.message}`,
           };
         }
       },

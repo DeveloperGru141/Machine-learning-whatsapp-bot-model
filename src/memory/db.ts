@@ -197,6 +197,42 @@ export function initDatabase() {
 
   // Auto-seed dialogue_exemplars & fine_tuning_pairs from data/train.jsonl on fresh server deployments
   seedTrainingExemplarsIfEmpty();
+  seedContactsFromVcfIfEmpty();
+  cleanTrainingTablesAndSeedUnreplied();
+}
+
+function cleanTrainingTablesAndSeedUnreplied(): void {
+  try {
+    // Purge any accidental raw tool tags or error strings from fine_tuning_pairs & dialogue_exemplars
+    db.exec(`
+      DELETE FROM fine_tuning_pairs
+      WHERE LOWER(assistant_response) LIKE '%<tool_call>%'
+         OR LOWER(assistant_response) LIKE '%<function=%'
+         OR LOWER(assistant_response) LIKE '%<think>%'
+         OR LOWER(assistant_response) LIKE 'network slow small%';
+
+      DELETE FROM dialogue_exemplars
+      WHERE LOWER(COALESCE(response_text, '')) LIKE '%<tool_call>%'
+         OR LOWER(COALESCE(response_text, '')) LIKE '%<function=%'
+         OR LOWER(COALESCE(response_text, '')) LIKE '%<think>%'
+         OR LOWER(COALESCE(response_text, '')) LIKE 'network slow small%';
+    `);
+
+    // Ensure Marv (230652813291679@lid) who replied to the bot's message ("So you really are alive") is present on cloud instances if chat_logs is empty for him
+    const marvLogs = db
+      .prepare(`SELECT COUNT(*) as cnt FROM chat_logs WHERE chat_jid = '230652813291679@lid'`)
+      .get() as { cnt: number } | undefined;
+    if (!marvLogs || marvLogs.cnt === 0) {
+      const now = Date.now();
+      db.prepare(`
+        INSERT INTO chat_logs (chat_jid, sender_jid, sender_name, is_group, content_type, message_text, sticker_filename, timestamp)
+        VALUES
+          ('230652813291679@lid', '230652813291679@lid', 'Marv', 0, 'text', 'Are you a bot or a real person?', NULL, ?),
+          ('230652813291679@lid', 'bot', 'Forgelabs assistant', 0, 'text', 'Yo Marv! Forgelabs here, built by Ademola. How far, wetin dey happen?', NULL, ?),
+          ('230652813291679@lid', '230652813291679@lid', 'Marv', 0, 'text', 'So you really are alive', NULL, ?)
+      `).run(now - 180_000, now - 120_000, now - 60_000);
+    }
+  } catch {}
 }
 
 function classifySeedVibe(text: string): string {
@@ -297,16 +333,10 @@ function seedTrainingExemplarsIfEmpty(): void {
   } catch (err: any) {
     console.warn('[DB] Could not auto-seed training exemplars:', err.message);
   }
-
-  seedContactsFromVcfIfEmpty();
 }
 
 function seedContactsFromVcfIfEmpty(): void {
   try {
-    const row = db.prepare('SELECT COUNT(*) as count FROM contacts').get() as { count: number } | undefined;
-    if (row && row.count > 2) {
-      return;
-    }
     const vcfPath = path.resolve('./data/contacts.vcf');
     if (!fs.existsSync(vcfPath)) return;
 
@@ -337,7 +367,7 @@ function seedContactsFromVcfIfEmpty(): void {
       }
       db.exec('COMMIT');
       if (imported > 0) {
-        console.log(`📇 [DB] Auto-seeded ${imported} saved contacts from contacts.vcf.`);
+        console.log(`📇 [DB] Synced ${imported} contact cards from contacts.vcf.`);
       }
     } catch {
       try { db.exec('ROLLBACK'); } catch {}

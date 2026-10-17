@@ -82,9 +82,9 @@ export class PluginRegistry {
   }
 
   /**
-   * Smart Tool Router: Selects only the 1-4 tools relevant to the active message intent.
+   * Smart Tool Router: Selects only the 1-5 tools relevant to the active message intent.
    * Passing 25+ tool definitions to LLMs causes 30s+ grammar evaluation latency.
-   * Passing 0-3 tools reduces inference time to 600ms-1200ms.
+   * Passing 0-5 tools reduces inference time to 400ms-900ms while ensuring tools are never missed.
    */
   public getRelevantToolDefinitions(userMessage: string, isGroup?: boolean): any[] {
     const text = (userMessage || '').toLowerCase();
@@ -94,14 +94,27 @@ export class PluginRegistry {
     if (
       text.includes('health') ||
       text.includes('uptime') ||
-      text.includes('status') ||
       text.includes('diagnostics') ||
-      text.includes('brief me')
+      text.includes('brief me') ||
+      text.includes('analytics') ||
+      text.includes('stats')
     ) {
       selected.add('get_bot_health_status');
+      selected.add('get_bot_analytics');
     }
 
-    // 2. Web Search & Live Info
+    // 2. WhatsApp Status Posting & Morning Status Broadcast
+    if (
+      text.includes('status') ||
+      text.includes('post') ||
+      text.includes('story') ||
+      text.includes('meme')
+    ) {
+      selected.add('post_whatsapp_status');
+      selected.add('configure_morning_status_broadcast');
+    }
+
+    // 3. Web Search & Live Info
     if (
       text.includes('search') ||
       text.includes('google') ||
@@ -112,30 +125,67 @@ export class PluginRegistry {
       text.includes('score') ||
       text.includes('match') ||
       text.includes('news') ||
-      text.includes('latest')
+      text.includes('latest') ||
+      text.includes('current') ||
+      text.includes('update on')
     ) {
       selected.add('web_search');
     }
 
-    // 3. Contact Management & Direct Messaging
+    // 4. Contact Management, Direct Messaging & Unreplied Catch-Up
+    const hasPhoneNumber = /\+?\d[\d\s-]{7,}\d/.test(text);
     if (
+      hasPhoneNumber ||
       text.includes('message') ||
+      text.includes('msg') ||
       text.includes('text') ||
       text.includes('dm') ||
       text.includes('tell') ||
-      text.includes('send to') ||
+      text.includes('send') ||
+      text.includes('sent') ||
+      text.includes('deliver') ||
+      text.includes('reach out') ||
+      text.includes('say hi') ||
+      text.includes('greet') ||
       text.includes('contact') ||
       text.includes('save') ||
-      text.includes('phone')
+      text.includes('phone') ||
+      text.includes('number') ||
+      text.includes('no ') ||
+      text.endsWith(' no') ||
+      text.includes("s no") ||
+      text.includes('micah') ||
+      text.includes('vcard') ||
+      text.includes('vcf')
     ) {
       selected.add('send_message_to_contact');
       selected.add('save_contact');
-      selected.add('search_contacts');
+      selected.add('get_contact');
+      selected.add('list_contacts');
+      if (text.includes('card') || text.includes('share') || text.includes('vcf')) {
+        selected.add('send_contact_card');
+        selected.add('export_contacts_vcf');
+      }
     }
 
-    // 4. Reminders & Daily Scheduled Broadcasts
+    // 5. Unreplied DMs Catch-Up
+    if (
+      text.includes('unreplied') ||
+      text.includes('unread') ||
+      text.includes('catch up') ||
+      text.includes('missed') ||
+      text.includes('replied to') ||
+      text.includes('reply to')
+    ) {
+      selected.add('reply_unreplied_messages');
+      selected.add('send_message_to_contact');
+    }
+
+    // 6. Reminders & Daily Scheduled Broadcasts
     if (
       text.includes('remind') ||
+      text.includes('alarm') ||
+      text.includes('timer') ||
       text.includes('schedule') ||
       text.includes('quote') ||
       text.includes('verse') ||
@@ -143,26 +193,28 @@ export class PluginRegistry {
       text.includes('daily') ||
       text.includes('morning')
     ) {
-      selected.add('schedule_reminder');
+      selected.add('set_reminder');
       selected.add('schedule_daily_broadcast');
       selected.add('list_scheduled_broadcasts');
       selected.add('cancel_scheduled_broadcast');
     }
 
-    // 5. Image Generation
+    // 7. Image Generation
     if (
       text.includes('image') ||
       text.includes('generate') ||
       text.includes('picture') ||
       text.includes('photo') ||
-      text.includes('draw')
+      text.includes('draw') ||
+      text.includes('art')
     ) {
       selected.add('generate_image');
     }
 
-    // 6. Voice Notes
+    // 8. Voice Notes
     if (
       text.includes('voice note') ||
+      text.includes('voicenote') ||
       text.includes('voice') ||
       text.includes('vn') ||
       text.includes('audio') ||
@@ -171,7 +223,7 @@ export class PluginRegistry {
       selected.add('send_voice_note');
     }
 
-    // 7. Video/Audio Downloaders & Link Summaries
+    // 9. Video/Audio Downloaders, Link Summaries, & Document Reading
     if (
       text.includes('http') ||
       text.includes('link') ||
@@ -191,14 +243,30 @@ export class PluginRegistry {
       selected.add('summarize_link');
     }
 
-    // 8. Group Administration (Only in groups)
+    if (text.includes('document') || text.includes('pdf') || text.includes('file') || text.includes('docx')) {
+      selected.add('read_document');
+    }
+
+    // 10. Admin Privileges & Group Administration
+    if (
+      text.includes('admin') ||
+      text.includes('privilege') ||
+      text.includes('grant') ||
+      text.includes('revoke')
+    ) {
+      selected.add('grant_admin_privilege');
+      selected.add('revoke_admin_privilege');
+      selected.add('list_admin_privileges');
+    }
+
     if (isGroup) {
       if (
         text.includes('tag all') ||
         text.includes('everyone') ||
         text.includes('kick') ||
         text.includes('remove') ||
-        text.includes('group mode')
+        text.includes('group mode') ||
+        text.includes('mute')
       ) {
         selected.add('tag_all');
         selected.add('kick_member');
@@ -220,15 +288,29 @@ export class PluginRegistry {
   }
 
   public async executeTool(name: string, args: any, context: ExecutionContext): Promise<ToolResult> {
-    const tool = this.tools.get(name);
+    const aliasMap: Record<string, string> = {
+      send_message: 'send_message_to_contact',
+      message_contact: 'send_message_to_contact',
+      send_dm: 'send_message_to_contact',
+      text_contact: 'send_message_to_contact',
+      search_contacts: 'get_contact',
+      find_contact: 'get_contact',
+      lookup_contact: 'get_contact',
+      schedule_reminder: 'set_reminder',
+      post_status: 'post_whatsapp_status',
+      reply_unreplied: 'reply_unreplied_messages',
+    };
+
+    const resolvedName = aliasMap[name] || name;
+    const tool = this.tools.get(resolvedName);
     if (!tool) {
       return { success: false, message: `Tool "${name}" is not registered.` };
     }
 
     try {
-      return await tool.execute(args, context);
+      return await tool.execute(args || {}, context);
     } catch (err: any) {
-      console.error(`[PluginRegistry] Error executing tool "${name}":`, err);
+      console.error(`[PluginRegistry] Error executing tool "${resolvedName}":`, err);
       return { success: false, message: `Execution failed: ${err.message}` };
     }
   }

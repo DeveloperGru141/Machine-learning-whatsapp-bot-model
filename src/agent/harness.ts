@@ -10,6 +10,150 @@ import { chatLogger } from '../memory/chat-logger.js';
 const EMOJI_SEQUENCE_REGEX =
   /(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0F|\p{Emoji_Modifier})?)*/gu;
 
+export interface ParsedToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+/**
+ * Extracts inline <tool_call>...</tool_call>, <function=name>{...}</function>, or raw JSON tool calls
+ * emitted in message.content by Qwen / DeepSeek / Llama models, converting them into standard tool_calls.
+ */
+export function extractInlineToolCalls(rawContent: string): {
+  toolCalls: ParsedToolCall[];
+  cleanedContent: string;
+} {
+  if (!rawContent || typeof rawContent !== 'string') {
+    return { toolCalls: [], cleanedContent: '' };
+  }
+
+  const toolCalls: ParsedToolCall[] = [];
+  let working = rawContent.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+  const normalizeParsedJsonTool = (parsed: any): void => {
+    if (!parsed || typeof parsed !== 'object') return;
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) normalizeParsedJsonTool(item);
+      return;
+    }
+
+    const fnName =
+      typeof parsed.name === 'string'
+        ? parsed.name
+        : typeof parsed.function === 'string'
+          ? parsed.function
+          : typeof parsed.tool === 'string'
+            ? parsed.tool
+            : typeof parsed.function?.name === 'string'
+              ? parsed.function.name
+              : null;
+
+    if (!fnName) return;
+
+    let rawArgs =
+      parsed.arguments ??
+      parsed.args ??
+      parsed.parameters ??
+      parsed.params ??
+      parsed.function?.arguments ??
+      undefined;
+
+    if (rawArgs === undefined) {
+      const rest: Record<string, any> = { ...parsed };
+      delete rest.name;
+      delete rest.function;
+      delete rest.tool;
+      rawArgs = rest;
+    }
+
+    let argsString = '{}';
+    if (typeof rawArgs === 'string') {
+      argsString = rawArgs.trim() || '{}';
+    } else {
+      try {
+        argsString = JSON.stringify(rawArgs || {});
+      } catch {
+        argsString = '{}';
+      }
+    }
+
+    toolCalls.push({
+      id: `inline_call_${Date.now()}_${toolCalls.length}`,
+      type: 'function',
+      function: {
+        name: fnName.trim(),
+        arguments: argsString,
+      },
+    });
+  };
+
+  // 1. Match <tool_call>...</tool_call> (and unclosed <tool_call>... at end of message)
+  const toolCallTagRegex = /<tool_call>\s*([\s\S]*?)(?:<\/tool_call>|$)/gi;
+  working = working.replace(toolCallTagRegex, (_fullMatch, inner: string) => {
+    const trimmedInner = (inner || '').trim();
+    if (!trimmedInner) return '';
+    try {
+      const parsed = JSON.parse(trimmedInner);
+      normalizeParsedJsonTool(parsed);
+    } catch {
+      const firstBrace = trimmedInner.indexOf('{');
+      const lastBrace = trimmedInner.lastIndexOf('}');
+      if (firstBrace >= 0 && lastBrace > firstBrace) {
+        try {
+          const parsed = JSON.parse(trimmedInner.slice(firstBrace, lastBrace + 1));
+          normalizeParsedJsonTool(parsed);
+        } catch {}
+      }
+    }
+    return '';
+  });
+
+  // 2. Match <function=tool_name>{...}</function> or <function=tool_name({...})></function>
+  const fnTagRegex = /<function=([a-zA-Z0-9_]+)\s*>?\s*([\s\S]*?)(?:<\/function>|$)/gi;
+  working = working.replace(fnTagRegex, (_fullMatch, fnName: string, inner: string) => {
+    const cleanedInner = (inner || '').trim().replace(/^\(/, '').replace(/\)$/, '');
+    let argsObj: any = {};
+    if (cleanedInner) {
+      try {
+        argsObj = JSON.parse(cleanedInner);
+      } catch {
+        const firstBrace = cleanedInner.indexOf('{');
+        const lastBrace = cleanedInner.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+          try {
+            argsObj = JSON.parse(cleanedInner.slice(firstBrace, lastBrace + 1));
+          } catch {}
+        }
+      }
+    }
+    normalizeParsedJsonTool({ name: fnName, arguments: argsObj });
+    return '';
+  });
+
+  // 3. Match standalone JSON object containing {"function": "...", "arguments": {...}} if no tags were used
+  if (toolCalls.length === 0 && (working.includes('"function"') || working.includes('"tool_call"'))) {
+    const standaloneJsonRegex = /\{\s*"(?:function|name)"\s*:\s*"([a-zA-Z0-9_]+)"\s*,\s*"(?:arguments|args|parameters)"\s*:\s*(\{[\s\S]*?\})\s*\}/g;
+    working = working.replace(standaloneJsonRegex, (fullMatch) => {
+      try {
+        const parsed = JSON.parse(fullMatch);
+        normalizeParsedJsonTool(parsed);
+        return '';
+      } catch {
+        return fullMatch;
+      }
+    });
+  }
+
+  return {
+    toolCalls,
+    cleanedContent: working.trim(),
+  };
+}
+
 export class AgentHarness {
   /**
    * Conversational turns run through the active pinned model (DeepSeek V3 on OpenRouter or Qwen 3.8 on Groq)
@@ -50,7 +194,8 @@ export class AgentHarness {
     console.log(`[AgentHarness] Managed context built with ~${tokenBudgetUsed} estimated tokens.`);
 
     const tools = pluginRegistry.getRelevantToolDefinitions(userMessage, context.isGroup);
-    const executedTools = new Set<string>();
+    const executedToolKeys = new Set<string>();
+    const executedToolNames = new Set<string>();
     const toolOutputs: string[] = [];
     let voiceNoteSentSuccessfully = false;
 
@@ -68,18 +213,33 @@ export class AgentHarness {
 
       const message = choice.message;
 
-      // Check if the model decided to call tools
-      if (message.tool_calls && message.tool_calls.length > 0) {
-        for (const toolCall of message.tool_calls) {
-          const toolName = toolCall.function.name;
-          if (executedTools.has(toolName)) {
+      // Parse inline <tool_call>...</tool_call> or <function=...> from message.content if the model emitted XML/JSON tags
+      if ((!message.tool_calls || message.tool_calls.length === 0) && message.content) {
+        const extracted = extractInlineToolCalls(message.content);
+        if (extracted.toolCalls.length > 0) {
+          console.log(
+            `[AgentHarness] 🔧 Parsed ${extracted.toolCalls.length} inline <tool_call> block(s) from model response.`
+          );
+          message.tool_calls = extracted.toolCalls;
+          message.content = extracted.cleanedContent;
+        }
+      }
+
+      const runToolCallList = async (callsToRun: any[]) => {
+        for (const toolCall of callsToRun) {
+          const toolName = toolCall.function?.name;
+          if (!toolName) continue;
+          const rawArgStr = toolCall.function?.arguments || '{}';
+          const dedupKey = `${toolName}:${rawArgStr}`;
+          if (executedToolKeys.has(dedupKey)) {
             continue;
           }
-          executedTools.add(toolName);
+          executedToolKeys.add(dedupKey);
+          executedToolNames.add(toolName);
 
           let toolArgs: any = {};
           try {
-            toolArgs = JSON.parse(toolCall.function.arguments || '{}');
+            toolArgs = typeof rawArgStr === 'string' ? JSON.parse(rawArgStr) : rawArgStr;
           } catch {
             toolArgs = {};
           }
@@ -106,6 +266,11 @@ export class AgentHarness {
           }
           toolOutputs.push(outputEntry);
         }
+      };
+
+      // Check if the model decided to call tools
+      if (message.tool_calls && message.tool_calls.length > 0) {
+        await runToolCallList(message.tool_calls);
 
         // When send_voice_note succeeded, the OGG Opus voice note is ALREADY sent and logged!
         if (voiceNoteSentSuccessfully) {
@@ -118,11 +283,10 @@ export class AgentHarness {
         }
 
         // Synthesize final natural WhatsApp response from the gathered tool results without re-triggering tool calls.
-        // Reuse the FULL persona prompt (rules + learned dialogue exemplars + memories) so post-tool replies keep the trained voice.
         const synthesisSystem = `${messages[0]?.content || ''}
 
 # Answering With Live Tool Data:
-Combine the live tool data in the user's last message with your own knowledge and answer directly and confidently in 1-3 sentences, in the same voice as the exemplars above. NEVER say "in the search results", "based on the search", or claim you cannot see something in the results. Just answer like a knowledgeable friend texting back.`;
+Combine the live tool data in the user's last message with your own knowledge and answer directly and confidently in 1-3 sentences, in the same voice as the exemplars above. Do NOT output <tool_call> tags. If send_message_to_contact succeeded, explicitly confirm who you messaged and its WhatsApp delivery status (✓ / ✓✓).`;
         const historyContext = messages.slice(1, -1);
         const synthesisRes = await this.callLLM({
           messages: [
@@ -138,19 +302,33 @@ Combine the live tool data in the user's last message with your own knowledge an
         });
 
         const synthMsg = synthesisRes.choices[0]?.message;
-        const rawSynth = synthMsg?.content || '';
-        if (rawSynth && rawSynth.trim()) {
-          const replyText = sanitizeAssistantResponse(rawSynth);
+        let rawSynth = synthMsg?.content || '';
+
+        // If synthesis step emitted a follow-up inline tool call (e.g. save_contact followed by send_message_to_contact), execute it!
+        const followUpInline = extractInlineToolCalls(rawSynth);
+        if (followUpInline.toolCalls.length > 0) {
+          await runToolCallList(followUpInline.toolCalls);
+          rawSynth = followUpInline.cleanedContent;
+        }
+
+        const replyText = sanitizeAssistantResponse(rawSynth);
+        if (replyText && replyText.trim()) {
           console.log(`[AgentHarness] 💬 Bot replied (post-tool) to ${context.senderName}: "${replyText.slice(0, 100)}..."`);
           await context.replyText(replyText);
-          chatLogger.logOutboundMessage(context.chatJid, replyText);
           analyticsEngine.trackEvent('message_sent', { length: replyText.length }, context.chatJid, context.senderJid);
           this.recordFineTuningPair(
             messages[0]?.content || '',
             userMessage,
             replyText,
-            Array.from(executedTools)
+            Array.from(executedToolNames)
           );
+        } else if (toolOutputs.length > 0) {
+          const fallbackConfirm = sanitizeAssistantResponse(
+            toolOutputs[toolOutputs.length - 1].replace(/^\[[^\]]+\]:\s*/, '')
+          );
+          if (fallbackConfirm) {
+            await context.replyText(fallbackConfirm);
+          }
         }
       } else {
         // Direct text reply from the LLM
@@ -158,9 +336,9 @@ Combine the live tool data in the user's last message with your own knowledge an
 
         if (rawContent && rawContent.trim()) {
           const replyText = sanitizeAssistantResponse(rawContent);
+          if (!replyText) return;
           console.log(`[AgentHarness] 💬 Bot replied to ${context.senderName}: "${replyText.slice(0, 100)}..."`);
           await context.replyText(replyText);
-          chatLogger.logOutboundMessage(context.chatJid, replyText);
           analyticsEngine.trackEvent('message_sent', { length: replyText.length }, context.chatJid, context.senderJid);
           this.recordFineTuningPair(
             messages[0]?.content || '',
@@ -188,8 +366,7 @@ Combine the live tool data in the user's last message with your own knowledge an
       // Fail-safe fallback: Answer directly from pre-trained knowledge without tools
       try {
         console.log('[AgentHarness] Attempting fail-safe direct knowledge answer...');
-        // Same pinned model, same persona prompt, just without tools (recovers from malformed tool calls)
-        const fallbackSystem = `${messages[0]?.content || ''}\n\nTools are unavailable for this turn. Deliver a direct, crisp reply from your own knowledge.`;
+        const fallbackSystem = `${messages[0]?.content || ''}\n\nTools are unavailable for this turn. Deliver a direct, crisp reply from your own knowledge without any <tool_call> tags.`;
         const fallbackRes = await this.callLLM({
           messages: [
             { role: 'system', content: fallbackSystem },
@@ -201,16 +378,31 @@ Combine the live tool data in the user's last message with your own knowledge an
 
         const rawFallbackText = fallbackRes.choices[0]?.message?.content;
         if (rawFallbackText) {
-          const fallbackText = sanitizeAssistantResponse(rawFallbackText);
-          console.log(`[AgentHarness] 💬 Bot replied via direct fallback to ${context.senderName}: "${fallbackText.slice(0, 100)}..."`);
-          await context.replyText(fallbackText);
-          chatLogger.logOutboundMessage(context.chatJid, fallbackText);
-          this.recordFineTuningPair(
-            messages[0]?.content || '',
-            userMessage,
-            fallbackText,
-            []
-          );
+          const extracted = extractInlineToolCalls(rawFallbackText);
+          if (extracted.toolCalls.length > 0) {
+            for (const tc of extracted.toolCalls) {
+              try {
+                const args = JSON.parse(tc.function.arguments || '{}');
+                const res = await pluginRegistry.executeTool(tc.function.name, args, context);
+                if (res.message) {
+                  await context.replyText(sanitizeAssistantResponse(res.message));
+                  return;
+                }
+              } catch {}
+            }
+          }
+
+          const fallbackText = sanitizeAssistantResponse(extracted.cleanedContent || rawFallbackText);
+          if (fallbackText) {
+            console.log(`[AgentHarness] 💬 Bot replied via direct fallback to ${context.senderName}: "${fallbackText.slice(0, 100)}..."`);
+            await context.replyText(fallbackText);
+            this.recordFineTuningPair(
+              messages[0]?.content || '',
+              userMessage,
+              fallbackText,
+              []
+            );
+          }
           return;
         }
       } catch (fbErr: any) {
@@ -226,7 +418,7 @@ Combine the live tool data in the user's last message with your own knowledge an
   /**
    * Continuous learning guardrail:
    * Only persists high-quality, authentic interactions into the fine-tuning database.
-   * Discards error messages, robotic clichés, and emoji spam.
+   * Discards error messages, raw tool call markup, robotic clichés, and emoji spam.
    */
   private recordFineTuningPair(
     systemPrompt: string,
@@ -239,9 +431,15 @@ Combine the live tool data in the user's last message with your own knowledge an
       // Guardrail 1: Minimum length requirement
       if (trimmed.length < 5) return;
 
-      // Guardrail 2: Block error strings, robotic clichés, generic fallbacks, or outdated names
+      // Guardrail 2: Block error strings, raw tool tags, robotic clichés, generic fallbacks, or outdated names
       const lower = trimmed.toLowerCase();
       if (
+        lower.includes('<tool_call>') ||
+        lower.includes('</tool_call>') ||
+        lower.includes('<function=') ||
+        lower.includes('<think>') ||
+        lower.includes('</think>') ||
+        lower.includes('"arguments":') ||
         lower.includes('network slow') ||
         lower.includes('abeg try again') ||
         lower.includes('as an ai') ||
@@ -294,12 +492,19 @@ Combine the live tool data in the user's last message with your own knowledge an
 
 /**
  * Normalizes outbound assistant replies to enforce:
- * 1. Strict max 0-1 emoji policy (strips subsequent emojis including ZWJ/modifiers)
- * 2. Ban robotic AI clichés at beginning/end of messages
+ * 1. Zero raw <tool_call>, <function=...>, or <think> tags leaked to WhatsApp
+ * 2. Strict max 0-1 emoji policy (strips subsequent emojis including ZWJ/modifiers)
+ * 3. Ban robotic AI clichés at beginning/end of messages
  */
 export function sanitizeAssistantResponse(text: string): string {
-  if (!text) return text;
-  let cleaned = text.trim();
+  if (!text) return '';
+  let cleaned = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<\/think>/gi, '')
+    .replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/gi, '')
+    .replace(/<\/tool_call>/gi, '')
+    .replace(/<function=[^>]+>[\s\S]*?(?:<\/function>|$)/gi, '')
+    .trim();
 
   // Strip robotic preamble clichés (peel chained preambles like "Sure thing! As an AI, ...")
   const preambleRegex =
@@ -326,7 +531,7 @@ export function sanitizeAssistantResponse(text: string): string {
   // Clean double spaces left after removing emojis/clichés
   cleaned = cleaned.replace(/[ \t]+/g, ' ').replace(/\s+([.,!?:;])/g, '$1').trim();
 
-  return cleaned || text.trim();
+  return cleaned;
 }
 
 export const agentHarness = new AgentHarness();

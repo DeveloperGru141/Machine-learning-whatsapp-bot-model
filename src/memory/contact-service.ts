@@ -125,7 +125,7 @@ export class ContactService {
     }
     const parts = stripped.split(/\s+/);
     if (/^hardez/i.test(parts[0])) {
-      return 'Hardez';
+      return 'Ademola';
     }
     if (parts.length > 1 && /^(dr|mr|mrs|ms|prof|chief|engr)\.?$/i.test(parts[0])) {
       return `${parts[0]} ${parts[1]}`;
@@ -386,10 +386,17 @@ export class ContactService {
             content_type,
             message_text,
             timestamp,
-            ROW_NUMBER() OVER (PARTITION BY chat_jid ORDER BY id DESC) as rn
+            ROW_NUMBER() OVER (PARTITION BY chat_jid ORDER BY timestamp DESC, id DESC) as rn
           FROM chat_logs
           WHERE is_group = 0
-            AND NOT (sender_jid = 'bot' AND COALESCE(message_text, '') LIKE 'network slow small%')
+            AND NOT (
+              sender_jid = 'bot'
+              AND (
+                COALESCE(message_text, '') LIKE 'network slow small%'
+                OR COALESCE(message_text, '') LIKE '%<tool_call>%'
+                OR COALESCE(message_text, '') LIKE '⚠️%'
+              )
+            )
         )
         SELECT * FROM LastPerChat
         WHERE rn = 1 
@@ -411,6 +418,7 @@ export class ContactService {
       }>;
 
       return rows.map((r) => ({
+        id: r.id,
         chatJid: r.chat_jid,
         senderJid: r.sender_jid,
         senderName: r.sender_name || 'Friend',
@@ -461,6 +469,7 @@ export class ContactService {
 }
 
 export interface UnrepliedChat {
+  id?: number;
   chatJid: string;
   senderJid: string;
   senderName: string;

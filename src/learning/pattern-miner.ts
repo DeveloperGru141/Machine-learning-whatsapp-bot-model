@@ -110,9 +110,14 @@ export class PatternMiner {
     const emojiCount = (trimmedResponse.match(this.emojiRegex) || []).length;
     if (emojiCount > 1) return;
 
-    // Guard against robotic clichés or outdated names
+    // Guard against robotic clichés, raw tool tags, or outdated names
     const lower = trimmedResponse.toLowerCase();
     if (
+      lower.includes('<tool_call>') ||
+      lower.includes('</tool_call>') ||
+      lower.includes('<function=') ||
+      lower.includes('<think>') ||
+      lower.includes('network slow') ||
       lower.includes('as an ai') ||
       lower.includes('how can i help') ||
       lower.includes('i am an ai') ||

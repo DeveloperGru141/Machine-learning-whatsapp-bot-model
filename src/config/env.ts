@@ -54,17 +54,19 @@ export function normalizePhoneNumber(raw: string): string {
   return digits;
 }
 
-const rawOwners = (process.env.BOT_OWNERS || '08108574293,2348108574293,102409552584830@lid')
+const defaultOwners = ['08108574293', '2348108574293', '102409552584830@lid'];
+const envOwners = (process.env.BOT_OWNERS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+const rawOwners = [...defaultOwners, ...envOwners];
 
 const normalizedOwners = Array.from(
   new Set(
     rawOwners.flatMap((o) => {
       const norm = normalizePhoneNumber(o);
       const rawDigits = o.replace(/[^0-9]/g, '');
-      return [norm, rawDigits].filter(Boolean);
+      return [o, norm, rawDigits].filter(Boolean);
     })
   )
 );

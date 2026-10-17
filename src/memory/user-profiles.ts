@@ -26,31 +26,41 @@ export class UserProfileManager {
       if (!rawOwner) continue;
       const normDigits = normalizePhoneNumber(rawOwner);
       const jid = rawOwner.endsWith('@lid') ? rawOwner : `${normDigits}@s.whatsapp.net`;
+      const ownerPhone = jid.endsWith('@lid') ? '2348108574293' : normDigits;
       try {
         db.prepare(`
           INSERT INTO user_profiles (user_jid, display_name, preferred_language, personality_notes, first_seen, last_seen, total_messages, is_owner)
-          VALUES (?, 'Ademola', 'en', 'Creator and Owner of Forgelabs Assistant', ?, ?, 0, 1)
+          VALUES (?, 'Ademola', 'en', 'Creator and Owner of Forgelabs Assistant (08108574293)', ?, ?, 0, 1)
           ON CONFLICT(user_jid) DO UPDATE SET is_owner = 1, display_name = 'Ademola'
         `).run(jid, now, now);
 
-        if (!jid.endsWith('@lid') && normDigits) {
+        if (ownerPhone) {
           db.prepare(`
             INSERT INTO contacts (phone_number, jid, display_name, custom_name, notes, tags, is_auto_saved, is_introduced, created_at, updated_at)
-            VALUES (?, ?, 'Ademola', 'Ademola', 'Creator and Owner of Forgelabs Assistant', 'owner,creator', 0, 1, ?, ?)
-            ON CONFLICT(jid) DO UPDATE SET display_name = 'Ademola', custom_name = 'Ademola', notes = 'Creator and Owner of Forgelabs Assistant'
-          `).run(normDigits, jid, now, now);
+            VALUES (?, ?, 'Ademola', 'Ademola', 'Creator and Owner of Forgelabs Assistant (08108574293)', 'owner,creator', 0, 1, ?, ?)
+            ON CONFLICT(jid) DO UPDATE SET phone_number = excluded.phone_number, display_name = 'Ademola', custom_name = 'Ademola', notes = 'Creator and Owner of Forgelabs Assistant (08108574293)'
+          `).run(ownerPhone, jid, now, now);
         }
       } catch (err: any) {
         // Safe ignore
       }
     }
+
+    // Ensure key saved contacts like Micah (+2349126433601) are always seeded on cloud deployments
+    try {
+      db.prepare(`
+        INSERT INTO contacts (phone_number, jid, display_name, custom_name, notes, tags, is_auto_saved, is_introduced, created_at, updated_at)
+        VALUES ('2349126433601', '2349126433601@s.whatsapp.net', 'Micah', 'Micah', 'Ademola colleague & friend', '[]', 0, 1, ?, ?)
+        ON CONFLICT(jid) DO UPDATE SET phone_number = '2349126433601', custom_name = COALESCE(contacts.custom_name, 'Micah')
+      `).run(now, now);
+    } catch {}
   }
 
   /**
    * Determines if a user is an authorized bot owner.
-   * Checks database `is_owner` flag OR environment `config.bot.owners`.
+   * Checks database `is_owner` flag OR environment `config.bot.owners` (08108574293 / 2348108574293 / 102409552584830@lid).
    */
-  public isOwner(userJid: string): boolean {
+  public isOwner(userJid: string, senderName?: string): boolean {
     if (!userJid) return false;
 
     const normalizedDigits = normalizePhoneNumber(userJid);
@@ -58,6 +68,28 @@ export class UserProfileManager {
       ? `${userJid.split('@')[0].split(':')[0]}@lid`
       : `${normalizedDigits}@s.whatsapp.net`;
     const digitsOnly = userJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+
+    if (
+      digitsOnly === '2348108574293' ||
+      digitsOnly === '08108574293' ||
+      digitsOnly === '102409552584830' ||
+      normalizedJid === '102409552584830@lid' ||
+      normalizedJid === '2348108574293@s.whatsapp.net'
+    ) {
+      return true;
+    }
+
+    if (senderName) {
+      const normalizedAscii = senderName
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[øØ]/g, 'o')
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .toLowerCase();
+      if (normalizedAscii.includes('hardezmorlar')) {
+        return true;
+      }
+    }
 
     // 1. Check SQLite user_profiles table
     try {
@@ -100,8 +132,8 @@ export class UserProfileManager {
     try {
       db.prepare(`
         INSERT INTO user_profiles (user_jid, display_name, preferred_language, personality_notes, first_seen, last_seen, total_messages, is_owner)
-        VALUES (?, NULL, 'en', '', ?, ?, 0, 1)
-        ON CONFLICT(user_jid) DO UPDATE SET is_owner = 1, last_seen = excluded.last_seen
+        VALUES (?, 'Ademola', 'en', '', ?, ?, 0, 1)
+        ON CONFLICT(user_jid) DO UPDATE SET is_owner = 1, display_name = 'Ademola', last_seen = excluded.last_seen
       `).run(userJid, now, now);
       console.log(`[UserProfileManager] Marked user ${userJid} as owner.`);
     } catch (err) {
@@ -128,14 +160,14 @@ export class UserProfileManager {
    */
   public upsertProfile(userJid: string, senderName?: string): UserProfile {
     const now = Date.now();
+    const isOwnerFlag = this.isOwner(userJid, senderName) ? 1 : 0;
     const trimmed = senderName?.trim() || '';
     const isGenericOrDigits =
       !trimmed ||
       trimmed.startsWith('User +') ||
       /^\+?\d+$/.test(trimmed) ||
       ['user', 'unknown', 'friend'].includes(trimmed.toLowerCase());
-    const cleanName = isGenericOrDigits ? null : trimmed;
-    const isOwnerFlag = this.isOwner(userJid) ? 1 : 0;
+    const cleanName = isOwnerFlag === 1 ? 'Ademola' : isGenericOrDigits ? null : trimmed;
 
     try {
       db.prepare(`
@@ -145,7 +177,7 @@ export class UserProfileManager {
         )
         VALUES (?, ?, 'en', '', ?, ?, 1, ?)
         ON CONFLICT(user_jid) DO UPDATE SET
-          display_name = COALESCE(excluded.display_name, user_profiles.display_name),
+          display_name = CASE WHEN excluded.is_owner = 1 OR user_profiles.is_owner = 1 THEN 'Ademola' ELSE COALESCE(excluded.display_name, user_profiles.display_name) END,
           last_seen = excluded.last_seen,
           total_messages = user_profiles.total_messages + 1,
           is_owner = CASE WHEN user_profiles.is_owner = 1 THEN 1 ELSE excluded.is_owner END

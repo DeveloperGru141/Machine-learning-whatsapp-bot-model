@@ -68,6 +68,136 @@ export class WhatsAppClient {
   private latestQr: string | null = null;
   private attemptedCatchupKeys: Set<string> = new Set();
   private messageStore: Map<string, any> = new Map();
+  private deliveryStatusMap: Map<
+    string,
+    { status: 'SENT_TO_SERVER' | 'DELIVERED_TO_DEVICE' | 'READ'; statusCode: number; updatedAt: number; recipientJid: string }
+  > = new Map();
+  private deliveryWaiters: Map<
+    string,
+    Array<(info: { status: 'SENT_TO_SERVER' | 'DELIVERED_TO_DEVICE' | 'READ'; statusCode: number; updatedAt: number }) => void>
+  > = new Map();
+
+  public recordDeliveryStatus(msgId: string, recipientJid: string, statusNum: number): void {
+    if (!msgId || statusNum < 2) return;
+    const statusLabel: 'SENT_TO_SERVER' | 'DELIVERED_TO_DEVICE' | 'READ' =
+      statusNum >= 4 ? 'READ' : statusNum === 3 ? 'DELIVERED_TO_DEVICE' : 'SENT_TO_SERVER';
+    const existing = this.deliveryStatusMap.get(msgId);
+    if (!existing || statusNum >= existing.statusCode) {
+      const info = {
+        status: statusLabel,
+        statusCode: statusNum,
+        updatedAt: Date.now(),
+        recipientJid: recipientJid || existing?.recipientJid || '',
+      };
+      this.deliveryStatusMap.set(msgId, info);
+      if (this.deliveryStatusMap.size > 2000) {
+        const oldestKey = this.deliveryStatusMap.keys().next().value;
+        if (oldestKey) this.deliveryStatusMap.delete(oldestKey);
+      }
+      const waiters = this.deliveryWaiters.get(msgId);
+      if (waiters && waiters.length > 0) {
+        for (const resolve of waiters) {
+          try {
+            resolve(info);
+          } catch {}
+        }
+        if (statusNum >= 3) {
+          this.deliveryWaiters.delete(msgId);
+        }
+      }
+    }
+  }
+
+  private loggedOutRetryCount = 0;
+  private sessionBundleInvalidated = false;
+
+  /**
+   * Waits for WhatsApp server ACK (status >= 2) or device delivery receipt (status >= 3)
+   * for a sent message stanza ID.
+   */
+  public async waitForDeliveryConfirmation(
+    msgId: string,
+    recipientJid: string,
+    timeoutMs: number = 2000
+  ): Promise<{
+    confirmed: boolean;
+    status: 'DELIVERED_TO_DEVICE' | 'SENT_TO_SERVER' | 'READ' | 'DISPATCHED';
+    statusLabel: string;
+    statusCode: number;
+    stanzaId: string;
+    msgId: string;
+    recipientJid: string;
+    timestamp: string;
+  }> {
+    const formatLabel = (st: 'DELIVERED_TO_DEVICE' | 'SENT_TO_SERVER' | 'READ' | 'DISPATCHED') =>
+      st === 'READ'
+        ? 'Read by recipient (✓✓)'
+        : st === 'DELIVERED_TO_DEVICE'
+          ? 'Delivered to device (✓✓)'
+          : st === 'SENT_TO_SERVER'
+            ? 'Sent to WhatsApp Server (✓)'
+            : 'Dispatched to WhatsApp';
+
+    const existing = this.deliveryStatusMap.get(msgId);
+    if (existing && existing.statusCode >= 3) {
+      return {
+        confirmed: true,
+        status: existing.status,
+        statusLabel: formatLabel(existing.status),
+        statusCode: existing.statusCode,
+        stanzaId: msgId,
+        msgId,
+        recipientJid,
+        timestamp: new Date(existing.updatedAt).toISOString(),
+      };
+    }
+
+    const ackInfo = await new Promise<{
+      status: 'SENT_TO_SERVER' | 'DELIVERED_TO_DEVICE' | 'READ';
+      statusCode: number;
+      updatedAt: number;
+    } | null>((resolve) => {
+      const timer = setTimeout(() => {
+        const latest = this.deliveryStatusMap.get(msgId);
+        resolve(latest || null);
+      }, timeoutMs);
+
+      const list = this.deliveryWaiters.get(msgId) || [];
+      list.push((info) => {
+        if (info.statusCode >= 3) {
+          clearTimeout(timer);
+          resolve(info);
+        }
+      });
+      this.deliveryWaiters.set(msgId, list);
+    });
+
+    const finalInfo = ackInfo || this.deliveryStatusMap.get(msgId);
+    if (finalInfo) {
+      return {
+        confirmed: true,
+        status: finalInfo.status,
+        statusLabel: formatLabel(finalInfo.status),
+        statusCode: finalInfo.statusCode,
+        stanzaId: msgId,
+        msgId,
+        recipientJid,
+        timestamp: new Date(finalInfo.updatedAt).toISOString(),
+      };
+    }
+
+    const fallbackStatus = msgId ? 'SENT_TO_SERVER' : 'DISPATCHED';
+    return {
+      confirmed: Boolean(msgId),
+      status: fallbackStatus,
+      statusLabel: formatLabel(fallbackStatus),
+      statusCode: msgId ? 2 : 1,
+      stanzaId: msgId,
+      msgId,
+      recipientJid,
+      timestamp: new Date().toISOString(),
+    };
+  }
 
   public getLatestPairingCode(): string | null {
     return this.latestPairingCode;
@@ -100,11 +230,14 @@ export class WhatsAppClient {
     // If forcing a refresh (or no code yet after waiting), perform a clean session wipe & fresh socket start
     if (forceReset) {
       console.log('[WhatsAppClient] 🔄 Force-refreshing pairing session with clean noise credentials...');
+      this.sessionBundleInvalidated = true;
       try {
         if (this.sock) {
           this.sock.ev.removeAllListeners('connection.update');
           this.sock.ev.removeAllListeners('creds.update');
           this.sock.ev.removeAllListeners('messages.upsert');
+          this.sock.ev.removeAllListeners('messages.update');
+          this.sock.ev.removeAllListeners('message-receipt.update');
           try {
             this.sock.end(undefined);
           } catch {}
@@ -147,9 +280,9 @@ export class WhatsAppClient {
 
   /**
    * Starts the human-paced background contact replies cycle for users who previously DM'd the bot.
-   * - Waits 30s after connection opens so live traffic settles first.
-   * - Runs every 2 minutes (skipping quiet hours 11:30 PM - 7:00 AM).
-   * - Replies to 1 unreplied contact DM every 2 minutes in strict accordance with the fine-tuning pipeline.
+   * - Waits 8s after connection opens so live traffic settles first.
+   * - Runs every 45 seconds (skipping quiet hours 11:30 PM - 7:00 AM).
+   * - Replies to unreplied contact DMs in strict accordance with the fine-tuning pipeline.
    */
   public startUnrepliedScanner(): void {
     this.stopUnrepliedScanner();
@@ -161,7 +294,7 @@ export class WhatsAppClient {
       }
       if (!this.isSocketOpen()) return;
       try {
-        await this.replyUnrepliedMessages(1);
+        await this.replyUnrepliedMessages(2);
       } catch (err: any) {
         console.warn('[WhatsAppClient] Unreplied catch-up cycle warning:', err.message);
       }
@@ -169,12 +302,12 @@ export class WhatsAppClient {
 
     this.unrepliedDebounceTimer = setTimeout(() => {
       runCycleIfActive();
-    }, 30_000);
+    }, 8_000);
     if (this.unrepliedDebounceTimer.unref) this.unrepliedDebounceTimer.unref();
 
     this.unrepliedScanInterval = setInterval(() => {
       runCycleIfActive();
-    }, 2 * 60 * 1000);
+    }, 45_000);
     if (this.unrepliedScanInterval.unref) this.unrepliedScanInterval.unref();
   }
 
@@ -209,9 +342,9 @@ export class WhatsAppClient {
         fs.mkdirSync(config.paths.sessions, { recursive: true });
       }
 
-      // Hydrate session files from SESSION_BUNDLE_BASE64 on cloud containers (Render) if sessions/creds.json is missing
+      // Hydrate session files from SESSION_BUNDLE_BASE64 on cloud containers (Render) if sessions/creds.json is missing and not invalidated
       const credsFile = path.join(config.paths.sessions, 'creds.json');
-      if (!fs.existsSync(credsFile) && process.env.SESSION_BUNDLE_BASE64) {
+      if (!fs.existsSync(credsFile) && process.env.SESSION_BUNDLE_BASE64 && !this.sessionBundleInvalidated) {
         try {
           const zlib = await import('zlib');
           const rawBuf = Buffer.from(process.env.SESSION_BUNDLE_BASE64, 'base64');
@@ -260,13 +393,19 @@ export class WhatsAppClient {
         } catch {}
       }
 
-      // Detach any previous listeners from prior socket instance
+      // Detach any previous listeners and cleanly close prior socket instance to prevent conflict
       if (this.sock) {
         try {
           this.sock.ev.removeAllListeners('connection.update');
           this.sock.ev.removeAllListeners('creds.update');
           this.sock.ev.removeAllListeners('messages.upsert');
+          this.sock.ev.removeAllListeners('messages.update');
+          this.sock.ev.removeAllListeners('message-receipt.update');
+          try {
+            this.sock.end(undefined);
+          } catch {}
         } catch {}
+        this.sock = null;
       }
 
       const { state, saveCreds } = await useMultiFileAuthState(config.paths.sessions);
@@ -294,7 +433,7 @@ export class WhatsAppClient {
         defaultQueryTimeoutMs: 20_000,
         retryRequestDelayMs: 500,
         maxMsgRetryCount: 5,
-        syncFullHistory: false,
+        syncFullHistory: true,
         markOnlineOnConnect: false,
         msgRetryCounterCache,
         getMessage: async (key) => {
@@ -364,19 +503,29 @@ export class WhatsAppClient {
           const errorMsg = (lastDisconnect?.error as any)?.message || (lastDisconnect?.error as any)?.output?.payload?.message || '';
           const isStreamConflict = errorMsg.includes('conflict') || errorMsg.includes('Stream Errored');
           const isRegistered = Boolean(this.sock?.authState?.creds?.registered || this.sock?.authState?.creds?.account);
-          // If socket was never registered, 401 or 408 is simply an expired pairing code, not a device logout
-          const shouldReconnect = isRegistered
-            ? (statusCode !== DisconnectReason.loggedOut || isStreamConflict)
-            : true;
+          const isExplicitLogout = isRegistered && statusCode === DisconnectReason.loggedOut && !isStreamConflict;
 
           console.log(
-            `[WhatsAppClient] Connection closed (statusCode: ${statusCode}, reason: ${errorMsg || 'unknown'}). Registered: ${isRegistered}. Reconnecting: ${shouldReconnect}`
+            `[WhatsAppClient] Connection closed (statusCode: ${statusCode}, reason: ${errorMsg || 'unknown'}). Registered: ${isRegistered}.`
           );
 
           this.stopUnrepliedScanner();
 
-          if (!shouldReconnect) {
-            console.error('🚨 [WhatsAppClient] Device was logged out. Clear sessions/ and restart to re-authenticate.');
+          if (isExplicitLogout) {
+            console.error(
+              '🚨 [WhatsAppClient] Session was logged out by WhatsApp (401 Connection Failure). Clearing stale credentials and starting fresh pairing/QR session automatically...'
+            );
+            this.sessionBundleInvalidated = true;
+            this.loggedOutRetryCount = 0;
+            this.pairingRequested = false;
+            this.latestPairingCode = null;
+            this.latestQr = null;
+            try {
+              if (fs.existsSync(config.paths.sessions)) {
+                fs.rmSync(config.paths.sessions, { recursive: true, force: true });
+              }
+            } catch {}
+            setTimeout(() => this.start(), 1500);
             return;
           }
 
@@ -407,6 +556,13 @@ export class WhatsAppClient {
             return;
           }
 
+          // If Stream Errored (conflict), wait 5s before reconnecting so any older container/socket finishes closing
+          if (isStreamConflict) {
+            console.log('[WhatsAppClient] Stream conflict detected; waiting 5s before reconnecting...');
+            setTimeout(() => this.start(), 5000);
+            return;
+          }
+
           // Automatic exponential backoff reconnection for server deployment
           this.reconnectAttempts++;
           const delay = Math.min(2000 * Math.pow(1.5, Math.min(this.reconnectAttempts, 6)), 30000);
@@ -416,6 +572,7 @@ export class WhatsAppClient {
           setTimeout(() => this.start(), delay);
         } else if (connection === 'open') {
           this.reconnectAttempts = 0;
+          this.loggedOutRetryCount = 0;
           this.pairingRequested = false;
           this.latestPairingCode = null;
           this.latestQr = null;
@@ -446,12 +603,19 @@ export class WhatsAppClient {
           }
 
           if (messages && messages.length > 0) {
-            for (const msg of messages) {
+            // Sort messages chronologically (oldest first) so auto-increment id matches chronological order
+            const sortedMessages = [...messages].sort((a, b) => {
+              const tA = Number(a.messageTimestamp) || 0;
+              const tB = Number(b.messageTimestamp) || 0;
+              return tA - tB;
+            });
+
+            for (const msg of sortedMessages) {
               if (msg.key?.id && msg.message) {
                 this.messageStore.set(msg.key.id, msg.message);
               }
               const normalized = normalizeMessage(msg);
-              if (normalized) {
+              if (normalized && (normalized.text || normalized.contentType)) {
                 chatLogger.logMessage({
                   chatJid: normalized.chatJid,
                   senderJid: msg.key?.fromMe ? 'bot' : normalized.senderJid,
@@ -468,6 +632,34 @@ export class WhatsAppClient {
         } catch (err: any) {
           console.error('[WhatsAppClient] Error processing messaging-history.set:', err.message);
         }
+      });
+
+      // Track WhatsApp message delivery receipts (SERVER_ACK ✓, DELIVERY_ACK ✓✓, READ ✓✓)
+      this.sock.ev.on('messages.update', (updates) => {
+        try {
+          for (const u of updates) {
+            const msgId = u.key?.id;
+            const remoteJid = u.key?.remoteJid || '';
+            const status = Number(u.update?.status || 0);
+            if (msgId && status >= 2) {
+              this.recordDeliveryStatus(msgId, remoteJid, status);
+            }
+          }
+        } catch {}
+      });
+
+      this.sock.ev.on('message-receipt.update', (receipts) => {
+        try {
+          for (const r of receipts) {
+            const msgId = r.key?.id;
+            const remoteJid = r.key?.remoteJid || '';
+            const receipt = r.receipt;
+            const status = receipt?.readTimestamp ? 4 : receipt?.receiptTimestamp ? 3 : 2;
+            if (msgId) {
+              this.recordDeliveryStatus(msgId, remoteJid, status);
+            }
+          }
+        } catch {}
       });
 
       // Passively record new contacts synced from phonebook
@@ -513,20 +705,30 @@ export class WhatsAppClient {
     const msgTime = Number(msg.messageTimestamp) * 1000;
     const effectiveMsgTime = msgTime ? Math.min(msgTime, Date.now()) : Date.now();
 
-    // Ignore messages sent by ourselves for agent trigger, but passively log outbound replies
+    // Ignore messages sent by ourselves for agent trigger, and only log if not already logged by OutboundSender
     if (msg.key?.fromMe) {
+      if (msg.key?.id && msg.key?.remoteJid) {
+        this.recordDeliveryStatus(msg.key.id, msg.key.remoteJid, Number(msg.status || 2));
+      }
       const normalized = normalizeMessage(msg);
       if (normalized && (normalized.text || normalized.contentType)) {
-        chatLogger.logMessage({
-          chatJid: normalized.chatJid,
-          senderJid: 'bot',
-          senderName: config.bot.name,
-          isGroup: normalized.isGroup,
-          contentType: normalized.contentType,
-          messageText: normalized.text,
-          stickerFilename: normalized.stickerFilename,
-          timestamp: effectiveMsgTime,
-        });
+        const alreadyLogged = db
+          .prepare(
+            `SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid = 'bot' AND message_text = ? AND timestamp >= ? LIMIT 1`
+          )
+          .get(normalized.chatJid, normalized.text || '', effectiveMsgTime - 20_000);
+        if (!alreadyLogged) {
+          chatLogger.logMessage({
+            chatJid: normalized.chatJid,
+            senderJid: 'bot',
+            senderName: config.bot.name,
+            isGroup: normalized.isGroup,
+            contentType: normalized.contentType,
+            messageText: normalized.text,
+            stickerFilename: normalized.stickerFilename,
+            timestamp: effectiveMsgTime,
+          });
+        }
       }
       return;
     }
@@ -686,11 +888,13 @@ export class WhatsAppClient {
     const sock = this.sock;
     if (!sock) return;
 
+    const isOwner = userProfileManager.isOwner(normalized.senderJid, normalized.senderName);
     const savedContact = contactService.getContact(normalized.senderJid);
-    const effectiveSenderName =
-      savedContact?.custom_name ||
-      contactService.extractFriendlyFirstName(normalized.senderName) ||
-      normalized.senderName;
+    const effectiveSenderName = isOwner
+      ? 'Ademola'
+      : savedContact?.custom_name ||
+        contactService.extractFriendlyFirstName(normalized.senderName) ||
+        normalized.senderName;
 
     const context: ExecutionContext = {
       sock,
@@ -740,7 +944,7 @@ export class WhatsAppClient {
           if (!normalized.chatJid.endsWith('@lid')) {
             sock.sendPresenceUpdate('composing', normalized.chatJid).catch(() => {});
           }
-          // Snappy processing delay (100ms-180ms)
+          // Snappy processing delay (20ms-50ms)
           await antiBanEngine.simulateReadingDelay((promptText || '').length);
           await agentHarness.handleMessage(promptText, context);
         } catch (err: any) {
@@ -755,12 +959,11 @@ export class WhatsAppClient {
   /**
    * Safely catches up on genuine unreplied 1-on-1 direct messages with human-like pacing.
    * Strictly enforces:
-   * 1. Inbound-first rule: Recipient MUST have initiated a message in chat_logs.
+   * 1. Inbound-first rule: Recipient MUST have initiated or replied to a message in chat_logs.
    * 2. Zero cold outreach: Contacts who have never messaged the bot are skipped.
-   * 3. Authentic human delays: Reading delay (1.5s-3.5s), typing presence simulation,
-   *    and 2-minute cycle per contact DM reply.
+   * 3. Snappy human-paced delays so contacts who replied to the bot get timely responses.
    */
-  public async replyUnrepliedMessages(batchLimit: number = 1): Promise<{ repliedCount: number; summary: string }> {
+  public async replyUnrepliedMessages(batchLimit: number = 2): Promise<{ repliedCount: number; summary: string }> {
     if (this.isScanningUnreplied) {
       console.log('[WhatsAppClient] Unreplied catch-up is already running. Skipping concurrent run.');
       return {
@@ -801,8 +1004,8 @@ export class WhatsAppClient {
           return false;
         }
 
-        // 2. Skip if already attempted in this runtime session
-        const catchupKey = `${chat.chatJid}_${chat.timestamp}`;
+        // 2. Skip if already attempted for this exact message ID/timestamp in this runtime session
+        const catchupKey = `${chat.chatJid}_${chat.id || chat.timestamp}`;
         if (this.attemptedCatchupKeys.has(catchupKey)) {
           return false;
         }
@@ -813,10 +1016,33 @@ export class WhatsAppClient {
           .get(chat.chatJid);
         if (!hasInbound) return false;
 
-        // 4. Confirm bot hasn't already replied after this timestamp
-        const laterBotReply = db
-          .prepare(`SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid = 'bot' AND timestamp >= ? LIMIT 1`)
-          .get(chat.chatJid, chat.timestamp);
+        // 4. Confirm bot hasn't already sent a valid reply after this message
+        const laterBotReply = chat.id
+          ? db
+              .prepare(
+                `SELECT 1 FROM chat_logs
+                 WHERE chat_jid = ?
+                   AND sender_jid = 'bot'
+                   AND id > ?
+                   AND timestamp >= ?
+                   AND LOWER(COALESCE(message_text, '')) NOT LIKE 'network slow small%'
+                   AND LOWER(COALESCE(message_text, '')) NOT LIKE '%<tool_call>%'
+                   AND COALESCE(message_text, '') NOT LIKE '⚠️%'
+                 LIMIT 1`
+              )
+              .get(chat.chatJid, chat.id, chat.timestamp)
+          : db
+              .prepare(
+                `SELECT 1 FROM chat_logs
+                 WHERE chat_jid = ?
+                   AND sender_jid = 'bot'
+                   AND timestamp > ?
+                   AND LOWER(COALESCE(message_text, '')) NOT LIKE 'network slow small%'
+                   AND LOWER(COALESCE(message_text, '')) NOT LIKE '%<tool_call>%'
+                   AND COALESCE(message_text, '') NOT LIKE '⚠️%'
+                 LIMIT 1`
+              )
+              .get(chat.chatJid, chat.timestamp);
         if (laterBotReply) return false;
 
         return true;
@@ -845,7 +1071,7 @@ export class WhatsAppClient {
           break;
         }
 
-        const catchupKey = `${chat.chatJid}_${chat.timestamp}`;
+        const catchupKey = `${chat.chatJid}_${chat.id || chat.timestamp}`;
         this.attemptedCatchupKeys.add(catchupKey);
 
         console.log(
@@ -859,9 +1085,9 @@ export class WhatsAppClient {
           } catch {}
         }
 
-        // 2. Authentic human reading delay (1.5s - 3.5s) for catch-up cycle
+        // 2. Snappy human reading delay (400ms - 800ms) for catch-up cycle
         const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.LIVETEST_RUNNER);
-        const catchupReadDelay = isTest ? 30 : Math.floor(1500 + Math.random() * 2000);
+        const catchupReadDelay = isTest ? 20 : Math.floor(400 + Math.random() * 400);
         await new Promise((r) => setTimeout(r, catchupReadDelay));
 
         // 3. Construct synthetic message for context
@@ -879,11 +1105,13 @@ export class WhatsAppClient {
         };
 
         const sock = this.sock;
+        const isOwner = userProfileManager.isOwner(chat.senderJid, chat.senderName);
         const savedContact = contactService.getContact(chat.senderJid);
-        const effectiveSenderName =
-          savedContact?.custom_name ||
-          contactService.extractFriendlyFirstName(chat.senderName) ||
-          chat.senderName;
+        const effectiveSenderName = isOwner
+          ? 'Ademola'
+          : savedContact?.custom_name ||
+            contactService.extractFriendlyFirstName(chat.senderName) ||
+            chat.senderName;
 
         const isVoiceNote = chat.contentType === 'audio';
 
@@ -925,11 +1153,11 @@ export class WhatsAppClient {
           console.error(`[WhatsAppClient] Error replying to ${chat.senderName}:`, err.message);
         }
 
-        // 4. Human inter-chat pause between different contacts (2 minutes per DM reply)
+        // 4. Human inter-chat pause between different contacts (20s between consecutive contacts in same batch)
         if (i < toProcess.length - 1) {
-          const interChatPause = isTest ? 100 : 2 * 60 * 1000;
+          const interChatPause = isTest ? 50 : 20_000;
           console.log(
-            `[WhatsAppClient] ⏳ Human pacing: waiting ${(interChatPause / 1000).toFixed(0)}s (2 min) before replying to next contact...`
+            `[WhatsAppClient] ⏳ Human pacing: waiting ${(interChatPause / 1000).toFixed(0)}s before replying to next contact...`
           );
           await new Promise((r) => setTimeout(r, interChatPause));
         }
