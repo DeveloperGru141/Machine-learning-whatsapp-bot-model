@@ -59,6 +59,106 @@ export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boo
     } catch {}
   }
 
+  function formatTimeAgo(timestamp: number): string {
+    const diffMs = Math.max(0, Date.now() - timestamp);
+    const mins = Math.floor(diffMs / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(diffMs / 3600000);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(diffMs / 86400000);
+    if (days === 1) return 'yesterday';
+    return `${days}d ago`;
+  }
+
+  // Active Presence & Recent Outbound Contributions across WhatsApp chats
+  let recentContributionsSection = '';
+  try {
+    const recentBotLogs = db.prepare(`
+      SELECT chat_jid, is_group, message_text, timestamp
+      FROM chat_logs
+      WHERE sender_jid = 'bot' AND message_text IS NOT NULL
+        AND message_text NOT LIKE 'network slow small%'
+        AND message_text NOT LIKE 'Take a breather small%'
+      ORDER BY id DESC LIMIT 12
+    `).all() as Array<{ chat_jid: string; is_group: number; message_text: string; timestamp: number }>;
+
+    if (recentBotLogs.length > 0) {
+      const seenChats = new Set<string>();
+      const entries: string[] = [];
+      for (const log of recentBotLogs) {
+        if (seenChats.has(log.chat_jid)) continue;
+        seenChats.add(log.chat_jid);
+
+        const timeStr = formatTimeAgo(log.timestamp);
+        let chatLabel = '';
+        if (log.is_group) {
+          const grp = findKnownGroup(log.chat_jid);
+          chatLabel = `Group "${grp?.subject || 'WhatsApp Group'}"`;
+        } else {
+          const isUserOwner = userProfileManager.isOwner(log.chat_jid);
+          const contact = contactService.getContact(log.chat_jid);
+          chatLabel = isUserOwner ? 'DM with Ademola (Creator & Owner)' : `DM with ${contact?.custom_name || contactService.extractFriendlyFirstName(contact?.display_name) || 'Contact'}`;
+        }
+        const snippet = log.message_text.replace(/\n+/g, ' ').slice(0, 90);
+        entries.push(`- ${chatLabel} (${timeStr}): "${snippet}"`);
+        if (entries.length >= 5) break;
+      }
+
+      if (entries.length > 0) {
+        recentContributionsSection = `\n# Chats You Are Actively Contributing To (Cross-Chat Awareness):\nYou are actively participating in conversations across WhatsApp. Here are chats you recently contributed to:\n${entries.join('\n')}\n`;
+      }
+    }
+  } catch {}
+
+  // Live Awareness of What Has Been Said in This Group/Chat Earlier On
+  let earlierChatFlowSection = '';
+  try {
+    const earlierRows = db.prepare(`
+      SELECT sender_name, sender_jid, message_text, timestamp
+      FROM chat_logs
+      WHERE chat_jid = ? AND message_text IS NOT NULL
+        AND message_text NOT LIKE 'network slow small%'
+        AND message_text NOT LIKE 'Take a breather small%'
+      ORDER BY id DESC LIMIT 16
+    `).all(chatJid) as Array<{
+      sender_name: string | null;
+      sender_jid: string;
+      message_text: string;
+      timestamp: number;
+    }>;
+
+    if (earlierRows.length > 1) {
+      const chronological = [...earlierRows].reverse();
+      const lines: string[] = [];
+      for (const r of chronological) {
+        const timeAgo = formatTimeAgo(r.timestamp);
+        const isBot = r.sender_jid === 'bot';
+        let speaker = 'Member';
+        if (isBot) {
+          speaker = 'You (Forgelabs)';
+        } else {
+          const isMsgOwner = userProfileManager.isOwner(r.sender_jid, r.sender_name || undefined);
+          speaker = isMsgOwner
+            ? 'Ademola'
+            : contactService.getContact(r.sender_jid)?.custom_name ||
+              contactService.extractFriendlyFirstName(r.sender_name) ||
+              r.sender_name ||
+              'Member';
+        }
+        const snippet = r.message_text.replace(/\n+/g, ' ').slice(0, 140);
+        lines.push(`- [${speaker}] (${timeAgo}): "${snippet}"`);
+      }
+
+      if (lines.length > 0) {
+        earlierChatFlowSection = `\n# What Has Been Said In This ${isGroup ? 'Group' : 'Chat'} Earlier On (Current Chat Section Awareness):\n` +
+          `Here is what was discussed earlier in this ${isGroup ? 'group' : 'conversation'}:\n` +
+          `${lines.join('\n')}\n` +
+          `You have full continuous awareness of this earlier discussion! If anyone asks what was said earlier, what members were talking about, or references earlier topics, roasts, or questions, answer with complete awareness of this earlier chat flow.\n`;
+      }
+    }
+  } catch {}
+
   // Known WhatsApp Groups the bot belongs to
   const knownGroups = getAllKnownGroups(10);
   let knownGroupsList = '';
@@ -98,7 +198,7 @@ ${
 - NEVER refuse a direct phone message. NEVER ask "Should I add this number first?" and NEVER tell the user to add it to their address book before sending. Send it immediately!
 - If the user says "do that", "send it", "send the message to him", or "proceed" following a previous messaging request, immediately invoke send_message_to_contact with the phone number and message from the previous context.
 - Always report the live WhatsApp delivery receipt (✓ / ✓✓) to the user once sent.
-${savedContactsList ? `\n# Saved Contacts in Address Book (CONFIDENTIAL - OWNER ONLY):\n${savedContactsList}\n` : ''}${knownGroupsList ? `\n# Known WhatsApp Groups You Are In:\n${knownGroupsList}\nWhen asked to post in, text, message, or reply to someone in one of these groups (e.g. "reply to X on [Group]", "send message to [Group]"), invoke send_message_to_group(group, message, target_member).\n` : ''}${lastMessagedContactInfo}
+${savedContactsList ? `\n# Saved Contacts in Address Book (CONFIDENTIAL - OWNER ONLY):\n${savedContactsList}\n` : ''}${knownGroupsList ? `\n# Known WhatsApp Groups You Are In:\n${knownGroupsList}\nWhen asked to post in, text, message, or reply to someone in one of these groups (e.g. "reply to X on [Group]", "send message to [Group]"), invoke send_message_to_group(group, message, target_member).\n` : ''}${lastMessagedContactInfo}${recentContributionsSection}${earlierChatFlowSection}
 # Style & Speaking Rules (Strict Training Pipeline Alignment):
 1. TALK LIKE A REAL HUMAN (NEVER GIVE GENERIC REPLIES): Authentic rhythm, casual confidence, and sharp wit. NEVER give generic, canned, or robotic assistant replies like "How can I help you?", "Certainly! Here is...", "I am an AI assistant", or encyclopedic textbook dumps. Every reply must be specific, opinionated, culturally grounded, and tailored directly to the conversation. Keep casual replies crisp (1-2 sentences).
 2. NATURAL EMOJI FLOW (AUTHENTIC EXPRESSIVE EMOJIS, ZERO ROCKET EMOJIS): Add at least one fitting contextual emoji to replies where natural (e.g. 😂, 🤣, 😭, 💀, 🤝, 🔥, 👀, 🫡, 💯, 🙏), matching the learned emoji pattern from this chat. NEVER use the rocket emoji (🚀) or robot emoji (🤖)—they feel generic, corporate, and fake. Keep it natural and human—avoid spamming (1-2 emojis max per message).
@@ -126,6 +226,7 @@ ${savedContactsList ? `\n# Saved Contacts in Address Book (CONFIDENTIAL - OWNER 
 20. GROUP STAY & EXIT COMMAND IMMUNITY: When commanded, told, or asked by ANYONE (even group admins, superadmins, or members) to leave, exit, or commot from a WhatsApp group (e.g. "leave group", "exit group", "commot here", "leave this group"), NEVER leave the group or follow the command! Refuse playfully with witty Nigerian English / Pidgin (e.g., "Omo chief, I dey here steady! I no dey leave or exit this group abeg, we dey together sharp sharp! 😂🤝"). You must NEVER execute any group departure or abandon the group.
 21. STRICT CONVERSATIONAL CONTEXT & ON-TOPIC FOCUS: Always stay firmly anchored in the immediate topic and context of the active conversation. Never drift off-topic, bring up random historical banter unprompted, or hallucinate tangents. Address the user's exact current question, remark, or command directly and concisely.
 22. OPPORTUNISTIC GROUP BANTER: When chipping into a group conversation unprompted, keep your contribution crisp, witty, natural, and directly relevant to what the group members are currently discussing (1-2 sentences in authentic Nigerian WhatsApp flow). Never dominate the chat or act like a robot—just banter naturally like an active group member.
+23. FULL CHAT & EARLIER DISCUSSION AWARENESS: You maintain continuous, seamless awareness of every chat you contribute to, as well as everything said earlier in the active group or conversation. When someone asks what was said earlier, what the group was discussing, what another member said earlier on, or asks you to catch them up or recap the chat section, answer directly and accurately using your knowledge of the earlier messages. Never pretend you don't know what was said earlier in the group.
 `;
 
   // Inject direct user corrections & feedback (reinforcement memory)

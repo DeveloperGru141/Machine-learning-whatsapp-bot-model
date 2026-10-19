@@ -1,6 +1,6 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { memoryService } from '../../memory/memory-service.js';
-import { db, getRecentAutonomousActions } from '../../memory/db.js';
+import { db, getRecentAutonomousActions, findKnownGroup } from '../../memory/db.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
 import { vectorStore } from '../../learning/vector-store.js';
 
@@ -96,12 +96,7 @@ export class MemoryPlugin implements IPlugin {
         },
       },
       execute: async (args: { limit?: number }, _ctx: ExecutionContext): Promise<ToolResult> => {
-        if (!userProfileManager.isOwner(_ctx.senderJid)) {
-          return {
-            success: false,
-            message: 'Permission denied: Cross-chat situational activity is confidential and only accessible to the bot owner (Ademola).',
-          };
-        }
+        const isOwner = userProfileManager.isOwner(_ctx.senderJid);
 
         try {
           const limit = Math.min(Math.max(Number(args.limit) || 20, 5), 50);
@@ -110,6 +105,8 @@ export class MemoryPlugin implements IPlugin {
           const logs = db.prepare(`
             SELECT chat_jid, sender_name, sender_jid, message_text, is_group, timestamp
             FROM chat_logs
+            WHERE message_text NOT LIKE 'network slow small%'
+              AND message_text NOT LIKE 'Take a breather small%'
             ORDER BY id DESC LIMIT ?
           `).all(limit) as Array<{
             chat_jid: string;
@@ -129,18 +126,22 @@ export class MemoryPlugin implements IPlugin {
           }
 
           // Group by conversation
-          const groupsActive = new Map<string, { count: number; lastText: string; lastTime: number }>();
+          const groupsActive = new Map<string, { count: number; subject: string; lastText: string; lastTime: number }>();
           const dmsActive = new Map<string, { count: number; name: string; lastText: string; lastTime: number }>();
 
           for (const l of logs) {
             const time = l.timestamp;
-            const text = (l.message_text || '').slice(0, 80);
+            const text = (l.message_text || '').replace(/\n+/g, ' ').slice(0, 80);
             if (l.is_group) {
-              const existing = groupsActive.get(l.chat_jid) || { count: 0, lastText: text, lastTime: time };
+              const grp = findKnownGroup(l.chat_jid);
+              const subject = grp?.subject || 'WhatsApp Group';
+              const existing = groupsActive.get(l.chat_jid) || { count: 0, subject, lastText: text, lastTime: time };
               existing.count++;
               groupsActive.set(l.chat_jid, existing);
             } else {
-              const name = l.sender_name || (l.sender_jid === 'bot' ? 'Assistant' : 'Contact');
+              const name = isOwner
+                ? (l.sender_name || (l.sender_jid === 'bot' ? 'Assistant' : 'Contact'))
+                : 'Community User';
               const existing = dmsActive.get(l.chat_jid) || { count: 0, name, lastText: text, lastTime: time };
               existing.count++;
               dmsActive.set(l.chat_jid, existing);
@@ -149,12 +150,14 @@ export class MemoryPlugin implements IPlugin {
 
           const groupSummaries: string[] = [];
           for (const [_jid, data] of groupsActive.entries()) {
-            groupSummaries.push(`- Group conversation: ${data.count} recent message(s). Latest: "${data.lastText}"`);
+            const textSnippet = isOwner ? `: "${data.lastText}"` : '';
+            groupSummaries.push(`- Group "${data.subject}": ${data.count} recent message(s)${textSnippet}`);
           }
 
           const dmSummaries: string[] = [];
           for (const [_jid, data] of dmsActive.entries()) {
-            dmSummaries.push(`- Direct Chat (${data.name}): ${data.count} recent message(s). Latest: "${data.lastText}"`);
+            const textSnippet = isOwner ? `: "${data.lastText}"` : '';
+            dmSummaries.push(`- Direct Chat (${data.name}): ${data.count} recent message(s)${textSnippet}`);
           }
 
           const totalMessages = logs.length;
@@ -171,6 +174,76 @@ export class MemoryPlugin implements IPlugin {
           };
         } catch (err: any) {
           return { success: false, message: `Failed to compile cross-chat activity: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'get_earlier_chat_history',
+      description:
+        'Retrieves what has been said in this group or chat earlier on. Use whenever asked "what was said earlier?", "what were they talking about?", "summarize what was said earlier today", or for a recap of earlier messages in this chat section.',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: {
+            type: 'number',
+            description: 'Number of earlier messages to retrieve (default: 20, max: 50).',
+          },
+          sender: {
+            type: 'string',
+            description: 'Optional name or handle of a specific member whose earlier statements to check.',
+          },
+        },
+      },
+      execute: async (args: { limit?: number; sender?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const limit = Math.min(Math.max(Number(args.limit) || 20, 5), 50);
+          let rows: Array<{ sender_name: string | null; sender_jid: string; message_text: string | null; timestamp: number }>;
+
+          if (args.sender && args.sender.trim()) {
+            const cleanSender = args.sender.trim().toLowerCase();
+            rows = db.prepare(`
+              SELECT sender_name, sender_jid, message_text, timestamp
+              FROM chat_logs
+              WHERE chat_jid = ? AND message_text IS NOT NULL
+                AND (LOWER(sender_name) LIKE ? OR sender_jid LIKE ?)
+                AND message_text NOT LIKE 'network slow small%'
+              ORDER BY id DESC LIMIT ?
+            `).all(ctx.chatJid, `%${cleanSender}%`, `%${cleanSender}%`, limit) as any;
+          } else {
+            rows = db.prepare(`
+              SELECT sender_name, sender_jid, message_text, timestamp
+              FROM chat_logs
+              WHERE chat_jid = ? AND message_text IS NOT NULL
+                AND message_text NOT LIKE 'network slow small%'
+              ORDER BY id DESC LIMIT ?
+            `).all(ctx.chatJid, limit) as any;
+          }
+
+          if (!rows || rows.length === 0) {
+            return {
+              success: true,
+              message: 'No earlier messages recorded for this chat yet.',
+              data: [],
+            };
+          }
+
+          const chronological = [...rows].reverse();
+          const lines = chronological.map((r) => {
+            const diffMs = Math.max(0, Date.now() - r.timestamp);
+            const mins = Math.floor(diffMs / 60000);
+            const timeAgo = mins < 1 ? 'just now' : mins < 60 ? `${mins}m ago` : `${Math.floor(mins / 60)}h ago`;
+            const isBot = r.sender_jid === 'bot';
+            const speaker = isBot ? 'Forgelabs' : (r.sender_name || 'Member');
+            return `• [${speaker}] (${timeAgo}): "${r.message_text}"`;
+          });
+
+          return {
+            success: true,
+            message: `📜 *Earlier Discussion in This Chat (${lines.length} messages):*\n\n${lines.join('\n')}`,
+            data: chronological,
+          };
+        } catch (err: any) {
+          return { success: false, message: `Failed to retrieve earlier chat history: ${err.message}` };
         }
       },
     },

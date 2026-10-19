@@ -266,16 +266,27 @@ export class PluginRegistry {
       selected.add('read_document');
     }
 
-    // 9. Memory, Cross-Chat Awareness, & Autonomous Sentience
+    // 9. Memory, Cross-Chat Awareness, & Earlier Conversation Recall
     if (
       text.includes('remember') ||
       text.includes('recall') ||
       text.includes('memory') ||
       text.includes('forgot') ||
       text.includes('history') ||
+      text.includes('earlier') ||
+      text.includes('previously') ||
+      text.includes('what was said') ||
+      text.includes('what were they saying') ||
+      text.includes('what did they say') ||
+      text.includes('recap') ||
+      text.includes('catch me up') ||
+      text.includes('said in the group') ||
+      text.includes('chat section') ||
       text.includes('across chat') ||
       text.includes('other chat') ||
       text.includes('other group') ||
+      text.includes('contribute') ||
+      text.includes('contributing') ||
       text.includes('activity') ||
       text.includes('what have you done') ||
       text.includes('wetin you don do') ||
@@ -288,6 +299,7 @@ export class PluginRegistry {
       text.includes('recent action')
     ) {
       selected.add('search_memory');
+      selected.add('get_earlier_chat_history');
       selected.add('remember_fact');
       selected.add('get_cross_chat_activity');
       selected.add('list_autonomous_actions');
@@ -448,6 +460,13 @@ export class PluginRegistry {
       exit_group: 'leave_group',
       leave_chat: 'leave_group',
       exit_chat: 'leave_group',
+      earlier_messages: 'get_earlier_chat_history',
+      chat_history: 'get_earlier_chat_history',
+      earlier_chat: 'get_earlier_chat_history',
+      group_history: 'get_earlier_chat_history',
+      earlier_discussion: 'get_earlier_chat_history',
+      cross_chat_activity: 'get_cross_chat_activity',
+      chats_contributed: 'get_cross_chat_activity',
     };
 
     const resolvedName = aliasMap[name] || name;
