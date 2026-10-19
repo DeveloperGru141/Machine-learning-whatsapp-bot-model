@@ -28,6 +28,7 @@ export function initDatabase() {
       content_type TEXT NOT NULL,
       message_text TEXT,
       sticker_filename TEXT,
+      message_id TEXT,
       is_noise INTEGER DEFAULT 0,
       timestamp INTEGER NOT NULL
     );
@@ -233,6 +234,12 @@ export function initDatabase() {
 
   try {
     db.exec(`ALTER TABLE chat_logs ADD COLUMN is_noise INTEGER DEFAULT 0;`);
+  } catch {
+    // Column already exists
+  }
+
+  try {
+    db.exec(`ALTER TABLE chat_logs ADD COLUMN message_id TEXT;`);
   } catch {
     // Column already exists
   }
@@ -523,7 +530,6 @@ export function findKnownGroup(nameOrJid: string): KnownGroup | null {
       if (byJid) return byJid;
     }
 
-    // Exact match or substring search (case-insensitive)
     const bySub = db.prepare(`
       SELECT * FROM known_groups
       WHERE LOWER(subject) = LOWER(?) OR LOWER(subject) LIKE LOWER(?)
@@ -537,6 +543,12 @@ export function findKnownGroup(nameOrJid: string): KnownGroup | null {
   }
 }
 
-
-
-
+export function setGroupAdminStatus(groupJid: string, isAdmin: boolean): void {
+  try {
+    db.prepare(`
+      UPDATE known_groups SET is_admin = ?, updated_at = ? WHERE group_jid = ?
+    `).run(isAdmin ? 1 : 0, Date.now(), groupJid);
+  } catch (err: any) {
+    console.error('[DB] Error updating group admin status:', err?.message || err);
+  }
+}

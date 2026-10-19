@@ -10,13 +10,14 @@ export interface LogMessageInput {
   contentType: 'text' | 'sticker' | 'image' | 'audio' | 'document' | 'video' | string;
   messageText?: string;
   stickerFilename?: string;
+  messageId?: string;
   timestamp: number;
 }
 
 export class ChatLogger {
   private insertLogStmt = db.prepare(`
-    INSERT INTO chat_logs (chat_jid, sender_jid, sender_name, is_group, content_type, message_text, sticker_filename, is_noise, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO chat_logs (chat_jid, sender_jid, sender_name, is_group, content_type, message_text, sticker_filename, is_noise, timestamp, message_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   private updateStickerPatternStmt = db.prepare(`
@@ -44,7 +45,8 @@ export class ChatLogger {
         sanitizedText,
         input.stickerFilename ?? null,
         isNoise,
-        input.timestamp
+        input.timestamp,
+        input.messageId ?? null
       );
 
       // If a user in chat sent a sticker, analyze what message preceded it to learn the pattern
@@ -67,10 +69,34 @@ export class ChatLogger {
         text,
         null,
         0,
-        Date.now()
+        Date.now(),
+        null
       );
     } catch (err) {
       console.error('Failed to log outbound message:', err);
+    }
+  }
+
+  public getLastMessage(chatJid: string, senderJid?: string): { message_id: string; sender_jid: string; message_text: string } | null {
+    try {
+      if (senderJid) {
+        return (
+          (db.prepare(`
+            SELECT message_id, sender_jid, message_text FROM chat_logs
+            WHERE chat_jid = ? AND sender_jid = ? AND message_id IS NOT NULL
+            ORDER BY id DESC LIMIT 1
+          `).get(chatJid, senderJid) as any) || null
+        );
+      }
+      return (
+        (db.prepare(`
+          SELECT message_id, sender_jid, message_text FROM chat_logs
+          WHERE chat_jid = ? AND sender_jid != 'bot' AND message_id IS NOT NULL
+          ORDER BY id DESC LIMIT 1
+        `).get(chatJid) as any) || null
+      );
+    } catch {
+      return null;
     }
   }
 

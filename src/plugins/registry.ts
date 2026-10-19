@@ -296,21 +296,38 @@ export class PluginRegistry {
         text.includes('everyone') ||
         text.includes('kick') ||
         text.includes('remove') ||
+        text.includes('add') ||
+        text.includes('delete') ||
+        text.includes('revoke') ||
+        text.includes('erase') ||
+        text.includes('clean') ||
         text.includes('promote') ||
         text.includes('demote') ||
         text.includes('admin') ||
         text.includes('lock') ||
         text.includes('mute') ||
+        text.includes('unlock') ||
+        text.includes('unmute') ||
         text.includes('group mode') ||
         text.includes('subject') ||
         text.includes('name') ||
         text.includes('rename') ||
         text.includes('description') ||
         text.includes('link') ||
-        text.includes('invite')
+        text.includes('invite') ||
+        text.includes('disappear') ||
+        text.includes('ephemeral') ||
+        text.includes('approval') ||
+        text.includes('approve') ||
+        text.includes('reject') ||
+        text.includes('request') ||
+        text.includes('pending') ||
+        text.includes('info')
       ) {
         selected.add('tag_all');
         selected.add('kick_member');
+        selected.add('add_member');
+        selected.add('delete_group_message');
         selected.add('promote_member');
         selected.add('demote_member');
         selected.add('set_group_mode');
@@ -318,6 +335,11 @@ export class PluginRegistry {
         selected.add('set_group_description');
         selected.add('get_group_invite_link');
         selected.add('revoke_group_invite_link');
+        selected.add('set_disappearing_messages');
+        selected.add('list_join_requests');
+        selected.add('approve_join_request');
+        selected.add('reject_join_request');
+        selected.add('get_group_info');
       }
     }
 
@@ -336,6 +358,7 @@ export class PluginRegistry {
     ) {
       selected.add('send_message_to_group');
       selected.add('list_joined_groups');
+      selected.add('get_group_info');
       if (text.includes('join') || text.includes('invite') || text.includes('chat.whatsapp.com')) {
         selected.add('join_group');
       }
@@ -374,6 +397,23 @@ export class PluginRegistry {
       reply_to_group: 'send_message_to_group',
       post_to_group: 'send_message_to_group',
       send_group_message: 'send_message_to_group',
+      kick: 'kick_member',
+      remove_member: 'kick_member',
+      add_participant: 'add_member',
+      add_user: 'add_member',
+      delete_message: 'delete_group_message',
+      delete_msg: 'delete_group_message',
+      revoke_message: 'delete_group_message',
+      lock_group: 'set_group_mode',
+      unlock_group: 'set_group_mode',
+      lock_settings: 'set_group_mode',
+      unlock_settings: 'set_group_mode',
+      group_info: 'get_group_info',
+      list_admins: 'get_group_info',
+      disappearing_messages: 'set_disappearing_messages',
+      ephemeral_messages: 'set_disappearing_messages',
+      approve_participant: 'approve_join_request',
+      reject_participant: 'reject_join_request',
     };
 
     const resolvedName = aliasMap[name] || name;

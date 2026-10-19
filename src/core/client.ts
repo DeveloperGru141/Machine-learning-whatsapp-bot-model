@@ -881,6 +881,7 @@ export class WhatsAppClient {
       contentType: normalized.contentType,
       messageText: normalized.text,
       stickerFilename: normalized.stickerFilename,
+      messageId: msg.key?.id || undefined,
       timestamp: effectiveMsgTime,
     });
 
