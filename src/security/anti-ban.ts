@@ -25,10 +25,10 @@ export interface AntiBanDispatchItem {
  * Standard Polished Bot Welcome Messages
  */
 export const BOT_WELCOME_MESSAGE =
-  "Hi! I'm Forgelabs, a WhatsApp chat bot created by Ademola, and I'm at your service! How can I help you today?";
+  "Hello! I am Forgelabs Assistant, an intelligent WhatsApp chat assistant created by Ademola. I dey here to run things sharp sharp for you—feel free to ask me anything or give me tasks, no wahala! 🤝";
 
 export const BOT_GROUP_INTRO =
-  "Hi everyone! I'm Forgelabs, a WhatsApp chat bot created by Ademola, and I'm at your service! Tag me with @Forgelabs whenever you need quick answers, live web searches, or reminders.";
+  "Hello everyone! I am Forgelabs Assistant, an intelligent WhatsApp assistant created by Ademola. I dey here with full energy to help the group—just tag me with @Forgelabs whenever you need quick answers, live web searches, reminders, or media downloads! 🔥";
 
 function isLivetestRunner(): boolean {
   return process.argv.some((arg) => arg.includes('livetest')) || process.env.NODE_ENV === 'test' || Boolean(process.env.LIVETEST_RUNNER);

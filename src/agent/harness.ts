@@ -238,14 +238,21 @@ export class AgentHarness {
    */
   private async callLLM(params: any): Promise<any> {
     const model = llmClient.getModel();
-    try {
-      return await llmClient.chatCompletion({ ...params, model });
-    } catch (err: any) {
-      console.warn(
-        `[AgentHarness] ⚠️ Model ${model} execution failed: ${String(err?.message || err).slice(0, 160)}`
-      );
-      throw err;
+    let lastErr: any;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        return await llmClient.chatCompletion({ ...params, model });
+      } catch (err: any) {
+        lastErr = err;
+        console.warn(
+          `[AgentHarness] ⚠️ Model ${model} attempt ${attempt} failed: ${String(err?.message || err).slice(0, 160)}`
+        );
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, 1200));
+        }
+      }
     }
+    throw lastErr;
   }
 
   public async handleMessage(
@@ -705,14 +712,24 @@ export function sanitizeAssistantResponse(text: string): string {
     .replace(/\/(?:home|app|root)\/[^\s"']+/g, '[system path]')
     .replace(/\b(?:src|dist|scripts|data)\/[a-zA-Z0-9_\-\/]+\.(?:ts|js|py|sqlite|vcf|pid|env)\b/g, '[system file]');
 
-  // Strict Privacy: Never leak internal WhatsApp LIDs, wa.id, or technical IDs (e.g. 102409552584830, @lid)
+  // Strict Privacy: Never leak internal WhatsApp LIDs, wa.id, wid, or technical JIDs
   cleaned = cleaned
-    .replace(/(?:https?:\/\/)?(?:wa\.me|wa\.id)\/(?:10\d{12,14}|\d{14,16})/gi, '')
-    .replace(/\b[a-zA-Z0-9._%+-]+@s\.whatsapp\.net\b/g, '')
-    .replace(/\b[a-zA-Z0-9._%+-]+@lid\b/g, '')
+    .replace(/(?:https?:\/\/)?(?:wa\.me|wa\.id)\/[+\d]+/gi, '')
+    .replace(/\(?\b(?:wa\.id|wa_id|wid|jid|lid)[:=\s]*\+?\d+\)?/gi, '')
+    .replace(/\b(?:wa\.id|wa_id|wid)\b/gi, '')
+    .replace(/\b[a-zA-Z0-9._%+-]+@(?:s\.whatsapp\.net|lid|g\.us|broadcast)\b/gi, '')
     .replace(/@10\d{12,14}\b/g, 'my guy')
     .replace(/\b10\d{12,14}\b/g, '')
     .replace(/@\d{14,16}\b/g, '');
+
+  // Privacy Guardrail: Never append or leak creator Ademola's phone number unless explicitly requested
+  cleaned = cleaned
+    .replace(/\s*\(\+?2348108574293\)/g, '')
+    .replace(/\s*\(08108574293\)/g, '')
+    .replace(/\s*—\s*Sent on behalf of Ademola \(08108574293\)\s*via Forgelabs/gi, '— Sent on behalf of Ademola via Forgelabs');
+
+  // Strip empty parentheses left after removing IDs or numbers e.g. "Ademola ()" -> "Ademola"
+  cleaned = cleaned.replace(/\(\s*\)/g, '');
 
   // Clean double spaces left after removing emojis/clichés/IDs/secrets
   cleaned = cleaned.replace(/[ \t]+/g, ' ').replace(/\s+([.,!?:;])/g, '$1').trim();

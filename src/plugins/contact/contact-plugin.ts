@@ -660,7 +660,7 @@ export class ContactPlugin implements IPlugin {
           const isSavedContact = Boolean(targetPhone && contactService.getContact(targetPhone));
           let finalDispatchMessage = cleanMessage;
           if (!isTargetAdemola && !hasInboundHistory && !isSavedContact && !cleanMessage.toLowerCase().includes('ademola')) {
-            finalDispatchMessage = `${cleanMessage}\n\n— Sent on behalf of Ademola (08108574293) via Forgelabs`;
+            finalDispatchMessage = `${cleanMessage}\n\n— Sent on behalf of Ademola via Forgelabs`;
           }
 
           console.log(`[ContactPlugin] 📨 Sending outbound message to ${targetName} (${targetJid}): "${finalDispatchMessage.slice(0, 60)}..."`);

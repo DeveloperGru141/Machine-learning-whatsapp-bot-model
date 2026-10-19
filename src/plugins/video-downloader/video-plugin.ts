@@ -87,31 +87,88 @@ export class VideoDownloaderPlugin implements IPlugin {
 
         let downloadedPath: string | null = null;
         let videoTitle: string | undefined = undefined;
+        let isPrivateDetected = false;
 
-        // Strategy 1: rahad-all-downloader-v2 direct download (Node-native for Instagram, TikTok, FB, etc.)
-        if (alldlInstance && typeof alldlInstance.download === 'function') {
+        const checkPrivateError = (errStr: string) => {
+          const lower = (errStr || '').toLowerCase();
+          if (
+            lower.includes('private') ||
+            lower.includes('login') ||
+            lower.includes('auth') ||
+            lower.includes('sign in') ||
+            lower.includes('restricted') ||
+            lower.includes('cookie') ||
+            lower.includes('permission')
+          ) {
+            isPrivateDetected = true;
+          }
+        };
+
+        const isIg = /instagram\.com/i.test(sanitizedUrl);
+        const isTiktok = /tiktok\.com/i.test(sanitizedUrl);
+        const isFb = /facebook\.com|fb\.watch/i.test(sanitizedUrl);
+        const platformLabel = isIg ? 'Instagram reel' : isTiktok ? 'TikTok' : isFb ? 'Facebook video' : 'video';
+
+        // Strategy 1: Dedicated platform resolver in rahad-all-downloader-v2
+        if (!downloadedPath && alldlInstance) {
           try {
-            console.log('[VideoDownloader] Strategy 1: Attempting alldl.download...');
+            let platformResolver: any = null;
+            if (isIg && typeof alldlInstance.insta === 'function') platformResolver = alldlInstance.insta;
+            else if (isTiktok && typeof alldlInstance.tiktok === 'function') platformResolver = alldlInstance.tiktok;
+            else if (isFb && typeof alldlInstance.fb === 'function') platformResolver = alldlInstance.fb;
+
+            if (platformResolver) {
+              console.log(`[VideoDownloader] Strategy 1: Attempting dedicated platform resolver for ${platformLabel}...`);
+              const res = await platformResolver(sanitizedUrl);
+              const directUrl = res?.data?.videoUrl || res?.data?.url || res?.videoUrl || res?.url;
+              if (directUrl && typeof directUrl === 'string' && directUrl.startsWith('http')) {
+                const resp = await fetch(directUrl, {
+                  headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                  },
+                });
+                if (resp.ok) {
+                  const ab = await resp.arrayBuffer();
+                  if (ab.byteLength > 2048) {
+                    fs.writeFileSync(targetFilePath, Buffer.from(ab));
+                    downloadedPath = targetFilePath;
+                    videoTitle = res?.data?.title || res?.title;
+                    console.log(`[VideoDownloader] Strategy 1 (platform resolver) succeeded (${ab.byteLength} bytes)`);
+                  }
+                }
+              }
+            }
+          } catch (err: any) {
+            checkPrivateError(err?.message || '');
+            console.warn('[VideoDownloader] Strategy 1 failed:', err.message);
+          }
+        }
+
+        // Strategy 2: rahad-all-downloader-v2 direct download (Node-native for Instagram, TikTok, FB, etc.)
+        if (!downloadedPath && alldlInstance && typeof alldlInstance.download === 'function') {
+          try {
+            console.log('[VideoDownloader] Strategy 2: Attempting alldl.download...');
             const dlResult = await alldlInstance.download(sanitizedUrl, targetFilePath, { quality: 'medium' });
             if (dlResult && dlResult.path && fs.existsSync(dlResult.path)) {
               const stat = fs.statSync(dlResult.path);
               if (stat.size > 2048) {
                 downloadedPath = dlResult.path;
                 videoTitle = dlResult.title;
-                console.log(`[VideoDownloader] Strategy 1 succeeded: ${downloadedPath} (${stat.size} bytes)`);
+                console.log(`[VideoDownloader] Strategy 2 succeeded: ${downloadedPath} (${stat.size} bytes)`);
               }
             } else if (fs.existsSync(targetFilePath) && fs.statSync(targetFilePath).size > 2048) {
               downloadedPath = targetFilePath;
             }
           } catch (err: any) {
-            console.warn('[VideoDownloader] Strategy 1 failed:', err.message);
+            checkPrivateError(err?.message || '');
+            console.warn('[VideoDownloader] Strategy 2 failed:', err.message);
           }
         }
 
-        // Strategy 2: rahad-all-downloader-v2 resolve URL + fetch stream
+        // Strategy 3: rahad-all-downloader-v2 general resolve URL + fetch stream
         if (!downloadedPath && alldlInstance && typeof alldlInstance === 'function') {
           try {
-            console.log('[VideoDownloader] Strategy 2: Attempting alldl resolve...');
+            console.log('[VideoDownloader] Strategy 3: Attempting alldl resolve...');
             const resolved = await alldlInstance(sanitizedUrl);
             const directVideoUrl = resolved?.data?.videoUrl || resolved?.data?.url || resolved?.videoUrl;
             if (directVideoUrl && typeof directVideoUrl === 'string' && directVideoUrl.startsWith('http')) {
@@ -128,19 +185,20 @@ export class VideoDownloaderPlugin implements IPlugin {
                   fs.writeFileSync(targetFilePath, Buffer.from(arrayBuffer));
                   downloadedPath = targetFilePath;
                   videoTitle = resolved?.data?.title || resolved?.title;
-                  console.log(`[VideoDownloader] Strategy 2 succeeded (${arrayBuffer.byteLength} bytes)`);
+                  console.log(`[VideoDownloader] Strategy 3 succeeded (${arrayBuffer.byteLength} bytes)`);
                 }
               }
             }
           } catch (err: any) {
-            console.warn('[VideoDownloader] Strategy 2 failed:', err.message);
+            checkPrivateError(err?.message || '');
+            console.warn('[VideoDownloader] Strategy 3 failed:', err.message);
           }
         }
 
-        // Strategy 3: Dedicated TikTok fallback (TikWM API)
-        if (!downloadedPath && /tiktok\.com/i.test(sanitizedUrl)) {
+        // Strategy 4: Dedicated TikTok fallback (TikWM API)
+        if (!downloadedPath && isTiktok) {
           try {
-            console.log('[VideoDownloader] Strategy 3: TikWM fallback for TikTok...');
+            console.log('[VideoDownloader] Strategy 4: TikWM fallback for TikTok...');
             const tikwmRes = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(sanitizedUrl)}`, {
               headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -160,20 +218,23 @@ export class VideoDownloaderPlugin implements IPlugin {
                     console.log(`[VideoDownloader] TikWM fallback succeeded (${buf.byteLength} bytes)`);
                   }
                 }
+              } else if (data?.msg && /private|hidden/i.test(data.msg)) {
+                isPrivateDetected = true;
               }
             }
           } catch (err: any) {
-            console.warn('[VideoDownloader] Strategy 3 (TikWM) failed:', err.message);
+            checkPrivateError(err?.message || '');
+            console.warn('[VideoDownloader] Strategy 4 (TikWM) failed:', err.message);
           }
         }
 
-        // Strategy 4: yt-dlp fallback (if executable is installed in environment)
+        // Strategy 5: yt-dlp fallback (if executable is installed in environment)
         if (!downloadedPath) {
           try {
-            console.log('[VideoDownloader] Strategy 4: Checking yt-dlp availability...');
+            console.log('[VideoDownloader] Strategy 5: Checking yt-dlp availability...');
             const isInstalled = await checkYtDlp();
             if (isInstalled) {
-              console.log('[VideoDownloader] Strategy 4: Attempting yt-dlp download...');
+              console.log('[VideoDownloader] Strategy 5: Attempting yt-dlp download...');
               const outputPattern = path.join(tempDir, `vid_${fileId}.%(ext)s`);
               const ffArg = ffmpegPath ? `--ffmpeg-location "${ffmpegPath}"` : '';
               const cmd = `yt-dlp ${ffArg} -f "best/bestvideo+bestaudio" --recode-video mp4 --max-filesize 60M --no-playlist -o "${outputPattern}" "${sanitizedUrl}"`;
@@ -183,22 +244,27 @@ export class VideoDownloaderPlugin implements IPlugin {
                 const p = path.join(tempDir, files[0]);
                 if (fs.statSync(p).size > 2048) {
                   downloadedPath = p;
-                  console.log(`[VideoDownloader] Strategy 4 (yt-dlp) succeeded: ${p}`);
+                  console.log(`[VideoDownloader] Strategy 5 (yt-dlp) succeeded: ${p}`);
                 }
               }
             } else {
-              console.log('[VideoDownloader] Strategy 4 skipped: yt-dlp not present in runtime.');
+              console.log('[VideoDownloader] Strategy 5 skipped: yt-dlp not present in runtime.');
             }
           } catch (err: any) {
-            console.warn('[VideoDownloader] Strategy 4 failed:', err.message);
+            checkPrivateError(err?.message || '');
+            console.warn('[VideoDownloader] Strategy 5 failed:', err.message);
           }
         }
 
         // Verify result
         if (!downloadedPath || !fs.existsSync(downloadedPath)) {
-          const isIg = /instagram\.com/i.test(sanitizedUrl);
-          const isTiktok = /tiktok\.com/i.test(sanitizedUrl);
-          const platformLabel = isIg ? 'Instagram reel' : isTiktok ? 'TikTok' : 'video';
+          if (isPrivateDetected) {
+            return {
+              success: false,
+              message: `🔒 That ${platformLabel} is from a private account or locked behind login! Because it's private, external downloaders cannot bypass Instagram/TikTok's privacy wall without account credentials. Try sending a public video link instead make I run am sharp sharp! 🤝`,
+            };
+          }
+
           return {
             success: false,
             message: `Omo chief, that ${platformLabel} link don cast or the post dey private/deleted. Double check the link make we try again! 😂`,

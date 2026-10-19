@@ -164,7 +164,7 @@ async function run() {
   // 4. Test kick_member with guardrails
   const kickTool = groupAdminPlugin.tools.find((t) => t.name === 'kick_member');
   const kickOwnerResult = await kickTool.execute({ target: ownerJid }, adminCtx);
-  assert('kick_member guardrail protects owner Ademola from being kicked', !kickOwnerResult.success && kickOwnerResult.message.includes('cannot kick my creator & owner Ademola'));
+  assert('kick_member guardrail protects owner Ademola from being kicked', !kickOwnerResult.success && kickOwnerResult.message.includes('NEVER kick my creator & owner Ademola'));
 
   const kickBotResult = await kickTool.execute({ target: botJid }, adminCtx);
   assert('kick_member guardrail protects bot from kicking itself', !kickBotResult.success && kickBotResult.message.includes('Why would I kick myself'));
@@ -177,7 +177,7 @@ async function run() {
   const promoteTool = groupAdminPlugin.tools.find((t) => t.name === 'promote_member');
   const demoteTool = groupAdminPlugin.tools.find((t) => t.name === 'demote_member');
   const demoteOwnerResult = await demoteTool.execute({ target: ownerJid }, adminCtx);
-  assert('demote_member guardrail protects owner Ademola from being demoted', !demoteOwnerResult.success && demoteOwnerResult.message.includes('cannot demote Ademola'));
+  assert('demote_member guardrail protects owner Ademola from being demoted', !demoteOwnerResult.success && demoteOwnerResult.message.includes('NEVER demote my creator & owner Ademola'));
 
   await promoteTool.execute({ target: regularUserJid }, adminCtx);
   assert('promote_member calls action "promote"', lastAction?.action === 'promote');

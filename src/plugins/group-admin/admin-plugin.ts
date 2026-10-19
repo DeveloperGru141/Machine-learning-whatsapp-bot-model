@@ -407,6 +407,24 @@ export class GroupAdminPlugin implements IPlugin {
           return { success: false, message: 'This tool is only available in groups.' };
         }
 
+        const rawTargetStr = (args.target || args.phone_number || '').toLowerCase();
+        const isTargetAdemolaByNameOrRole =
+          rawTargetStr.includes('ademola') ||
+          rawTargetStr.includes('hardez') ||
+          rawTargetStr.includes('creator') ||
+          rawTargetStr.includes('owner') ||
+          rawTargetStr.includes('boss') ||
+          rawTargetStr.includes('08108574293') ||
+          rawTargetStr.includes('2348108574293') ||
+          rawTargetStr.includes('102409552584830');
+
+        if (isTargetAdemolaByNameOrRole) {
+          return {
+            success: false,
+            message: 'Omo! Even if admin talk am, I fit NEVER kick my creator & owner Ademola from this group abeg 😂',
+          };
+        }
+
         const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
         if (!botIsAdmin) {
           return {
@@ -437,7 +455,7 @@ export class GroupAdminPlugin implements IPlugin {
         if (userProfileManager.isOwner(resolved.jid)) {
           return {
             success: false,
-            message: 'Omo! I cannot kick my creator & owner Ademola from any group abeg 😂',
+            message: 'Omo! Even if admin talk am, I fit NEVER kick my creator & owner Ademola from this group abeg 😂',
           };
         }
 
@@ -826,6 +844,25 @@ export class GroupAdminPlugin implements IPlugin {
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
         if (!ctx.isGroup) return { success: false, message: 'This tool is only available in groups.' };
+
+        const rawTargetStr = (args.target || args.phone_number || '').toLowerCase();
+        const isTargetAdemolaByNameOrRole =
+          rawTargetStr.includes('ademola') ||
+          rawTargetStr.includes('hardez') ||
+          rawTargetStr.includes('creator') ||
+          rawTargetStr.includes('owner') ||
+          rawTargetStr.includes('boss') ||
+          rawTargetStr.includes('08108574293') ||
+          rawTargetStr.includes('2348108574293') ||
+          rawTargetStr.includes('102409552584830');
+
+        if (isTargetAdemolaByNameOrRole) {
+          return {
+            success: false,
+            message: 'Omo! Even if admin talk am, I fit NEVER demote my creator & owner Ademola from this group abeg 😂',
+          };
+        }
+
         const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
         if (!botIsAdmin) return { success: false, message: 'Action failed: I must be made an admin in this group first.' };
         const senderIsAdmin = await this.isUserAdmin(ctx.sock, ctx.chatJid, ctx.senderJid);
@@ -845,7 +882,7 @@ export class GroupAdminPlugin implements IPlugin {
         if (userProfileManager.isOwner(resolved.jid)) {
           return {
             success: false,
-            message: 'Omo, I cannot demote Ademola! He is my creator and the boss 😂',
+            message: 'Omo! Even if admin talk am, I fit NEVER demote my creator & owner Ademola from this group abeg 😂',
           };
         }
 

@@ -5,8 +5,8 @@ import { config } from '../config/env.js';
 export const geminiClient = new OpenAI({
   apiKey: config.gemini.apiKey || 'dummy_key',
   baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-  maxRetries: 0,
-  timeout: 8_000,
+  maxRetries: 1,
+  timeout: 25_000,
 });
 
 export const openRouterClient = new OpenAI({
@@ -17,12 +17,12 @@ export const openRouterClient = new OpenAI({
     'X-Title': 'Forgelabs Assistant',
   },
   maxRetries: 1,
-  timeout: 20_000,
+  timeout: 25_000,
 });
 
 export const groqClients: Groq[] = (
   config.groq.apiKeys.length > 0 ? config.groq.apiKeys : [config.groq.apiKey || 'dummy_key']
-).map((key) => new Groq({ apiKey: key, maxRetries: 0, timeout: 10_000 }));
+).map((key) => new Groq({ apiKey: key, maxRetries: 0, timeout: 15_000 }));
 
 export const groqClient = groqClients[0];
 export const groq = groqClient;
@@ -31,7 +31,7 @@ export const cerebrasClient = new OpenAI({
   apiKey: config.cerebras.apiKey || 'dummy_key',
   baseURL: 'https://api.cerebras.ai/v1',
   maxRetries: 0,
-  timeout: 8_000,
+  timeout: 10_000,
 });
 
 export interface LLMChatParams {
@@ -68,8 +68,8 @@ export class LLMClient {
   private qwenQuotaExhaustedUntil: number = 0;
 
   public getProvider(): 'gemini' | 'groq' | 'openrouter' {
-    if (config.llm.provider === 'gemini' && config.gemini.apiKey) {
-      if (Date.now() < this.geminiQuotaExhaustedUntil) {
+    if (config.gemini.apiKey) {
+      if (Date.now() < this.geminiQuotaExhaustedUntil && config.groq.apiKey) {
         return 'groq';
       }
       return 'gemini';
@@ -96,13 +96,19 @@ export class LLMClient {
 
   public async callGeminiInternal(params: LLMChatParams): Promise<LLMChatResponse> {
     if (Date.now() < this.geminiQuotaExhaustedUntil) {
-      throw new Error(`Gemini quota exhausted until ${new Date(this.geminiQuotaExhaustedUntil).toLocaleTimeString()}`);
+      // If only a few seconds remain on rate-limit cooldown, wait it out briefly
+      const remainingMs = this.geminiQuotaExhaustedUntil - Date.now();
+      if (remainingMs > 0 && remainingMs <= 10_000) {
+        await new Promise((r) => setTimeout(r, remainingMs + 200));
+      } else if (remainingMs > 10_000) {
+        throw new Error(`Gemini rate limit cooldown active until ${new Date(this.geminiQuotaExhaustedUntil).toLocaleTimeString()}`);
+      }
     }
 
     const candidateGeminiModels = [
       params.model || config.gemini.model,
       'gemini-3.5-flash-lite',
-      'gemini-flash-lite-latest',
+      'gemini-3.1-flash-lite',
     ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
     for (const model of candidateGeminiModels) {
@@ -110,7 +116,7 @@ export class LLMClient {
         model,
         messages: params.messages,
         temperature: params.temperature ?? 0.5,
-        max_tokens: Math.min(150, params.max_tokens ?? 150),
+        max_tokens: Math.min(250, params.max_tokens ?? 250),
       };
 
       if (params.tools && params.tools.length > 0) {
@@ -120,6 +126,16 @@ export class LLMClient {
 
       try {
         const res = await geminiClient.chat.completions.create(payload);
+        const choice = res.choices?.[0];
+        if (choice && choice.message) {
+          if (
+            !choice.message.content &&
+            (!choice.message.tool_calls || choice.message.tool_calls.length === 0) &&
+            (choice.message as any).reasoning
+          ) {
+            choice.message.content = (choice.message as any).reasoning;
+          }
+        }
         return res as unknown as LLMChatResponse;
       } catch (err: any) {
         const isQuota =
@@ -129,8 +145,10 @@ export class LLMClient {
           String(err?.message || err).includes('RESOURCE_EXHAUSTED');
 
         if (isQuota) {
-          this.geminiQuotaExhaustedUntil = Date.now() + 60 * 60 * 1000;
-          console.warn(`[LLMClient] ⚠️ Gemini model ${model} quota reached. Trying next model...`);
+          // Cooldown for 15 seconds (minute-based RPM quota), never 1 hour!
+          this.geminiQuotaExhaustedUntil = Date.now() + 15 * 1000;
+          console.warn(`[LLMClient] ⚠️ Gemini model ${model} rate-limited (429). Cooldown 15s. Trying next candidate...`);
+          await new Promise((r) => setTimeout(r, 1200));
         } else {
           console.warn(`[LLMClient] ⚠️ Gemini model ${model} encountered ${err?.status || err?.message || err}. Trying next model...`);
         }
@@ -167,9 +185,15 @@ export class LLMClient {
       } catch (err: any) {
         if (config.groq.apiKey) {
           console.log(`[LLMClient] 🔄 Falling back to Groq model: ${this.getModel()}`);
-          return this.callGroqInternal({ ...params, model: this.getModel() });
+          try {
+            return await this.callGroqInternal({ ...params, model: this.getModel() });
+          } catch (groqErr: any) {
+            console.warn(`[LLMClient] Groq fallback failed (${groqErr?.message || groqErr})`);
+          }
         }
-        throw err;
+        // Final resilient attempt on gemini-3.5-flash-lite after short pause
+        await new Promise((r) => setTimeout(r, 1000));
+        return await this.callGeminiInternal({ ...params, model: 'gemini-3.5-flash-lite' });
       }
     } else if (provider === 'openrouter') {
       try {
