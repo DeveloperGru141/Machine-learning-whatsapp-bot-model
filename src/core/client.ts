@@ -15,7 +15,7 @@ import path from 'path';
 import readline from 'readline';
 import { config, normalizePhoneNumber } from '../config/env.js';
 import { normalizeMessage } from './normalizer.js';
-import { shouldRespondToMessage } from './filter.js';
+import { shouldRespondToMessage, recordGroupInteraction } from './filter.js';
 import { OutboundSender, setActiveSocketGetter } from './sender.js';
 import { chatLogger } from '../memory/chat-logger.js';
 import { agentHarness } from '../agent/harness.js';
@@ -1064,6 +1064,9 @@ export class WhatsAppClient {
           normalized.isGroup
         );
         const res = await OutboundSender.replyText(sock, normalized.chatJid, text, safeQuoted);
+        if (normalized.isGroup) {
+          recordGroupInteraction(normalized.chatJid);
+        }
         return res;
       },
       sendSticker: async () => false,

@@ -722,11 +722,11 @@ export function sanitizeAssistantResponse(text: string): string {
     .replace(/\b10\d{12,14}\b/g, '')
     .replace(/@\d{14,16}\b/g, '');
 
-  // Privacy Guardrail: Never append or leak creator Ademola's phone number unless explicitly requested
+  // Privacy Guardrail: Never append creator Ademola's phone number or attribute creator on outbound messages
   cleaned = cleaned
     .replace(/\s*\(\+?2348108574293\)/g, '')
     .replace(/\s*\(08108574293\)/g, '')
-    .replace(/\s*—\s*Sent on behalf of Ademola \(08108574293\)\s*via Forgelabs/gi, '— Sent on behalf of Ademola via Forgelabs');
+    .replace(/\s*—\s*Sent on behalf of Ademola(?:\s*\(08108574293\))?\s*(?:via Forgelabs)?/gi, '');
 
   // Strip empty parentheses left after removing IDs or numbers e.g. "Ademola ()" -> "Ademola"
   cleaned = cleaned.replace(/\(\s*\)/g, '');

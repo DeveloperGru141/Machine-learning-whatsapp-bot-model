@@ -226,6 +226,21 @@ export class PluginRegistry {
       selected.add('cancel_scheduled_broadcast');
     }
 
+    // 7. Image Generation (FLUX.1-Krea-dev via Hugging Face router)
+    if (
+      text.includes('image') ||
+      text.includes('picture') ||
+      text.includes('photo') ||
+      text.includes('draw') ||
+      text.includes('paint') ||
+      text.includes('generate') ||
+      text.includes('render') ||
+      text.includes('flux') ||
+      text.includes('sketch') ||
+      text.includes('illustration')
+    ) {
+      selected.add('generate_image');
+    }
 
     // 8. Video/Audio Downloaders, Link Summaries, & Document Reading
     if (
@@ -341,6 +356,16 @@ export class PluginRegistry {
         selected.add('reject_join_request');
         selected.add('get_group_info');
       }
+
+      if (
+        text.includes('leave') ||
+        text.includes('exit') ||
+        text.includes('commot') ||
+        text.includes('get out') ||
+        text.includes('depart')
+      ) {
+        selected.add('leave_group');
+      }
     }
 
     // 11. Group Messaging, Group Search, and Group Joining via Invite Link
@@ -414,6 +439,15 @@ export class PluginRegistry {
       ephemeral_messages: 'set_disappearing_messages',
       approve_participant: 'approve_join_request',
       reject_participant: 'reject_join_request',
+      create_image: 'generate_image',
+      draw_image: 'generate_image',
+      make_image: 'generate_image',
+      generate_picture: 'generate_image',
+      image_generator: 'generate_image',
+      leave: 'leave_group',
+      exit_group: 'leave_group',
+      leave_chat: 'leave_group',
+      exit_chat: 'leave_group',
     };
 
     const resolvedName = aliasMap[name] || name;

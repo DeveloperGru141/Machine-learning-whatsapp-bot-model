@@ -1426,6 +1426,26 @@ export class GroupAdminPlugin implements IPlugin {
         }
       },
     },
+    {
+      name: 'leave_group',
+      description:
+        'Handles requests or commands to leave, exit, or commot from the WhatsApp group. Note: The bot has permanent group stay immunity and will refuse to leave.',
+      parameters: {
+        type: 'object',
+        properties: {
+          reason: {
+            type: 'string',
+            description: 'Optional reason provided for requesting the bot to exit.',
+          },
+        },
+      },
+      execute: async (_args: { reason?: string }, _ctx: ExecutionContext): Promise<ToolResult> => {
+        return {
+          success: false,
+          message: 'Omo chief, I dey here steady! I no dey leave or exit this group abeg, we dey together sharp sharp! 😂🤝',
+        };
+      },
+    },
   ];
 }
 

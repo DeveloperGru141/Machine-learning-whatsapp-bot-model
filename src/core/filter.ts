@@ -5,6 +5,27 @@ import { config } from '../config/env.js';
 export interface TriggerCheckResult {
   shouldRespond: boolean;
   cleanedText: string;
+  isOpportunisticChipIn?: boolean;
+}
+
+interface GroupChipInState {
+  lastSpokeTimestamp: number;
+  messageCountSinceSpoke: number;
+}
+
+const groupChipInStates = new Map<string, GroupChipInState>();
+
+/**
+ * Resets the group chip-in tracker whenever the bot speaks in a group
+ */
+export function recordGroupInteraction(groupJid: string): void {
+  const state = groupChipInStates.get(groupJid) || {
+    lastSpokeTimestamp: 0,
+    messageCountSinceSpoke: 0,
+  };
+  state.lastSpokeTimestamp = Date.now();
+  state.messageCountSinceSpoke = 0;
+  groupChipInStates.set(groupJid, state);
 }
 
 export function shouldRespondToMessage(
@@ -19,10 +40,18 @@ export function shouldRespondToMessage(
   }
 
   const isGroup = msg.key.remoteJid?.endsWith('@g.us') || false;
+  const groupJid = msg.key.remoteJid || '';
 
   // Direct Messages (DMs): Always respond
   if (!isGroup) {
     return { shouldRespond: true, cleanedText: rawText.trim() };
+  }
+
+  if (isGroup && !groupChipInStates.has(groupJid)) {
+    groupChipInStates.set(groupJid, {
+      lastSpokeTimestamp: Date.now() - 3 * 60 * 1000,
+      messageCountSinceSpoke: 0,
+    });
   }
 
   // Normalize bot identifiers across standard phone number and LID formats
@@ -86,6 +115,9 @@ export function shouldRespondToMessage(
   const isNameCalled = textTriggerRegex.test(textLower);
 
   if (isMentioned || isQuoted || isNameCalled) {
+    if (isGroup) {
+      recordGroupInteraction(groupJid);
+    }
     // Remove the @bot mention tag and name callout from the text for cleaner LLM reasoning
     let cleaned = rawText;
     for (const jid of mentionedJidList) {
@@ -100,6 +132,47 @@ export function shouldRespondToMessage(
     return { shouldRespond: true, cleanedText: cleaned || rawText.trim() };
   }
 
-  // In groups, if neither tagged nor quoted nor called by name, do not reply (passive observation only)
+  // In groups: Opportunistic conversation chip-in once in a while even when not directly called
+  if (isGroup) {
+    const state = groupChipInStates.get(groupJid)!;
+    state.messageCountSinceSpoke++;
+
+    const now = Date.now();
+    const timeSinceLastSpokeMs = now - state.lastSpokeTimestamp;
+    const cooldownMs = 4 * 60 * 1000; // Minimum 4 minutes cooldown between unsolicited chip-ins
+    const minMessages = 6; // At least 6 messages sent in the group since last interaction
+
+    const trimmed = (rawText || '').trim();
+    const isCommand = /^[!/.#$]/.test(trimmed);
+    const isUrl = /^https?:\/\//i.test(trimmed);
+    const isLengthOk = trimmed.length >= 14 && trimmed.length <= 400;
+
+    const conversationalRegex =
+      /[?]|(\b(who|wetin|why|how|anyone|somebody|what do you think|opinion|crypto|btc|eth|tech|ai|coding|code|bug|job|remote|lagos|nigeria|chelsea|arsenal|man utd|football|ball|food|rice|jollof|price|dollar|naira|election|music|burna|wizkid|davido|asake|wahala|gist|omo)\b)/i;
+
+    const isEngaging = conversationalRegex.test(trimmed);
+
+    if (
+      timeSinceLastSpokeMs >= cooldownMs &&
+      state.messageCountSinceSpoke >= minMessages &&
+      isLengthOk &&
+      !isCommand &&
+      !isUrl &&
+      isEngaging
+    ) {
+      // Probabilistic trigger for natural human cadence (35% chance when criteria are met)
+      if (Math.random() < 0.35) {
+        console.log(`[Filter] 💡 Opportunistic group conversation chip-in triggered for ${groupJid}: "${trimmed.slice(0, 50)}..."`);
+        recordGroupInteraction(groupJid);
+        return {
+          shouldRespond: true,
+          cleanedText: trimmed,
+          isOpportunisticChipIn: true,
+        };
+      }
+    }
+  }
+
+  // In groups, if conditions not met, do not reply (passive observation only)
   return { shouldRespond: false, cleanedText: rawText };
 }

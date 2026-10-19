@@ -108,7 +108,9 @@ export const config = {
     model: process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
   },
   huggingface: {
-    apiKey: process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || '',
+    apiKey: process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || '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',
+    model: process.env.HUGGINGFACE_MODEL || 'black-forest-labs/FLUX.1-Krea-dev',
+    provider: process.env.HUGGINGFACE_PROVIDER || 'fal-ai',
   },
   paths: {
     sessions: path.resolve(process.env.SESSIONS_DIR || './sessions'),

@@ -127,9 +127,10 @@ const mockCtxAdmin = {
   const dirty3 = 'Hello! — Sent on behalf of Ademola (08108574293) via Forgelabs';
   const clean3 = sanitizeAssistantResponse(dirty3);
   assert(!clean3.includes('(08108574293)'), `Expected no phone number in attribution, got: ${clean3}`);
-  assert(clean3.includes('— Sent on behalf of Ademola via Forgelabs'), `Expected clean attribution, got: ${clean3}`);
+  assert(!clean3.includes('Sent on behalf of Ademola'), `Expected no creator attribution, got: ${clean3}`);
+  assert.strictEqual(clean3, 'Hello!', `Expected clean message without attribution, got: ${clean3}`);
 
-  console.log('✅ Test 5 Passed: All WID/wa.id leaks, JIDs, and phone number attributions scrubbed.\n');
+  console.log('✅ Test 5 Passed: All WID/wa.id leaks, JIDs, and creator attributions scrubbed.\n');
 
   // Test 6: LLM Client configuration
   console.log('▶ Test 6: Verify LLM Client Resilience Config...');
