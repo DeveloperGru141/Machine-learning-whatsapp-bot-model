@@ -9,16 +9,27 @@ try {
   dns.setDefaultResultOrder('ipv4first');
 } catch {}
 
+/**
+ * Automatically boosts prompt aesthetics and photorealism for top-tier visual outputs.
+ */
+function boostPromptQuality(rawPrompt: string): string {
+  const p = rawPrompt.trim();
+  if (/(?:8k|photorealistic|cinematic|hyperrealistic|studio lighting|octane render|masterpiece|ultra detailed|canon|nikon)/i.test(p)) {
+    return p;
+  }
+  return `${p}, cinematic lighting, photorealistic, highly detailed, sharp focus, 8k resolution, masterpiece`;
+}
+
 export class ImageGenPlugin implements IPlugin {
   name = 'ImageGenerator';
-  version = '2.2.0';
-  description = 'Generates realistic, artistic, and conceptual images using free open-source FLUX.1 models hosted on Hugging Face Spaces.';
+  version = '2.3.0';
+  description = 'Generates top-tier, hyper-realistic, and artistic images using state-of-the-art open-source FLUX.1 models hosted on Hugging Face Spaces.';
 
   tools: BotTool[] = [
     {
       name: 'generate_image',
       description:
-        'Generates an image from a descriptive text prompt using free open-source FLUX.1 (via Hugging Face) and delivers the photo directly to WhatsApp. Use whenever someone asks to draw, generate, create, show, or make a picture or image.',
+        'Generates a stunning, high-definition image from a descriptive text prompt using the world-class open-source FLUX.1 model (by Black Forest Labs via Hugging Face) and delivers the photo directly to WhatsApp. Use whenever someone asks to draw, generate, create, show, or make a picture or image.',
       parameters: {
         type: 'object',
         properties: {
@@ -37,38 +48,43 @@ export class ImageGenPlugin implements IPlugin {
         args: { prompt: string; caption?: string },
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
-        const prompt = (args.prompt || '').trim();
-        if (!prompt) {
+        const rawPrompt = (args.prompt || '').trim();
+        if (!rawPrompt) {
           return { success: false, message: 'Please provide a prompt describing the image you want to generate.' };
         }
 
-        console.log(`[ImageGen] 🎨 Generating free image for prompt: "${prompt}" using open-source FLUX.1 on Hugging Face...`);
+        const prompt = boostPromptQuality(rawPrompt);
+        console.log(`[ImageGen] 🎨 Generating top-tier image with FLUX.1 for: "${prompt.slice(0, 80)}..."`);
 
         const hfToken = config.huggingface.apiKey;
 
-        // Candidate Hugging Face ZeroGPU Spaces running official FLUX.1 models (100% free, zero paid credits needed)
-        const CANDIDATE_SPACES = [
-          'black-forest-labs/FLUX.1-schnell',
-          'black-forest-labs/FLUX.1-dev',
+        // Top-tier official FLUX.1 models running on Hugging Face ZeroGPU (100% free, zero paid credits required)
+        const SPACES = [
+          { id: 'black-forest-labs/FLUX.1-schnell', steps: 4, width: 768, height: 768 },
+          { id: 'black-forest-labs/FLUX.1-dev', steps: 25, width: 768, height: 768, guidance: 3.5 },
         ];
 
-        for (const spaceId of CANDIDATE_SPACES) {
+        for (const target of SPACES) {
           try {
-            console.log(`[ImageGen] Connecting to free Hugging Face Space "${spaceId}"...`);
-            const client = await Client.connect(spaceId, {
+            console.log(`[ImageGen] Connecting to top-tier Space "${target.id}"...`);
+            const client = await Client.connect(target.id, {
               token: hfToken as any,
             });
 
-            console.log(`[ImageGen] Requesting inference from ${spaceId}...`);
-            const result: any = await client.predict('/infer', {
+            console.log(`[ImageGen] Requesting FLUX.1 inference (${target.width}x${target.height}, ${target.steps} steps)...`);
+            const payload: any = {
               prompt,
-              seed: 0,
+              seed: Math.floor(Math.random() * 1000000),
               randomize_seed: true,
-              width: 512,
-              height: 512,
-              num_inference_steps: 4,
-            });
+              width: target.width,
+              height: target.height,
+              num_inference_steps: target.steps,
+            };
+            if (target.guidance) {
+              payload.guidance_scale = target.guidance;
+            }
 
+            const result: any = await client.predict('/infer', payload);
             const fileData = result?.data?.[0];
             let imageBuffer: Buffer | null = null;
 
@@ -77,7 +93,7 @@ export class ImageGenPlugin implements IPlugin {
               const localPath = typeof fileData === 'object' ? fileData?.path : undefined;
 
               if (fileUrl && (fileUrl.startsWith('http://') || fileUrl.startsWith('https://'))) {
-                console.log(`[ImageGen] Fetching generated image from Space URL: ${fileUrl.slice(0, 60)}...`);
+                console.log(`[ImageGen] Fetching generated FLUX.1 image: ${fileUrl.slice(0, 60)}...`);
                 const imgRes = await fetch(fileUrl);
                 if (imgRes.ok) {
                   const arr = await imgRes.arrayBuffer();
@@ -89,23 +105,23 @@ export class ImageGenPlugin implements IPlugin {
             }
 
             if (imageBuffer && imageBuffer.length > 0) {
-              console.log(`[ImageGen] ✅ Image generated successfully (${imageBuffer.length} bytes)! Sending to WhatsApp...`);
-              await ctx.sendImage(imageBuffer, args.caption || `🎨 ${prompt}`);
+              console.log(`[ImageGen] ✅ Top-tier FLUX.1 image generated (${imageBuffer.length} bytes)! Sending to WhatsApp...`);
+              await ctx.sendImage(imageBuffer, args.caption || `🎨 ${rawPrompt}`);
               return {
                 success: true,
-                message: `Image generated successfully using open-source FLUX.1 on Hugging Face and sent to WhatsApp!`,
-                data: { prompt, space: spaceId, sizeBytes: imageBuffer.length },
+                message: `Top-tier image generated successfully with FLUX.1 and sent to WhatsApp!`,
+                data: { prompt: rawPrompt, space: target.id, sizeBytes: imageBuffer.length },
               };
             }
           } catch (spaceErr: any) {
-            console.warn(`[ImageGen] Free Space "${spaceId}" inference failed:`, spaceErr.message || spaceErr);
+            console.warn(`[ImageGen] Space "${target.id}" inference notice:`, spaceErr.message || spaceErr);
           }
         }
 
         return {
           success: false,
           message:
-            'Could not generate image at this moment. Hugging Face free GPU spaces are currently high in demand. Please try again in a few moments.',
+            'Could not generate image at this moment. The FLUX.1 GPU cluster is currently busy. Please try again shortly.',
         };
       },
     },
