@@ -1,4 +1,4 @@
-# Forgelabs Assistant — Agentic WhatsApp Bot
+# Forgelabs Assistant — This is forgelabs assistant an Agentic WhatsApp Bot i was inspired to build this by my bro micah okoh, and my other bro Adeniran glory, we're going places guys
 
 Engineered by **Ademola** (Aspiring ML/AI Engineer). Built on `@whiskeysockets/baileys`, multi-tier Groq (`qwen/qwen3.8-27b` -> `openai/gpt-oss-120b` -> `openai/gpt-oss-20b`), Google Gemini (`gemini-3.5-flash-lite`), and SQLite WAL persistent memory.
 
@@ -13,3 +13,6 @@ Engineered by **Ademola** (Aspiring ML/AI Engineer). Built on `@whiskeysockets/b
 - **Built-in Health Server**: Exposes `GET /health` on `PORT` (default `3000`) for Docker, Render, Railway, Koyeb, Fly.io, and UptimeRobot monitoring.
 
 Bot developing a bit of humanlike sentience😂😂
+
+Built with love by Ademola 2026
+My first machine learnig model with a real training data pipeline
