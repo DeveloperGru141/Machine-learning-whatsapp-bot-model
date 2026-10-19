@@ -108,6 +108,24 @@ export class ContactPlugin implements IPlugin {
       },
       execute: async (args: { query: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
+          const cleanQuery = (args.query || '').trim();
+          const isBossQuery =
+            /^(the\s+)?(my\s+)?(your\s+)?(boss|owner|creator|maker|developer|dev|engineer|ademola|hardez)$/i.test(cleanQuery) ||
+            /\b(your\s+boss|my\s+boss|the\s+boss|your\s+creator|the\s+creator|your\s+owner|the\s+owner|ademola)\b/i.test(cleanQuery);
+
+          if (isBossQuery) {
+            return {
+              success: true,
+              message: `Found contact: *Ademola (Creator & Boss)*\n📞 Phone: +2348108574293\n📝 Notes: Creator, developer, and owner of Forgelabs assistant`,
+              data: {
+                phone_number: '2348108574293',
+                jid: '2348108574293@s.whatsapp.net',
+                display_name: 'Ademola (Creator & Boss)',
+                custom_name: 'Ademola (Boss)',
+              },
+            };
+          }
+
           const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
           if (!isOwner) {
             return {
@@ -367,14 +385,14 @@ export class ContactPlugin implements IPlugin {
     {
       name: 'send_message_to_contact',
       description:
-        'Sends a direct WhatsApp text message to ANY phone number (e.g. "+234 913 191 8009", "09131918009") or contact name, and verifies live WhatsApp delivery confirmation. Does NOT require the number to be saved in the address book first. Use this tool immediately whenever a user asks to message, text, tell, or ping any phone number or contact.',
+        'Sends a direct WhatsApp text message to ANY phone number (e.g. "+234 913 191 8009", "09131918009"), contact name, or to the bot\'s boss/creator Ademola (+2348108574293). When asked to message or tell your boss/creator, pass recipient as "boss" or "+2348108574293". Verifies live WhatsApp delivery confirmation.',
       parameters: {
         type: 'object',
         properties: {
           recipient: {
             type: 'string',
             description:
-              'The phone number with country code (e.g. "+234 913 191 8009", "09131918009") or contact name in the address book. Any phone number can be messaged directly without saving first.',
+              'The phone number with country code (e.g. "+234 913 191 8009", "09131918009"), contact name, or "boss"/"Ademola". Any phone number can be messaged directly without saving first.',
           },
           phone: {
             type: 'string',
@@ -419,11 +437,22 @@ export class ContactPlugin implements IPlugin {
           let targetName = args.name?.trim() || rawRecipient;
           let targetPhone = '';
 
+          // -1. Check if recipient refers to the bot's boss / owner / creator / Ademola
+          const isBossRecipient =
+            /^(the\s+)?(my\s+)?(your\s+)?(boss|owner|creator|maker|developer|dev|engineer|ademola|hardez)$/i.test(rawRecipient) ||
+            /\b(your\s+boss|my\s+boss|the\s+boss|your\s+creator|the\s+creator|your\s+owner|the\s+owner|ademola)\b/i.test(rawRecipient);
+
+          if (isBossRecipient) {
+            targetPhone = '2348108574293';
+            targetJid = '2348108574293@s.whatsapp.net';
+            targetName = 'Ademola (Boss)';
+          }
+
           // 0. Check if recipient is a relative reference ("him", "her", "them", "that number", "last guy") or empty
           const isRelativeRef =
             /^(the\s+)?(last|previous)\s+(guy|person|contact|number|one|dude)|(guy\s+(wey|that|u|you))|^(him|her|them|that\s+number)$/i.test(rawRecipient);
 
-          if (isRelativeRef || !rawRecipient || rawRecipient === 'undefined') {
+          if (!targetJid && (isRelativeRef || !rawRecipient || rawRecipient === 'undefined')) {
             // First check recent messages in THIS chat for any phone number mentioned
             try {
               const recentInChat = db.prepare(`
@@ -501,10 +530,11 @@ export class ContactPlugin implements IPlugin {
                   targetJid = saved.jid;
                 }
               } else {
-                // 3. Fallback search in SQLite contacts table
+                // 3. Fallback search in SQLite contacts table (exclude accidental Crypto Boss match)
                 const row = db.prepare(`
                   SELECT * FROM contacts
-                  WHERE display_name LIKE ? OR custom_name LIKE ? OR notes LIKE ?
+                  WHERE (display_name LIKE ? OR custom_name LIKE ? OR notes LIKE ?)
+                    AND display_name != 'Crypto Boss😊'
                   ORDER BY CASE WHEN jid LIKE '%@s.whatsapp.net' THEN 0 ELSE 1 END
                   LIMIT 1
                 `).get(`%${rawRecipient}%`, `%${rawRecipient}%`, `%${rawRecipient}%`) as any;
@@ -555,6 +585,15 @@ export class ContactPlugin implements IPlugin {
             .replace(/^(?:say|that)\s+/i, '')
             .trim();
           if (!cleanMessage) cleanMessage = rawMessage;
+
+          // If relaying a message to the bot's boss Ademola from another user or group, attribute it clearly
+          const isTargetAdemola = targetJid === '2348108574293@s.whatsapp.net' || targetPhone === '2348108574293';
+          if (!isOwner && isTargetAdemola) {
+            const senderPhone = contactService.extractPhoneNumber(ctx.senderJid);
+            const senderLabel = ctx.senderName ? `${ctx.senderName} (+${senderPhone || ctx.senderJid.split('@')[0]})` : `+${senderPhone || ctx.senderJid.split('@')[0]}`;
+            const originLabel = ctx.isGroup ? `in group chat` : `via DM`;
+            cleanMessage = `📩 [Message for Boss from ${senderLabel} ${originLabel}]:\n"${cleanMessage}"`;
+          }
 
           if (!targetJid) {
             // Smart Fallback: Check if the recipient name matches a WhatsApp group!
@@ -620,7 +659,7 @@ export class ContactPlugin implements IPlugin {
 
           const isSavedContact = Boolean(targetPhone && contactService.getContact(targetPhone));
           let finalDispatchMessage = cleanMessage;
-          if (!hasInboundHistory && !isSavedContact && !cleanMessage.toLowerCase().includes('ademola')) {
+          if (!isTargetAdemola && !hasInboundHistory && !isSavedContact && !cleanMessage.toLowerCase().includes('ademola')) {
             finalDispatchMessage = `${cleanMessage}\n\n— Sent on behalf of Ademola (08108574293) via Forgelabs`;
           }
 

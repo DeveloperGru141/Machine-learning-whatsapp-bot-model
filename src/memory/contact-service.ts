@@ -278,6 +278,27 @@ export class ContactService {
     const clean = query.trim();
     const digits = this.extractPhoneNumber(clean);
 
+    // 0. Intercept references to boss, owner, creator, or Ademola
+    const isBossQuery =
+      /^(the\s+)?(my\s+)?(your\s+)?(boss|owner|creator|maker|developer|dev|engineer|ademola|hardez)$/i.test(clean) ||
+      /\b(your\s+boss|my\s+boss|the\s+boss|your\s+creator|the\s+creator|your\s+owner|the\s+owner|ademola)\b/i.test(clean);
+
+    if (isBossQuery) {
+      return {
+        id: -1,
+        phone_number: '2348108574293',
+        jid: '2348108574293@s.whatsapp.net',
+        display_name: 'Ademola (Creator & Boss)',
+        custom_name: 'Ademola (Boss)',
+        notes: 'Creator, developer, and owner of Forgelabs assistant',
+        tags: '["owner","boss","creator"]',
+        is_auto_saved: 0,
+        is_introduced: 1,
+        created_at: 0,
+        updated_at: Date.now(),
+      };
+    }
+
     try {
       // 1. Search by exact JID, phone number, or @lid/@s.whatsapp.net variants
       if (digits.length >= 7) {
@@ -295,10 +316,11 @@ export class ContactService {
         if (row) return row;
       }
 
-      // 2. Search by name
+      // 2. Search by name (exclude accidental 'Crypto Boss' match)
       const nameMatch = db.prepare(`
         SELECT * FROM contacts 
-        WHERE custom_name LIKE ? OR display_name LIKE ?
+        WHERE (custom_name LIKE ? OR display_name LIKE ?)
+          AND display_name != 'Crypto Boss😊'
         ORDER BY updated_at DESC
         LIMIT 1
       `).get(`%${clean}%`, `%${clean}%`) as ContactRecord | undefined;
