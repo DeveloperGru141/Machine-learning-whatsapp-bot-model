@@ -67,7 +67,8 @@ export class OutboundSender {
     text: string,
     quoted?: proto.IWebMessageInfo,
     isOwnerCommand?: boolean,
-    isProactiveCheckIn?: boolean
+    isProactiveCheckIn?: boolean,
+    mentions?: string[]
   ): Promise<any> {
     if (!this.checkSafety(chatJid, quoted, isOwnerCommand, isProactiveCheckIn)) return null;
 
@@ -76,7 +77,11 @@ export class OutboundSender {
     return antiBanEngine.scheduleDispatch(chatJid, async () => {
       let currentSock = sock || activeSocketGetter?.();
       try {
-        const result = await currentSock.sendMessage(chatJid, { text }, { quoted: safeQuoted });
+        const payload: any = { text };
+        if (mentions && mentions.length > 0) {
+          payload.mentions = mentions;
+        }
+        const result = await currentSock.sendMessage(chatJid, payload, { quoted: safeQuoted });
         this.recordDispatchedId(result?.key?.id);
         chatLogger.logOutboundMessage(chatJid, text);
         return result;
@@ -84,7 +89,11 @@ export class OutboundSender {
         if (safeQuoted) {
           console.warn(`[OutboundSender] Reply with quoted failed (${err.message}), retrying direct text...`);
           try {
-            const result = await currentSock.sendMessage(chatJid, { text });
+            const payload: any = { text };
+            if (mentions && mentions.length > 0) {
+              payload.mentions = mentions;
+            }
+            const result = await currentSock.sendMessage(chatJid, payload);
             this.recordDispatchedId(result?.key?.id);
             chatLogger.logOutboundMessage(chatJid, text);
             return result;

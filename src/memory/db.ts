@@ -223,6 +223,24 @@ export function initDatabase() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_group_banter_chat ON group_banter_vectors(chat_jid);
+
+    -- Contact Relay Sessions: routes replies from messaged contacts back to whoever requested the dispatch
+    CREATE TABLE IF NOT EXISTS contact_relay_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      requester_jid TEXT NOT NULL,
+      requester_name TEXT,
+      origin_chat_jid TEXT NOT NULL,
+      origin_is_group INTEGER DEFAULT 0,
+      target_jid TEXT NOT NULL,
+      target_phone TEXT,
+      dispatched_text TEXT NOT NULL,
+      status TEXT DEFAULT 'pending',
+      created_at INTEGER NOT NULL,
+      replied_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contact_relay_target ON contact_relay_sessions(target_jid, status);
+    CREATE INDEX IF NOT EXISTS idx_contact_relay_phone ON contact_relay_sessions(target_phone, status);
   `);
 
   // Safe migration for existing databases
@@ -552,3 +570,97 @@ export function setGroupAdminStatus(groupJid: string, isAdmin: boolean): void {
     console.error('[DB] Error updating group admin status:', err?.message || err);
   }
 }
+
+export interface RelaySession {
+  id: number;
+  requester_jid: string;
+  requester_name: string | null;
+  origin_chat_jid: string;
+  origin_is_group: number;
+  target_jid: string;
+  target_phone: string | null;
+  dispatched_text: string;
+  status: 'pending' | 'replied' | 'expired';
+  created_at: number;
+  replied_at: number | null;
+}
+
+export function recordRelaySession(params: {
+  requesterJid: string;
+  requesterName?: string;
+  originChatJid: string;
+  originIsGroup: boolean;
+  targetJid: string;
+  targetPhone?: string;
+  dispatchedText: string;
+}): number {
+  try {
+    const res = db.prepare(`
+      INSERT INTO contact_relay_sessions (
+        requester_jid, requester_name, origin_chat_jid, origin_is_group,
+        target_jid, target_phone, dispatched_text, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+    `).run(
+      params.requesterJid,
+      params.requesterName || null,
+      params.originChatJid,
+      params.originIsGroup ? 1 : 0,
+      params.targetJid,
+      params.targetPhone || null,
+      params.dispatchedText,
+      Date.now()
+    );
+    return Number(res.lastInsertRowid || 0);
+  } catch (err: any) {
+    console.error('[DB] Error recording relay session:', err?.message || err);
+    return 0;
+  }
+}
+
+export function findActiveRelaySession(senderJid: string, senderPhone?: string): RelaySession | null {
+  try {
+    const maxAge = Date.now() - 48 * 60 * 60 * 1000; // Active within past 48 hours
+    const cleanPhone = senderPhone ? senderPhone.replace(/\D/g, '') : '';
+
+    let row = db.prepare(`
+      SELECT * FROM contact_relay_sessions
+      WHERE target_jid = ? AND status = 'pending' AND created_at >= ?
+      ORDER BY id DESC LIMIT 1
+    `).get(senderJid, maxAge) as unknown as RelaySession | undefined;
+
+    if (!row && cleanPhone) {
+      row = db.prepare(`
+        SELECT * FROM contact_relay_sessions
+        WHERE target_phone = ? AND status = 'pending' AND created_at >= ?
+        ORDER BY id DESC LIMIT 1
+      `).get(cleanPhone, maxAge) as unknown as RelaySession | undefined;
+    }
+
+    // Also match if senderJid is an LID or vice-versa
+    if (!row && senderJid.endsWith('@lid')) {
+      row = db.prepare(`
+        SELECT * FROM contact_relay_sessions
+        WHERE target_jid = ? AND status = 'pending' AND created_at >= ?
+        ORDER BY id DESC LIMIT 1
+      `).get(senderJid, maxAge) as unknown as RelaySession | undefined;
+    }
+
+    return row || null;
+  } catch (err: any) {
+    console.error('[DB] Error querying active relay session:', err?.message || err);
+    return null;
+  }
+}
+
+export function markRelaySessionReplied(id: number): void {
+  try {
+    db.prepare(`
+      UPDATE contact_relay_sessions
+      SET status = 'replied', replied_at = ?
+      WHERE id = ?
+    `).run(Date.now(), id);
+  } catch (err: any) {
+    console.error('[DB] Error marking relay session replied:', err?.message || err);
+  }
+}
+

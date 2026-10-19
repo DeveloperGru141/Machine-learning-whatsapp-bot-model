@@ -4,7 +4,7 @@ import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { contactService } from '../../memory/contact-service.js';
 import { whatsAppClient } from '../../core/client.js';
 import { config } from '../../config/env.js';
-import { db, findKnownGroup } from '../../memory/db.js';
+import { db, findKnownGroup, recordRelaySession } from '../../memory/db.js';
 import { chatLogger } from '../../memory/chat-logger.js';
 import { OutboundSender } from '../../core/sender.js';
 import { antiBanEngine } from '../../security/anti-ban.js';
@@ -674,6 +674,24 @@ export class ContactPlugin implements IPlugin {
               success: false,
               message: `Delivery failed to ${targetName} (${targetJid}): Socket could not dispatch message.`,
             };
+          }
+
+          // Record dispatch in contact_relay_sessions so any inbound reply from this contact
+          // is automatically forwarded back to whoever requested it (or to the group where the request was made),
+          // NEVER blindly to the owner Ademola.
+          try {
+            recordRelaySession({
+              requesterJid: ctx.senderJid,
+              requesterName: ctx.senderName,
+              originChatJid: ctx.chatJid,
+              originIsGroup: ctx.isGroup,
+              targetJid: targetJid,
+              targetPhone: targetPhone || contactService.extractPhoneNumber(targetJid),
+              dispatchedText: finalDispatchMessage,
+            });
+            console.log(`[ContactPlugin] 📋 Registered relay session for recipient ${targetJid} -> requester ${ctx.senderJid} (${ctx.chatJid})`);
+          } catch (relayErr: any) {
+            console.warn('[ContactPlugin] Warning recording relay session:', relayErr.message);
           }
 
           const stanzaId = sent?.key?.id || `wa_${Date.now()}`;

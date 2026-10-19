@@ -6,7 +6,7 @@ import makeWASocket, {
   proto,
   Browsers,
 } from '@whiskeysockets/baileys';
-import { db, upsertKnownGroup } from '../memory/db.js';
+import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied } from '../memory/db.js';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { Boom } from '@hapi/boom';
@@ -952,6 +952,66 @@ export class WhatsAppClient {
     );
 
     if (!shouldRespond) return;
+
+    // Inbound Reply Routing: If this is a DM reply from someone who was messaged on behalf of another user/group,
+    // automatically route their reply back to whoever told the bot to message them, NEVER to owner Ademola!
+    if (!normalized.isGroup && this.sock && (normalized.text || normalized.contentType)) {
+      const senderPhone = contactService.extractPhoneNumber(normalized.senderJid);
+      const activeRelay = findActiveRelaySession(normalized.senderJid, senderPhone);
+
+      if (activeRelay) {
+        console.log(
+          `[RelayRouting] 🎯 Inbound reply from messaged contact ${normalized.senderJid} -> routing back to origin chat ${activeRelay.origin_chat_jid} (requester: ${activeRelay.requester_jid})`
+        );
+
+        const savedContact = contactService.getContact(normalized.senderJid);
+        const contactName =
+          savedContact?.custom_name ||
+          savedContact?.display_name ||
+          normalized.senderName ||
+          (senderPhone ? `+${senderPhone}` : 'Contact');
+        const replyBody = normalized.text || `[Sent ${normalized.contentType}]`;
+
+        // Send confirmation/acknowledgement to the contact in DM
+        const requesterDisplayName = activeRelay.requester_name || 'them';
+        await OutboundSender.replyText(
+          this.sock,
+          normalized.chatJid,
+          `Got it! I don forward your reply give ${requesterDisplayName} sharp sharp. 🤝`,
+          msg
+        );
+
+        // Forward the reply to the origin chat / requester (and NOT to Ademola unless Ademola requested it)
+        if (activeRelay.origin_is_group) {
+          const reqPhone = contactService.extractPhoneNumber(activeRelay.requester_jid);
+          const mentionTag = reqPhone ? `@${reqPhone}` : `@${activeRelay.requester_jid.split('@')[0]}`;
+          const relayNotice = `💬 *Reply from ${contactName}*:\n"${replyBody}"\n\n_CC: ${mentionTag}_`;
+
+          await OutboundSender.replyText(
+            this.sock,
+            activeRelay.origin_chat_jid,
+            relayNotice,
+            undefined,
+            true,
+            false,
+            [activeRelay.requester_jid]
+          );
+        } else {
+          const relayNotice = `💬 *Reply from ${contactName}*:\n"${replyBody}"`;
+
+          await OutboundSender.replyText(
+            this.sock,
+            activeRelay.origin_chat_jid,
+            relayNotice,
+            undefined,
+            true
+          );
+        }
+
+        markRelaySessionReplied(activeRelay.id);
+        return;
+      }
+    }
 
     // Per-User Token Rate Limiter (protect against spamming bot reasoning loop; owners are exempt)
     const isOwnerUser = userProfileManager.isOwner(normalized.senderJid, normalized.senderName);
