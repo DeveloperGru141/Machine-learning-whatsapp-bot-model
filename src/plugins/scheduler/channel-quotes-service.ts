@@ -1,3 +1,5 @@
+import path from 'path';
+import fs from 'fs';
 import type { WASocket } from '@whiskeysockets/baileys';
 import {
   saveChannelQuote,
@@ -181,7 +183,9 @@ export function seedChannelQuotesIfEmpty(): void {
     if (!countRow || countRow.count === 0) {
       console.log(`[ChannelQuotes] 📖 Seeding ${SEED_CHANNEL_QUOTES.length} initial quotes from ${WHATSAPP_CHANNEL_NAME}...`);
       for (const item of SEED_CHANNEL_QUOTES) {
-        saveChannelQuote(item.quote, item.author, item.niche, WHATSAPP_CHANNEL_INVITE_CODE);
+        const candidateImg = path.resolve(`assets/channel_media/quote_${item.niche}.jpg`);
+        const imgPath = fs.existsSync(candidateImg) ? candidateImg : null;
+        saveChannelQuote(item.quote, item.author, item.niche, WHATSAPP_CHANNEL_INVITE_CODE, undefined, imgPath);
       }
     }
   } catch (err: any) {
@@ -504,8 +508,16 @@ export async function broadcastMorningGroupMotivation(
       // 3. Format warm greeting + quote
       const messageText = await formatGroupMorningMotivation(group.subject, niche, quote);
 
-      // 4. Send message to group
-      await socket.sendMessage(group.id, { text: messageText });
+      // 4. Send message to group (with accompanying image if available)
+      const hasImage = Boolean(quote.image_path && fs.existsSync(quote.image_path));
+      if (hasImage) {
+        await socket.sendMessage(group.id, {
+          image: fs.readFileSync(quote.image_path!),
+          caption: messageText,
+        });
+      } else {
+        await socket.sendMessage(group.id, { text: messageText });
+      }
       chatLogger.logOutboundMessage(group.id, messageText);
       markQuoteUsed(quote.id);
       deliveredGroups.push(group.subject);

@@ -121,7 +121,9 @@ export function seedChannelMemesIfEmpty(): void {
     if (!countRow || countRow.count === 0) {
       console.log(`[ChannelMemes] 😂 Seeding ${SEED_CHANNEL_MEMES.length} initial memes from ${WHATSAPP_MEME_CHANNEL_NAME}...`);
       for (const item of SEED_CHANNEL_MEMES) {
-        saveChannelMeme(item.caption, item.media_type, item.media_url, null, WHATSAPP_MEME_CHANNEL_INVITE_CODE);
+        const candidateImg = path.resolve('assets/channel_media/meme_default.jpg');
+        const imgPath = fs.existsSync(candidateImg) ? candidateImg : null;
+        saveChannelMeme(item.caption, 'image', item.media_url, imgPath, WHATSAPP_MEME_CHANNEL_INVITE_CODE);
       }
     }
   } catch (err: any) {
@@ -281,20 +283,34 @@ export async function postChannelMemeWithCooldown(
   const outboundText = formatMemeBroadcast(meme);
 
   try {
+    const hasImage = Boolean(meme.image_path && fs.existsSync(meme.image_path));
     if (isStatus) {
       const statusJidList = getStatusRecipientJids(socket);
-      await safeSendStatus(
-        socket,
-        { text: outboundText },
-        { backgroundColor: '#2b2d42', font: 3 },
-        statusJidList
-      );
+      if (hasImage) {
+        await safeSendStatus(
+          socket,
+          { image: fs.readFileSync(meme.image_path!), caption: outboundText },
+          {},
+          statusJidList
+        );
+      } else {
+        await safeSendStatus(
+          socket,
+          { text: outboundText },
+          { backgroundColor: '#2b2d42', font: 3 },
+          statusJidList
+        );
+      }
       chatLogger.logOutboundMessage('status@broadcast', outboundText);
-      console.log(`[ChannelMemes] 📸 Posted meme #${meme.id} to WhatsApp Status (broadcast to ${statusJidList.length} contacts).`);
+      console.log(`[ChannelMemes] 📸 Posted meme #${meme.id} (${hasImage ? 'IMAGE' : 'TEXT'}) to WhatsApp Status (broadcast to ${statusJidList.length} contacts).`);
     } else {
-      await socket.sendMessage(targetChat, { text: outboundText });
+      if (hasImage) {
+        await socket.sendMessage(targetChat, { image: fs.readFileSync(meme.image_path!), caption: outboundText });
+      } else {
+        await socket.sendMessage(targetChat, { text: outboundText });
+      }
       chatLogger.logOutboundMessage(targetChat, outboundText);
-      console.log(`[ChannelMemes] 💬 Posted meme #${meme.id} to chat ${targetChat}.`);
+      console.log(`[ChannelMemes] 💬 Posted meme #${meme.id} (${hasImage ? 'IMAGE' : 'TEXT'}) to chat ${targetChat}.`);
     }
 
     markMemePosted(meme.id);

@@ -248,6 +248,7 @@ export function initDatabase() {
       quote_text TEXT NOT NULL UNIQUE,
       author TEXT,
       niche TEXT NOT NULL, -- 'tech_coding' | 'wealth_business' | 'academic_discipline' | 'general_growth'
+      image_path TEXT,
       channel_source TEXT DEFAULT '0029Vb7S3VAFCCoXEIdW5n2k',
       channel_message_id TEXT,
       used_count INTEGER DEFAULT 0,
@@ -313,6 +314,12 @@ export function initDatabase() {
 
   try {
     db.exec(`ALTER TABLE chat_logs ADD COLUMN message_id TEXT;`);
+  } catch {
+    // Column already exists
+  }
+
+  try {
+    db.exec(`ALTER TABLE channel_quotes ADD COLUMN image_path TEXT;`);
   } catch {
     // Column already exists
   }
@@ -726,6 +733,7 @@ export interface ChannelQuote {
   quote_text: string;
   author: string | null;
   niche: QuoteNiche;
+  image_path: string | null;
   channel_source: string;
   channel_message_id: string | null;
   used_count: number;
@@ -741,7 +749,8 @@ export function saveChannelQuote(
   author?: string | null,
   niche: QuoteNiche = 'general_growth',
   channelSource: string = '0029Vb7S3VAFCCoXEIdW5n2k',
-  messageId?: string | null
+  messageId?: string | null,
+  imagePath?: string | null
 ): boolean {
   try {
     const cleanText = (quoteText || '').trim();
@@ -750,12 +759,13 @@ export function saveChannelQuote(
     const cleanAuthor = author ? author.trim() : null;
 
     db.prepare(`
-      INSERT INTO channel_quotes (quote_text, author, niche, channel_source, channel_message_id, used_count, last_used_at, created_at)
-      VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+      INSERT INTO channel_quotes (quote_text, author, niche, image_path, channel_source, channel_message_id, used_count, last_used_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)
       ON CONFLICT(quote_text) DO UPDATE SET
         author = COALESCE(excluded.author, channel_quotes.author),
+        image_path = COALESCE(excluded.image_path, channel_quotes.image_path),
         niche = CASE WHEN channel_quotes.niche = 'general_growth' THEN excluded.niche ELSE channel_quotes.niche END
-    `).run(cleanText, cleanAuthor, niche, channelSource, messageId || null, Date.now());
+    `).run(cleanText, cleanAuthor, niche, imagePath || null, channelSource, messageId || null, Date.now());
     return true;
   } catch (err: any) {
     console.error('[DB] Error saving channel quote:', err?.message || err);

@@ -6,8 +6,9 @@ import makeWASocket, {
   proto,
   Browsers,
 } from '@whiskeysockets/baileys';
-import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied, saveChannelQuote, setBotSetting } from '../memory/db.js';
+import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied, saveChannelQuote, saveChannelMeme, setBotSetting } from '../memory/db.js';
 import { parseQuoteFromText, WHATSAPP_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-quotes-service.js';
+import { WHATSAPP_MEME_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-memes-service.js';
 import { stickerEngine } from '../plugins/stickers/sticker-engine.js';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
@@ -929,22 +930,9 @@ export class WhatsAppClient {
       return;
     }
 
-    // 3. Handle live incoming messages from WhatsApp Channel (Quotes📖)
+    // 3. Handle live incoming messages from WhatsApp Channels (Quotes📖 & Memes) with media attachments
     if (msg.key?.remoteJid?.endsWith('@newsletter')) {
-      const normalized = normalizeMessage(msg);
-      if (normalized?.text) {
-        const parsed = parseQuoteFromText(normalized.text);
-        if (parsed) {
-          saveChannelQuote(
-            parsed.quote,
-            parsed.author,
-            parsed.niche,
-            WHATSAPP_CHANNEL_INVITE_CODE,
-            msg.key.id || undefined
-          );
-          console.log(`[WhatsAppClient] 📖 Ingested real-time quote from channel: "${parsed.quote.slice(0, 30)}..." (${parsed.niche})`);
-        }
-      }
+      await this.handleNewsletterMessage(msg);
       return;
     }
 
@@ -1326,6 +1314,84 @@ export class WhatsAppClient {
    * 2. Zero cold outreach: Contacts who have never messaged the bot are skipped.
    * 3. Realistic human reading + typing delays proportional to message length.
    */
+
+  /**
+   * Ingests real-time messages from followed WhatsApp Channels (Memes & Quotes📖).
+   * Automatically downloads and saves any accompanying media (images/videos) alongside captions.
+   */
+  private async handleNewsletterMessage(msg: proto.IWebMessageInfo): Promise<void> {
+    try {
+      const channelJid = msg.key?.remoteJid || '';
+      const msgId = msg.key?.id || String(Date.now());
+      const text =
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        msg.message?.imageMessage?.caption ||
+        msg.message?.videoMessage?.caption ||
+        '';
+
+      // Download attached media (image or video)
+      let downloadedImagePath: string | null = null;
+      const isMedia = Boolean(msg.message?.imageMessage || msg.message?.videoMessage);
+      if (isMedia) {
+        try {
+          const buffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
+          if (buffer && buffer.length > 0) {
+            const ext = msg.message?.videoMessage ? 'mp4' : 'jpg';
+            const mediaDir = path.resolve('./assets/channel_media');
+            if (!fs.existsSync(mediaDir)) {
+              fs.mkdirSync(mediaDir, { recursive: true });
+            }
+            downloadedImagePath = path.join(mediaDir, `media_${msgId}.${ext}`);
+            fs.writeFileSync(downloadedImagePath, buffer);
+            console.log(`[WhatsAppClient] 📥 Downloaded channel media to ${downloadedImagePath} (${buffer.length} bytes)`);
+          }
+        } catch (mediaErr: any) {
+          console.warn('[WhatsAppClient] Could not download newsletter media:', mediaErr.message);
+        }
+      }
+
+      // Memes Channel: 120363423493864317@newsletter
+      // Quotes Channel: 120363423071912423@newsletter
+      const isMemeChannel =
+        channelJid === '120363423493864317@newsletter' ||
+        text.toLowerCase().includes('meme') ||
+        (isMedia && !text.includes('—'));
+
+      if (isMemeChannel) {
+        const caption = text || '😂 Viral Meme from WhatsApp Channel';
+        saveChannelMeme(
+          caption,
+          isMedia ? 'image' : 'text',
+          null,
+          downloadedImagePath,
+          WHATSAPP_MEME_CHANNEL_INVITE_CODE,
+          msgId
+        );
+        console.log(
+          `[WhatsAppClient] 😂 Ingested meme from channel: "${caption.slice(0, 35)}..." [Image: ${downloadedImagePath ? 'YES' : 'NO'}]`
+        );
+      } else {
+        const parsed = parseQuoteFromText(text || 'Keep pushing forward and make today count.');
+        if (parsed) {
+          saveChannelQuote(
+            parsed.quote,
+            parsed.author,
+            parsed.niche,
+            WHATSAPP_CHANNEL_INVITE_CODE,
+            msgId,
+            downloadedImagePath
+          );
+          console.log(
+            `[WhatsAppClient] 📖 Ingested quote from channel: "${parsed.quote.slice(0, 30)}..." (${parsed.niche}) [Image: ${downloadedImagePath ? 'YES' : 'NO'}]`
+          );
+        }
+      }
+    } catch (err: any) {
+      console.error('[WhatsAppClient] Error handling newsletter message:', err.message);
+    }
+  }
+
   public async replyUnrepliedMessages(batchLimit: number = 2): Promise<{ repliedCount: number; summary: string }> {
     if (this.isScanningUnreplied) {
       console.log('[WhatsAppClient] Unreplied catch-up is already running. Skipping concurrent run.');

@@ -37,9 +37,12 @@ import {
   QuoteNiche,
   getBotSetting,
   setBotSetting,
+  getFreshestQuoteForNiche,
+  getFreshestMemeForPosting,
 } from '../../memory/db.js';
 import {
   postChannelMemeWithCooldown,
+  formatMemeBroadcast,
   scrapeWhatsAppChannelMemes,
   getMemeCooldownStatus,
   seedChannelMemesIfEmpty,
@@ -431,13 +434,26 @@ export async function postMorningStatusBundle(
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Bible Verse] ${text}`);
         postedTypes.push('bible_verse');
       } else if (cat === 'motivational_quote') {
-        const text = await generateMorningContent('motivational_quotes');
-        await safeSendStatus(
-          socket,
-          { text },
-          { backgroundColor: '#0f4c5c', font: 1 },
-          statusJidList
-        );
+        const quote = getFreshestQuoteForNiche('general_growth');
+        const text = quote
+          ? `🌅 *MORNING MOTIVATION*\n\n> "${quote.quote_text}"\n— *${quote.author || 'Quotes📖'}*`
+          : await generateMorningContent('motivational_quotes');
+        const hasImage = Boolean(quote?.image_path && fs.existsSync(quote.image_path));
+        if (hasImage) {
+          await safeSendStatus(
+            socket,
+            { image: fs.readFileSync(quote!.image_path!), caption: text },
+            {},
+            statusJidList
+          );
+        } else {
+          await safeSendStatus(
+            socket,
+            { text },
+            { backgroundColor: '#0f4c5c', font: 1 },
+            statusJidList
+          );
+        }
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Motivation] ${text}`);
         postedTypes.push('motivational_quote');
       } else if (cat === 'tech_news') {
@@ -451,24 +467,37 @@ export async function postMorningStatusBundle(
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Tech News] ${text}`);
         postedTypes.push('tech_news');
       } else if (cat === 'meme') {
-        const meme = await scrapeWebMeme();
-        if (meme.imageBuffer) {
+        const meme = getFreshestMemeForPosting();
+        const hasImage = Boolean(meme?.image_path && fs.existsSync(meme.image_path));
+        if (hasImage) {
           await safeSendStatus(
             socket,
-            { image: meme.imageBuffer, caption: meme.caption },
+            { image: fs.readFileSync(meme!.image_path!), caption: formatMemeBroadcast(meme!) },
             {},
             statusJidList
           );
+          chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${meme!.caption}`);
+          postedTypes.push('meme');
         } else {
-          await safeSendStatus(
-            socket,
-            { text: meme.caption },
-            { backgroundColor: '#3a0ca3', font: 1 },
-            statusJidList
-          );
+          const webMeme = await scrapeWebMeme();
+          if (webMeme.imageBuffer) {
+            await safeSendStatus(
+              socket,
+              { image: webMeme.imageBuffer, caption: webMeme.caption },
+              {},
+              statusJidList
+            );
+          } else {
+            await safeSendStatus(
+              socket,
+              { text: meme ? formatMemeBroadcast(meme) : webMeme.caption },
+              { backgroundColor: '#3a0ca3', font: 1 },
+              statusJidList
+            );
+          }
+          chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${webMeme.caption}`);
+          postedTypes.push('meme');
         }
-        chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${meme.caption}`);
-        postedTypes.push('meme');
       }
 
       if (i < categoriesToPost.length - 1) {
