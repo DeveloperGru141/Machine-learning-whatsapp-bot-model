@@ -8,6 +8,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied, saveChannelQuote } from '../memory/db.js';
 import { parseQuoteFromText, WHATSAPP_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-quotes-service.js';
+import { stickerEngine } from '../plugins/stickers/sticker-engine.js';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { Boom } from '@hapi/boom';
@@ -1212,7 +1213,8 @@ export class WhatsAppClient {
         }
         return res;
       },
-      sendSticker: async () => false,
+      sendSticker: async (bufferOrPath: Buffer | string) =>
+        OutboundSender.sendSticker(sock, normalized.chatJid, bufferOrPath, msg),
       sendImage: (bufferOrUrl: Buffer | string, caption?: string) =>
         OutboundSender.sendImage(sock, normalized.chatJid, bufferOrUrl, caption, msg),
       sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) =>
@@ -1236,6 +1238,20 @@ export class WhatsAppClient {
           // 2. Start active typing bubble immediately so users know the bot is alive and crafting their reply
           stopTyping = antiBanEngine.startTypingHeartbeat(sock, normalized.chatJid);
           await agentHarness.handleMessage(promptText, context);
+
+          // 3. Autonomous Pattern-Based Sticker Engine:
+          // If the conversation reached heavy laughter, hype, or relatable banter, occasionally drop a matching sticker!
+          if (stickerEngine.shouldTriggerAutonomousSticker(promptText, normalized.chatJid)) {
+            const match = stickerEngine.getMatchingSticker(promptText);
+            if (match && fs.existsSync(match.absolutePath)) {
+              setTimeout(async () => {
+                try {
+                  await OutboundSender.sendSticker(sock, normalized.chatJid, match.absolutePath, msg);
+                  chatLogger.logOutboundMessage(normalized.chatJid, `[Auto-Sticker: ${match.filename}] (${match.vibe})`);
+                } catch {}
+              }, 1200);
+            }
+          }
         } catch (err: any) {
           console.error('[WhatsAppClient] Error in agent handler:', err.message);
           healthMonitor.recordError(err);
@@ -1418,7 +1434,8 @@ export class WhatsAppClient {
             await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, false, userMsgLen, false);
             return OutboundSender.replyText(sock, chat.chatJid, text, undefined);
           },
-          sendSticker: async () => false,
+          sendSticker: async (bufferOrPath: Buffer | string) =>
+            OutboundSender.sendSticker(sock, chat.chatJid, bufferOrPath, undefined),
           sendImage: (bufferOrUrl: Buffer | string, caption?: string) =>
             OutboundSender.sendImage(sock, chat.chatJid, bufferOrUrl, caption, undefined),
           sendAudio: (bufferOrUrl: Buffer | string, isVN?: boolean) =>

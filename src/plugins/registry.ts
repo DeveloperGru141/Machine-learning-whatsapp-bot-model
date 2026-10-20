@@ -231,6 +231,27 @@ export class PluginRegistry {
       selected.add('list_channel_quotes');
     }
 
+    // Memes Channel (0029Vb6oS4LJkK7AvtORyH46) with 2-Hour Cooldown
+    if (
+      text.includes('meme') ||
+      text.includes('cooldown') ||
+      text.includes('funny')
+    ) {
+      selected.add('post_channel_meme');
+      selected.add('scrape_channel_memes');
+      selected.add('get_meme_cooldown_status');
+    }
+
+    // Pattern-Based Sticker Engine
+    if (
+      text.includes('sticker') ||
+      text.includes('stk') ||
+      text.includes('send me a sticker') ||
+      text.includes('drop sticker')
+    ) {
+      selected.add('send_contextual_sticker');
+    }
+
     // 7. Image Generation (FLUX.1-Krea-dev via Hugging Face router)
     if (
       text.includes('image') ||
@@ -467,6 +488,11 @@ export class PluginRegistry {
       post_morning_motivation: 'broadcast_group_motivation',
       scrape_quotes: 'scrape_channel_quotes',
       get_channel_quotes: 'list_channel_quotes',
+      send_sticker: 'send_contextual_sticker',
+      reply_with_sticker: 'send_contextual_sticker',
+      post_meme: 'post_channel_meme',
+      scrape_memes: 'scrape_channel_memes',
+      meme_cooldown: 'get_meme_cooldown_status',
       reply_unreplied: 'reply_unreplied_messages',
       join_group_via_invite_link: 'join_group',
       join_whatsapp_group: 'join_group',

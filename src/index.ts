@@ -22,6 +22,7 @@ import { conversationExportPlugin } from './plugins/export/export-plugin.js';
 import { contactPlugin } from './plugins/contact/contact-plugin.js';
 import { imageGenPlugin } from './plugins/image-gen/image-plugin.js';
 import { engagementPlugin } from './plugins/engagement/engagement-plugin.js';
+import { stickerPlugin } from './plugins/stickers/sticker-plugin.js';
 import { reloadPluginsTool } from './plugins/hot-reload.js';
 import { whatsAppClient } from './core/client.js';
 import { healthMonitor } from './core/health-monitor.js';
@@ -379,6 +380,7 @@ async function bootstrap() {
   await pluginRegistry.registerPlugin(webSearchPlugin);
   await pluginRegistry.registerPlugin(imageGenPlugin);
   await pluginRegistry.registerPlugin(engagementPlugin);
+  await pluginRegistry.registerPlugin(stickerPlugin);
 
   console.log(`🔌 Registered ${pluginRegistry.getAllTools().length} tools across plugins.`);
 

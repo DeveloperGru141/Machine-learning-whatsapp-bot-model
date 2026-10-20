@@ -33,6 +33,15 @@ import {
   getChannelQuotesStats,
   QuoteNiche,
 } from '../../memory/db.js';
+import {
+  postChannelMemeWithCooldown,
+  scrapeWhatsAppChannelMemes,
+  getMemeCooldownStatus,
+  seedChannelMemesIfEmpty,
+  WHATSAPP_MEME_CHANNEL_INVITE_CODE,
+  WHATSAPP_MEME_CHANNEL_URL,
+  WHATSAPP_MEME_CHANNEL_NAME,
+} from './channel-memes-service.js';
 
 let activeSocket: WASocket | null = null;
 
@@ -447,6 +456,10 @@ export class SchedulerPlugin implements IPlugin {
     this.ensureMorningStatusSchedule();
     // Automatically ensure daily morning group motivational greetings at 07:00 AM across all participating groups
     this.ensureMorningGroupMotivationSchedule();
+    // Seed memes from WhatsApp channel Memes (0029Vb6oS4LJkK7AvtORyH46)
+    seedChannelMemesIfEmpty();
+    // Automatically ensure 2-hour meme posting schedule (with strict 2hr cooldown)
+    this.ensureTwoHourMemeSchedule();
 
     if (this.timerInterval) {
       clearInterval(this.timerInterval);
@@ -577,6 +590,38 @@ export class SchedulerPlugin implements IPlugin {
     }
   }
 
+  /**
+   * Automatically schedules a recurring 2-hour meme post from WhatsApp Channel Memes (0029Vb6oS4LJkK7AvtORyH46)
+   * with strict 2-hour cooldown enforcement between postings.
+   */
+  public ensureTwoHourMemeSchedule(): void {
+    try {
+      const statusJid = 'status@broadcast';
+      const existing = db
+        .prepare(`SELECT id, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'channel_meme_2hr_post' AND status = 'pending'`)
+        .get(statusJid) as { id: number; fire_at: number } | undefined;
+
+      const fireAt = Date.now() + 2 * 60 * 60 * 1000;
+
+      if (!existing) {
+        insertScheduledTask(
+          statusJid,
+          '2348108574293@s.whatsapp.net',
+          '2-Hour WhatsApp Channel Meme Broadcast',
+          fireAt,
+          'every_2_hours',
+          'channel_meme_2hr_post',
+          '2hr',
+          'Scrapes and posts viral memes from WhatsApp Channel Memes (0029Vb6oS4LJkK7AvtORyH46) with 2-hour cooldown',
+          'WhatsApp Status'
+        );
+        console.log(`[Scheduler] 😂 Registered 2-hour meme poster schedule with strict 2hr cooldown.`);
+      }
+    } catch (err: any) {
+      console.warn('[Scheduler] Could not ensure 2-hour meme schedule:', err.message);
+    }
+  }
+
   public async onUnload(): Promise<void> {
     if (this.timerInterval) {
       clearInterval(this.timerInterval);
@@ -632,6 +677,16 @@ export class SchedulerPlugin implements IPlugin {
             } else {
               markTaskFired(task.id);
             }
+            continue;
+          }
+
+          if (task.topic === 'channel_meme_2hr_post') {
+            await postChannelMemeWithCooldown(socket, false, task.chat_jid);
+            const nextFireAt = Date.now() + 2 * 60 * 60 * 1000;
+            rescheduleRecurringTask(task.id, nextFireAt);
+            console.log(
+              `[Scheduler] 🔄 2-Hour Meme Task #${task.id} processed and rescheduled for ${new Date(nextFireAt).toLocaleTimeString()}.`
+            );
             continue;
           }
 
@@ -1126,6 +1181,88 @@ export class SchedulerPlugin implements IPlugin {
         } catch (err: any) {
           return { success: false, message: `Failed to list channel quotes: ${err.message}` };
         }
+      },
+    },
+    {
+      name: 'post_channel_meme',
+      description:
+        'Posts a fresh viral meme scraped from WhatsApp Channel Memes (0029Vb6oS4LJkK7AvtORyH46) to WhatsApp Status (status@broadcast) or the current chat, strictly enforcing the 2-hour cooldown between posts.',
+      parameters: {
+        type: 'object',
+        properties: {
+          force: {
+            type: 'boolean',
+            description:
+              'Optional: Set to true to override the 2-hour cooldown if explicitly ordered by owner Ademola. Defaults to false.',
+          },
+          target: {
+            type: 'string',
+            description:
+              'Optional target: "status@broadcast" (default) or a specific group name/JID.',
+          },
+        },
+      },
+      execute: async (args: { force?: boolean; target?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const socket = this.sock || ctx.sock || activeSocket;
+          if (!socket) {
+            return { success: false, message: 'WhatsApp socket is not connected.' };
+          }
+          const target = args.target || 'status@broadcast';
+          const res = await postChannelMemeWithCooldown(socket, Boolean(args.force), target);
+          return {
+            success: res.success,
+            message: res.message,
+            data: res,
+          };
+        } catch (err: any) {
+          return { success: false, message: `Failed to post meme: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'scrape_channel_memes',
+      description:
+        'Scrapes fresh memes directly from WhatsApp Channel Memes (https://whatsapp.com/channel/0029Vb6oS4LJkK7AvtORyH46) into the local meme bank.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const socket = this.sock || ctx.sock || activeSocket;
+          if (!socket) {
+            return { success: false, message: 'WhatsApp socket is not connected.' };
+          }
+          const res = await scrapeWhatsAppChannelMemes(socket);
+          const cooldown = getMemeCooldownStatus();
+          return {
+            success: true,
+            message: `Scraped Memes channel. Added ${res.newMemesSaved} new memes. Next post cooldown: ${cooldown.remainingMinutes} min(s) remaining.`,
+            data: { ...res, cooldown },
+          };
+        } catch (err: any) {
+          return { success: false, message: `Failed to scrape channel memes: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'get_meme_cooldown_status',
+      description:
+        'Checks whether the 2-hour cooldown for posting memes from WhatsApp Channel Memes has elapsed and reports remaining time before the next post is allowed.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (): Promise<ToolResult> => {
+        const status = getMemeCooldownStatus();
+        return {
+          success: true,
+          message: status.canPost
+            ? '🟢 Meme posting is ready! 2-hour cooldown has elapsed.'
+            : `⏳ Cooldown active: ${status.remainingMinutes} minute(s) remaining before next meme post.`,
+          data: status,
+        };
       },
     },
   ];

@@ -256,6 +256,22 @@ export function initDatabase() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_channel_quotes_niche ON channel_quotes(niche, used_count);
+
+    -- WhatsApp Channel Memes Bank (scraped from Memes channel 0029Vb6oS4LJkK7AvtORyH46 with 2hr cooldown)
+    CREATE TABLE IF NOT EXISTS channel_memes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      caption TEXT NOT NULL,
+      media_type TEXT DEFAULT 'text', -- 'image' | 'video' | 'text'
+      media_url TEXT,
+      image_path TEXT,
+      channel_source TEXT DEFAULT '0029Vb6oS4LJkK7AvtORyH46',
+      channel_message_id TEXT,
+      used_count INTEGER DEFAULT 0,
+      last_posted_at INTEGER DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_channel_memes_posted ON channel_memes(last_posted_at, used_count);
   `);
 
   // Safe migration for existing databases
@@ -799,6 +815,123 @@ export function getChannelQuotesStats(): { total: number; byNiche: Record<string
     };
   } catch {
     return { total: 0, byNiche: {} };
+  }
+}
+
+export interface ChannelMeme {
+  id: number;
+  caption: string;
+  media_type: 'image' | 'video' | 'text';
+  media_url: string | null;
+  image_path: string | null;
+  channel_source: string;
+  channel_message_id: string | null;
+  used_count: number;
+  last_posted_at: number;
+  created_at: number;
+}
+
+/**
+ * Inserts or updates a meme scraped from the WhatsApp channel (0029Vb6oS4LJkK7AvtORyH46).
+ */
+export function saveChannelMeme(
+  caption: string,
+  mediaType: 'image' | 'video' | 'text' = 'text',
+  mediaUrl?: string | null,
+  imagePath?: string | null,
+  channelSource: string = '0029Vb6oS4LJkK7AvtORyH46',
+  messageId?: string | null
+): boolean {
+  try {
+    const cleanCaption = (caption || '').trim();
+    if (!cleanCaption || cleanCaption.length < 5) return false;
+
+    db.prepare(`
+      INSERT INTO channel_memes (caption, media_type, media_url, image_path, channel_source, channel_message_id, used_count, last_posted_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)
+    `).run(cleanCaption, mediaType, mediaUrl || null, imagePath || null, channelSource, messageId || null, Date.now());
+    return true;
+  } catch (err: any) {
+    console.error('[DB] Error saving channel meme:', err?.message || err);
+    return false;
+  }
+}
+
+/**
+ * Retrieves the freshest, least recently posted meme for the next 2-hour interval.
+ */
+export function getFreshestMemeForPosting(): ChannelMeme | null {
+  try {
+    const meme = db.prepare(`
+      SELECT * FROM channel_memes
+      ORDER BY used_count ASC, last_posted_at ASC, RANDOM()
+      LIMIT 1
+    `).get() as unknown as ChannelMeme | undefined;
+
+    return meme || null;
+  } catch (err: any) {
+    console.error('[DB] Error getting meme for posting:', err?.message || err);
+    return null;
+  }
+}
+
+/**
+ * Marks a meme as posted and records the exact timestamp to enforce the 2-hour cooldown.
+ */
+export function markMemePosted(id: number): void {
+  try {
+    db.prepare(`
+      UPDATE channel_memes
+      SET used_count = used_count + 1, last_posted_at = ?
+      WHERE id = ?
+    `).run(Date.now(), id);
+  } catch (err: any) {
+    console.error('[DB] Error marking meme posted:', err?.message || err);
+  }
+}
+
+/**
+ * Gets the timestamp of the most recently posted meme across all channels.
+ */
+export function getLatestMemePostedTimestamp(): number {
+  try {
+    const row = db.prepare('SELECT MAX(last_posted_at) as latest FROM channel_memes').get() as { latest: number | null };
+    return row?.latest || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Retrieves statistics about stored channel memes.
+ */
+export function getChannelMemesStats(): { total: number; latestPostedAt: number; totalUsed: number } {
+  try {
+    const totalRow = db.prepare('SELECT COUNT(*) as count FROM channel_memes').get() as { count: number };
+    const latestRow = db.prepare('SELECT MAX(last_posted_at) as latest FROM channel_memes').get() as { latest: number | null };
+    const usedRow = db.prepare('SELECT SUM(used_count) as used FROM channel_memes').get() as { used: number | null };
+    return {
+      total: totalRow?.count || 0,
+      latestPostedAt: latestRow?.latest || 0,
+      totalUsed: usedRow?.used || 0,
+    };
+  } catch {
+    return { total: 0, latestPostedAt: 0, totalUsed: 0 };
+  }
+}
+
+/**
+ * Returns recent channel memes for listing and inspection.
+ */
+export function getAllChannelMemes(limit = 30): ChannelMeme[] {
+  try {
+    return db.prepare(`
+      SELECT * FROM channel_memes
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(limit) as unknown as ChannelMeme[];
+  } catch {
+    return [];
   }
 }
 
