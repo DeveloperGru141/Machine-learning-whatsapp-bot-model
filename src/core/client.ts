@@ -332,6 +332,52 @@ export class WhatsAppClient {
     return this.sock;
   }
 
+  
+  public async autoBackupSessionToRender(): Promise<void> {
+    const credsFile = path.join(config.paths.sessions, 'creds.json');
+    if (!fs.existsSync(credsFile)) return;
+
+    try {
+      const rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
+      if (!rawCreds?.registered && !rawCreds?.account) return;
+
+      const zlib = await import('zlib');
+      const filesMap: Record<string, string> = {};
+      for (const file of fs.readdirSync(config.paths.sessions)) {
+        const fullPath = path.join(config.paths.sessions, file);
+        if (fs.statSync(fullPath).isFile()) {
+          filesMap[file] = fs.readFileSync(fullPath, 'utf8');
+        }
+      }
+
+      const jsonStr = JSON.stringify(filesMap);
+      const gzipped = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'));
+      const bundle = gzipped.toString('base64');
+
+      const apiKey = process.env.RENDER_API_KEY || '[REDACTED_RENDER_API_KEY]';
+      const serviceId = process.env.RENDER_SERVICE_ID || 'srv-db9jvcmq1p3s738hpa40';
+
+      const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars/SESSION_BUNDLE_BASE64`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({ value: bundle }),
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      if (res.ok) {
+        console.log(`[WhatsAppClient] 💾 Successfully persisted authenticated session (${Object.keys(filesMap).length} files) to Render SESSION_BUNDLE_BASE64!`);
+      } else {
+        console.warn(`[WhatsAppClient] Render session backup response: ${res.status}`);
+      }
+    } catch (err: any) {
+      console.warn('[WhatsAppClient] Auto backup to Render failed:', err.message);
+    }
+  }
+
   public isSocketOpen(): boolean {
     return Boolean(this.sock && (this.sock as any).ws?.isOpen);
   }
@@ -458,7 +504,12 @@ export class WhatsAppClient {
       setEngagementSocket(this.sock);
 
       // Save auth credentials whenever updated
-      this.sock.ev.on('creds.update', saveCreds);
+      this.sock.ev.on('creds.update', async () => {
+        await saveCreds();
+        if (this.isRegistered()) {
+          this.autoBackupSessionToRender();
+        }
+      });
 
       // Connection lifecycle management
       this.sock.ev.on('connection.update', async (update) => {
@@ -581,6 +632,7 @@ export class WhatsAppClient {
           this.latestPairingCode = null;
           this.latestQr = null;
           healthMonitor.setConnectionStatus(true);
+          if (this.isRegistered()) { this.autoBackupSessionToRender(); }
           this.startKeepAlive();
           this.startUnrepliedScanner();
 
