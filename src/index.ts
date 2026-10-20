@@ -64,6 +64,7 @@ console.error = (...args: any[]) => {
   ) {
     return;
   }
+  recordLog('ERROR', args);
   originalConsoleError.apply(console, args);
 };
 

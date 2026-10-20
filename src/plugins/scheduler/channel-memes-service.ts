@@ -282,7 +282,7 @@ export async function postChannelMemeWithCooldown(
       await socket.sendMessage(
         'status@broadcast',
         { text: outboundText },
-        { backgroundColor: '#2b2d42', font: 3, statusJidList } as any
+        { broadcast: true, backgroundColor: '#2b2d42', font: 3, statusJidList } as any
       );
       chatLogger.logOutboundMessage('status@broadcast', outboundText);
       console.log(`[ChannelMemes] 📸 Posted meme #${meme.id} to WhatsApp Status (broadcast to ${statusJidList.length} contacts).`);

@@ -376,7 +376,7 @@ export async function postMorningStatusBundle(
               caption: 'Forgelabs Assistant online & active! 🫡🔥 Good morning my people, wetin we dey cook today? ✨',
               mimetype: 'video/mp4',
             },
-            { statusJidList } as any
+            { broadcast: true, statusJidList } as any
           );
           chatLogger.logOutboundMessage('status@broadcast', '[Status: Motion Design] Forgelabs Assistant Intro Video');
           postedTypes.push('motion_intro');
@@ -388,7 +388,7 @@ export async function postMorningStatusBundle(
         await socket.sendMessage(
           'status@broadcast',
           { text },
-          { backgroundColor: '#1b263b', font: 1, statusJidList } as any
+          { broadcast: true, backgroundColor: '#1b263b', font: 1, statusJidList } as any
         );
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Bible Verse] ${text}`);
         postedTypes.push('bible_verse');
@@ -397,7 +397,7 @@ export async function postMorningStatusBundle(
         await socket.sendMessage(
           'status@broadcast',
           { text },
-          { backgroundColor: '#0f4c5c', font: 1, statusJidList } as any
+          { broadcast: true, backgroundColor: '#0f4c5c', font: 1, statusJidList } as any
         );
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Motivation] ${text}`);
         postedTypes.push('motivational_quote');
@@ -406,7 +406,7 @@ export async function postMorningStatusBundle(
         await socket.sendMessage(
           'status@broadcast',
           { text },
-          { backgroundColor: '#2b2d42', font: 1, statusJidList } as any
+          { broadcast: true, backgroundColor: '#2b2d42', font: 1, statusJidList } as any
         );
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Tech News] ${text}`);
         postedTypes.push('tech_news');
@@ -416,13 +416,13 @@ export async function postMorningStatusBundle(
           await socket.sendMessage(
             'status@broadcast',
             { image: meme.imageBuffer, caption: meme.caption },
-            { statusJidList } as any
+            { broadcast: true, statusJidList } as any
           );
         } else {
           await socket.sendMessage(
             'status@broadcast',
             { text: meme.caption },
-            { backgroundColor: '#3a0ca3', font: 1, statusJidList } as any
+            { broadcast: true, backgroundColor: '#3a0ca3', font: 1, statusJidList } as any
           );
         }
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${meme.caption}`);
@@ -450,6 +450,7 @@ export class SchedulerPlugin implements IPlugin {
 
   private sock: WASocket | null = null;
   private timerInterval: NodeJS.Timeout | null = null;
+  private isProcessingDueTasks = false;
 
   public setSocket(sock: WASocket): void {
     this.sock = sock;
@@ -663,6 +664,10 @@ export class SchedulerPlugin implements IPlugin {
    * Scans the database for due tasks and sends reminder messages to the respective chats.
    */
   public async checkDueTasks(): Promise<void> {
+    if (this.isProcessingDueTasks) {
+      return;
+    }
+    this.isProcessingDueTasks = true;
     try {
       const socket = this.sock || activeSocket;
       const now = Date.now();
@@ -766,6 +771,8 @@ export class SchedulerPlugin implements IPlugin {
       }
     } catch (err: any) {
       console.error('[Scheduler] Error in checkDueTasks cycle:', err);
+    } finally {
+      this.isProcessingDueTasks = false;
     }
   }
 
