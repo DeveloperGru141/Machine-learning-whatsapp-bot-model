@@ -682,6 +682,8 @@ export function sanitizeAssistantResponse(text: string): string {
   let cleaned = text
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<\/think>/gi, '')
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+    .replace(/<\/thought>/gi, '')
     .replace(/<\/?function_calls>/gi, '')
     .replace(/<tool_call[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi, '')
     .replace(/<\/tool_call>/gi, '')
@@ -689,7 +691,20 @@ export function sanitizeAssistantResponse(text: string): string {
     .replace(/<\/?args>/gi, '')
     .replace(/<function=[^>]+>[\s\S]*?(?:<\/function>|$)/gi, '')
     .replace(/<\/function>/gi, '')
+    .replace(/^(?:thinking process|thought|thinking):\s*[\s\S]*?(?=\n\n[^\n]+|\s*$)/i, '')
     .trim();
+
+  // Strip model scratchpad planning / character counting reasoning (e.g. "We need bold titles... Let's count characters...")
+  if (/(?:count characters|let's craft|make sure total characters|line\d+:.*count:|\bapprox:\s*each line length\b)/i.test(cleaned)) {
+    const paragraphs = cleaned.split(/\n\s*\n/);
+    const filtered = paragraphs.filter(p => {
+      const trimmedP = p.trim();
+      return !/^(?:(?:we|e)?\s*need|make sure total|count characters|let's craft|let's write|line\d+:|blank line|now count characters|quote block:.*length:|probably something like)/i.test(trimmedP);
+    });
+    if (filtered.length > 0) {
+      cleaned = filtered.join('\n\n').trim();
+    }
+  }
 
   // Defense-in-depth: Never let raw tool call JSON objects or fences reach WhatsApp chat
   if (

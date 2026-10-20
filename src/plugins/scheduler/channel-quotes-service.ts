@@ -357,13 +357,13 @@ export async function formatGroupMorningMotivation(
 ): Promise<string> {
   const groupClean = (groupSubject || 'the group').trim();
 
-  // Fallback high-energy templates if LLM is offline
+  // High-energy, culturally attuned greeting and charge tailored to the group's niche
   let greetingIntro = '';
   let chargeTakeaway = '';
 
   switch (niche) {
     case 'tech_coding':
-      greetingIntro = `🌅 *GOOD MORNING ${groupClean.toUpperCase()}!* ⚡💻\n\nTop of the morning to our brilliant developers, builders, and tech minds! As we step out today, make we focus on shipping clean, resilient solutions.`;
+      greetingIntro = `🌅 *GOOD MORNING ${groupClean.toUpperCase()}!* ⚡💻\n\nTop of the morning to our brilliant developers, builders, and tech minds! As we step out today, let us focus on shipping clean, resilient solutions.`;
       chargeTakeaway = `💡 *Today's Charge:*\nClear logic and daily consistency beat burnout every single time. Whatever feature, repo, or problem you are tackling today, step into it with full confidence and precision! 🚀`;
       break;
 
@@ -384,46 +384,7 @@ export async function formatGroupMorningMotivation(
       break;
   }
 
-  // Attempt dynamic LLM enrichment for maximum authenticity and warmth
-  try {
-    const prompt = `You are Forgelabs assistant, crafting an authentic, energetic morning greeting and charge for the WhatsApp group "${groupClean}".
-The group's niche is: "${niche}".
-The motivational quote from Quotes📖 is:
-"${quote.quote_text}" — ${quote.author || 'Unknown'}
-
-Generate a crisp 3-part WhatsApp message:
-1. Warm, culturally attuned morning greeting addressing "${groupClean}" and its members.
-2. The quote displayed with blockquote markdown (> "quote") and author attribution (— *Author*). Include a note that it's from WhatsApp Channel Quotes📖.
-3. A 1-2 sentence actionable morning charge/takeaway.
-4. End with: — *Forgelabs Assistant* 🫡
-
-Keep the tone natural, uplifting, and free of generic corporate AI fluff. Use bold titles with emojis. Total max 500 characters.`;
-
-    const res = await llmClient.chatCompletion({
-      messages: [{ role: 'system', content: prompt }],
-      max_tokens: 300,
-      temperature: 0.7,
-    });
-
-    let enriched = res.choices[0]?.message?.content?.trim();
-    if (enriched) {
-      // Strip any reasoning traces or <think> tags
-      enriched = enriched.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-      if (enriched.startsWith('We need to') || enriched.startsWith('I will') || enriched.startsWith('Here is')) {
-        const parts = enriched.split(/\n\s*\n/);
-        enriched = parts.slice(1).join('\n\n').trim();
-      }
-      if (
-        enriched.length > 50 &&
-        !enriched.startsWith('We need to') &&
-        (enriched.includes(quote.quote_text.slice(0, 15)) || enriched.includes('Quotes📖'))
-      ) {
-        return enriched;
-      }
-    }
-  } catch {}
-
-  // Standard polished format
+  // Clean, beautifully styled WhatsApp morning broadcast format (zero LLM scratchpad/arithmetic risk)
   return (
     `${greetingIntro}\n\n` +
     `📜 *Words of the Day (from Quotes📖):*\n` +
@@ -434,9 +395,6 @@ Keep the tone natural, uplifting, and free of generic corporate AI fluff. Use bo
   );
 }
 
-/**
- * Broadcasts the morning motivational post to all participating groups with human-like pacing.
- */
 export async function broadcastMorningGroupMotivation(
   socket: WASocket,
   targetGroupJid?: string
