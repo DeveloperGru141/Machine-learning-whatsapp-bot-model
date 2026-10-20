@@ -450,12 +450,26 @@ export async function broadcastMorningGroupMotivation(
     targetGroups = Array.from(groupMap.entries()).map(([id, subject]) => ({ id, subject }));
   }
 
+  // Deduplicate groups by normalized subject so groups with multiple community links are only messaged once
+  const seenSubjects = new Set<string>();
+  const uniqueGroups: Array<{ id: string; subject: string }> = [];
+  for (const g of targetGroups) {
+    const clean = g.subject.trim().toLowerCase();
+    if (seenSubjects.has(clean)) {
+      console.log(`[ChannelQuotes] ⏭️ Skipping duplicate group with identical subject: "${g.subject}" (${g.id})`);
+      continue;
+    }
+    seenSubjects.add(clean);
+    uniqueGroups.push(g);
+  }
+  targetGroups = uniqueGroups;
+
   if (targetGroups.length === 0) {
     console.log('[ChannelQuotes] ⚠️ No participating groups found to broadcast morning motivation.');
     return { groupsContacted: 0, deliveredGroups: [] };
   }
 
-  console.log(`[ChannelQuotes] 🚀 Starting morning motivation broadcast to ${targetGroups.length} group(s)...`);
+  console.log(`[ChannelQuotes] 🚀 Starting morning motivation broadcast to ${targetGroups.length} unique group(s)...`);
 
   const deliveredGroups: string[] = [];
   const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.LIVETEST_RUNNER);
@@ -464,6 +478,19 @@ export async function broadcastMorningGroupMotivation(
   for (let i = 0; i < targetGroups.length; i++) {
     const group = targetGroups[i];
     try {
+      // Per-group 18-hour anti-spam guard: Never send more than 1 morning greeting per day to any group
+      const recentSend = db.prepare(`
+        SELECT COUNT(*) as count FROM chat_logs 
+        WHERE chat_jid = ? 
+          AND (message_text LIKE '%GOOD MORNING%' OR message_text LIKE '%Words of the Day%' OR message_text LIKE '%Today''s Charge%')
+          AND timestamp > ?
+      `).get(group.id, Date.now() - 18 * 60 * 60 * 1000) as { count: number } | undefined;
+
+      if (recentSend && recentSend.count > 0) {
+        console.log(`[ChannelQuotes] ⏭️ Skipping group "${group.subject}" - morning motivation already sent within last 18 hours.`);
+        continue;
+      }
+
       // 1. Detect group niche
       const niche = detectGroupNiche(group.subject);
 

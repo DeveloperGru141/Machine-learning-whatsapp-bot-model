@@ -579,34 +579,28 @@ export class SchedulerPlugin implements IPlugin {
   /**
    * Automatically schedules the daily morning WhatsApp Status bundle (`status@broadcast`) at 07:00 AM sharp
    * featuring the animated winking avatar motion design video, web-scraped memes, live tech news, Bible verses, and motivational quotes.
+   * Strictly targets next 07:00 AM WAT (zero reboot catch-up).
    */
   public ensureMorningStatusSchedule(): void {
     try {
       const statusJid = 'status@broadcast';
-      const today = getTodayWatDate();
-      const lastSentDate = getBotSetting('last_morning_status_date', '');
-      const alreadyFiredToday = lastSentDate === today || hasFiredToday('morning_status_post');
-
-      const fireAt = alreadyFiredToday
-        ? getNextFireAtForTimeOfDay('07:00')
-        : getInitialScheduleFireAt('morning_status_post', '07:00');
+      // Strictly target next 07:00 AM WAT (zero boot catch-up to prevent repeated status posting on deploys)
+      const fireAt = getNextFireAtForTimeOfDay('07:00');
 
       const existing = db
         .prepare(`SELECT id, time_of_day, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_status_post' AND status = 'pending'`)
         .get(statusJid) as { id: number; time_of_day: string; fire_at: number } | undefined;
 
       if (existing) {
-        if (existing.fire_at > Date.now() + 25 * 60 * 60 * 1000 || (alreadyFiredToday && existing.fire_at <= Date.now())) {
-          db.prepare(`
-            UPDATE scheduled_tasks
-            SET time_of_day = '07:00',
-                fire_at = ?,
-                message = 'Daily 7:00 AM WhatsApp Status: Winking Avatar Motion Design & Morning Bundle',
-                custom_prompt = 'Posts animated winking Forgelabs avatar motion design video, tech news digest, Bible verse, motivation, and memes at 7:00 AM'
-            WHERE id = ?
-          `).run(fireAt, existing.id);
-          console.log(`[Scheduler] 📸 Synchronized daily morning WhatsApp Status schedule (fireAt: ${new Date(fireAt).toLocaleString()}).`);
-        }
+        db.prepare(`
+          UPDATE scheduled_tasks
+          SET time_of_day = '07:00',
+              fire_at = ?,
+              message = 'Daily 7:00 AM WhatsApp Status: Winking Avatar Motion Design & Morning Bundle',
+              custom_prompt = 'Posts animated winking Forgelabs avatar motion design video, tech news digest, Bible verse, motivation, and memes at 7:00 AM'
+          WHERE id = ?
+        `).run(fireAt, existing.id);
+        console.log(`[Scheduler] 📸 Synchronized daily morning WhatsApp Status schedule to next 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
       } else {
         insertScheduledTask(
           statusJid,
@@ -619,7 +613,7 @@ export class SchedulerPlugin implements IPlugin {
           'Posts animated winking Forgelabs avatar motion design video, tech news digest, Bible verse, motivation, and memes at 7:00 AM',
           'WhatsApp Status'
         );
-        console.log(`[Scheduler] 📸 Registered daily morning WhatsApp Status poster (fireAt: ${new Date(fireAt).toLocaleString()}).`);
+        console.log(`[Scheduler] 📸 Registered daily morning WhatsApp Status poster at 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
       }
     } catch (err: any) {
       console.warn('[Scheduler] Could not ensure morning status schedule:', err.message);
@@ -629,34 +623,28 @@ export class SchedulerPlugin implements IPlugin {
   /**
    * Automatically schedules the daily 07:00 AM morning motivational broadcast across all participating WhatsApp groups,
    * greeting members warmly and sharing a niche-tailored quote scraped from WhatsApp Channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k).
+   * Strictly targets next 07:00 AM WAT (zero reboot catch-up to prevent spamming groups).
    */
   public ensureMorningGroupMotivationSchedule(): void {
     try {
       const broadcastJid = 'all_groups@broadcast';
-      const today = getTodayWatDate();
-      const lastSentDate = getBotSetting('last_morning_group_motivation_date', '');
-      const alreadyFiredToday = lastSentDate === today || hasFiredToday('morning_group_motivation');
-
-      const fireAt = alreadyFiredToday
-        ? getNextFireAtForTimeOfDay('07:00')
-        : getInitialScheduleFireAt('morning_group_motivation', '07:00');
+      // Strictly target next 07:00 AM WAT (zero boot catch-up to eliminate duplicate group broadcasts on deploys)
+      const fireAt = getNextFireAtForTimeOfDay('07:00');
 
       const existing = db
         .prepare(`SELECT id, time_of_day, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_group_motivation' AND status = 'pending'`)
         .get(broadcastJid) as { id: number; time_of_day: string; fire_at: number } | undefined;
 
       if (existing) {
-        if (existing.fire_at > Date.now() + 25 * 60 * 60 * 1000 || (alreadyFiredToday && existing.fire_at <= Date.now())) {
-          db.prepare(`
-            UPDATE scheduled_tasks
-            SET time_of_day = '07:00',
-                fire_at = ?,
-                message = 'Daily 7:00 AM Group Motivation & Morning Greetings',
-                custom_prompt = 'Greets members of every participating group and delivers a niche-tailored quote scraped from WhatsApp Channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k)'
-            WHERE id = ?
-          `).run(fireAt, existing.id);
-          console.log(`[Scheduler] 🌅 Synchronized daily morning group motivation schedule (fireAt: ${new Date(fireAt).toLocaleString()}).`);
-        }
+        db.prepare(`
+          UPDATE scheduled_tasks
+          SET time_of_day = '07:00',
+              fire_at = ?,
+              message = 'Daily 7:00 AM Group Motivation & Morning Greetings',
+              custom_prompt = 'Greets members of every participating group and delivers a niche-tailored quote scraped from WhatsApp Channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k)'
+          WHERE id = ?
+        `).run(fireAt, existing.id);
+        console.log(`[Scheduler] 🌅 Synchronized daily morning group motivation schedule to next 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
       } else {
         insertScheduledTask(
           broadcastJid,
@@ -669,7 +657,7 @@ export class SchedulerPlugin implements IPlugin {
           'Greets members of every participating group and delivers a niche-tailored quote scraped from WhatsApp Channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k)',
           'All Participating Groups'
         );
-        console.log(`[Scheduler] 🌅 Registered daily morning group motivation broadcaster (fireAt: ${new Date(fireAt).toLocaleString()}).`);
+        console.log(`[Scheduler] 🌅 Registered daily morning group motivation broadcaster at 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
       }
     } catch (err: any) {
       console.warn('[Scheduler] Could not ensure morning group motivation schedule:', err.message);
