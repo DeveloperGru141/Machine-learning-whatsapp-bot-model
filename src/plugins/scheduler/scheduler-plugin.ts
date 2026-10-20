@@ -534,6 +534,7 @@ export class SchedulerPlugin implements IPlugin {
 
   /**
    * Automatically schedules a daily morning health status broadcast to owner Ademola (08108574293) at 07:00 AM.
+   * Strictly targets next 07:00 AM WAT—NEVER performs reboot catch-up to prevent spamming Ademola on deploys.
    */
   public ensureOwnerHealthSchedule(): void {
     try {
@@ -543,7 +544,8 @@ export class SchedulerPlugin implements IPlugin {
         .prepare(`SELECT id, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'owner_health_report' AND status = 'pending'`)
         .get(ownerJid) as { id: number; fire_at: number } | undefined;
 
-      const fireAt = getInitialScheduleFireAt('owner_health_report', '07:00');
+      // Strictly schedule for next 07:00 AM WAT (zero reboot catch-up spam)
+      const fireAt = getNextFireAtForTimeOfDay('07:00');
 
       if (existing) {
         db.prepare(`
@@ -554,7 +556,7 @@ export class SchedulerPlugin implements IPlugin {
               custom_prompt = 'Automated daily health report for Ademola'
           WHERE id = ?
         `).run(fireAt, existing.id);
-        console.log(`[Scheduler] 🩺 Synchronized daily morning health report for owner Ademola (fireAt: ${new Date(fireAt).toLocaleTimeString()}).`);
+        console.log(`[Scheduler] 🩺 Synchronized daily morning health report for owner Ademola (fireAt: ${new Date(fireAt).toLocaleString()}).`);
       } else {
         insertScheduledTask(
           ownerJid,
@@ -567,7 +569,7 @@ export class SchedulerPlugin implements IPlugin {
           'Automated daily health report for Ademola',
           'Ademola Direct'
         );
-        console.log(`[Scheduler] 🩺 Registered daily morning health report for owner Ademola at 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleTimeString()}).`);
+        console.log(`[Scheduler] 🩺 Registered daily morning health report for owner Ademola at 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
       }
     } catch (err: any) {
       console.warn('[Scheduler] Could not ensure owner health schedule:', err.message);
@@ -799,6 +801,7 @@ export class SchedulerPlugin implements IPlugin {
           if (task.topic === 'owner_health_report') {
             const nextFireAt = advanceToNextDay(task.fire_at);
             rescheduleRecurringTask(task.id, nextFireAt);
+            setBotSetting('last_owner_health_report_date', getTodayWatDate());
             try {
               const outboundText = await generateMorningContent('owner_health_report', task.custom_prompt || task.message);
               await socket.sendMessage(task.chat_jid, { text: outboundText });
