@@ -9,6 +9,7 @@ import { chatLogger } from '../../memory/chat-logger.js';
 import { OutboundSender } from '../../core/sender.js';
 import { antiBanEngine } from '../../security/anti-ban.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
+import { contactReminderService } from './contact-reminder-service.js';
 
 export class ContactPlugin implements IPlugin {
   name = 'ContactManager';
@@ -717,6 +718,171 @@ export class ContactPlugin implements IPlugin {
             message: `Failed to send message: ${err.message}`,
           };
         }
+      },
+    },
+    {
+      name: 'start_contact_save_reminders',
+      description:
+        'Initiates a safe, human-paced, anti-ban contact outreach campaign that messages contacts in the bot address book and chat history with a polite, non-spam reminder to save the bot\'s number (+234 705 896 7815) so they can view WhatsApp status posts. STRICTLY OWNER ONLY. Employs 10 randomized conversational templates, 35-75s human delays, typing presence simulation, and one-time deduplication to prevent bans.',
+      parameters: {
+        type: 'object',
+        properties: {
+          batch_size: {
+            type: 'number',
+            description: 'Number of contacts to message in this safe batch (default 20, max 50).',
+          },
+          delay_seconds_min: {
+            type: 'number',
+            description: 'Minimum delay in seconds between messages (default 35s).',
+          },
+          delay_seconds_max: {
+            type: 'number',
+            description: 'Maximum delay in seconds between messages (default 75s).',
+          },
+          only_interacted: {
+            type: 'boolean',
+            description: 'If true, ONLY messages warm contacts who have previously sent a message to the bot (safest, lowest ban risk). Default false.',
+          },
+          dry_run: {
+            type: 'boolean',
+            description: 'If true, simulates the campaign and previews recipients without sending any real messages.',
+          },
+        },
+      },
+      execute: async (
+        args: {
+          batch_size?: number;
+          delay_seconds_min?: number;
+          delay_seconds_max?: number;
+          only_interacted?: boolean;
+          dry_run?: boolean;
+        },
+        ctx: ExecutionContext
+      ): Promise<ToolResult> => {
+        const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
+        if (!isOwner) {
+          return {
+            success: false,
+            message: 'Permission denied: Only bot owner Ademola can initiate a contact save reminder broadcast.',
+          };
+        }
+
+        const sock = ctx.sock || whatsAppClient.getSocket();
+        if (!sock) {
+          return {
+            success: false,
+            message: 'WhatsApp socket is not connected. Please ensure bot is online.',
+          };
+        }
+
+        const result = await contactReminderService.start(sock, {
+          batchSize: args.batch_size,
+          delayMinSec: args.delay_seconds_min,
+          delayMaxSec: args.delay_seconds_max,
+          onlyInteracted: args.only_interacted,
+          dryRun: args.dry_run,
+        });
+
+        return {
+          success: result.success,
+          message: result.message,
+          data: result.data,
+        };
+      },
+    },
+    {
+      name: 'get_contact_save_reminder_status',
+      description:
+        'Retrieves live progress and metrics for the contact save reminder campaign (total eligible, messaged so far, remaining, active status, last recipient, next scheduled dispatch).',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (_args: {}, _ctx: ExecutionContext): Promise<ToolResult> => {
+        const status = contactReminderService.getStatus();
+        const stateDesc = status.isRunning
+          ? `🟢 Active (Pacing: dispatching next in ~${status.nextScheduledInSec || 30}s)`
+          : status.isPaused
+          ? '⏸️ Paused'
+          : '⚪ Idle / Completed';
+
+        const summary = `📊 *Contact Save Reminder Status*:
+- Status: ${stateDesc}
+- Current Batch: ${status.currentBatchSent} / ${status.currentBatchGoal} sent
+- All-Time Contacts Reminded: ${status.totalSentHistory}
+- Remaining Pending Contacts: ${status.totalEligible}
+${status.lastRecipient ? `- Last Recipient: ${status.lastRecipient}` : ''}`;
+
+        return {
+          success: true,
+          message: summary,
+          data: status,
+        };
+      },
+    },
+    {
+      name: 'pause_contact_save_reminders',
+      description: 'Immediately pauses an ongoing contact save reminder campaign.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+        const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
+        if (!isOwner) {
+          return {
+            success: false,
+            message: 'Permission denied: Only bot owner Ademola can pause the contact save reminder campaign.',
+          };
+        }
+        const result = contactReminderService.pause();
+        return {
+          success: result.success,
+          message: result.message,
+        };
+      },
+    },
+    {
+      name: 'preview_contact_save_reminders',
+      description:
+        'Previews the next contacts in line to receive the reminder along with their personalized rendered message templates without sending anything.',
+      parameters: {
+        type: 'object',
+        properties: {
+          count: {
+            type: 'number',
+            description: 'Number of upcoming contacts to preview (default 5, max 10).',
+          },
+          only_interacted: {
+            type: 'boolean',
+            description: 'If true, previews warm contacts with prior chat history only.',
+          },
+        },
+      },
+      execute: async (
+        args: { count?: number; only_interacted?: boolean },
+        _ctx: ExecutionContext
+      ): Promise<ToolResult> => {
+        const count = Math.min(args.count || 5, 10);
+        const previews = contactReminderService.preview(count, Boolean(args.only_interacted));
+
+        if (previews.length === 0) {
+          return {
+            success: true,
+            message: 'No pending contacts found to preview. All eligible contacts have already received reminders!',
+          };
+        }
+
+        const lines = previews.map(
+          (p, i) =>
+            `*${i + 1}. ${p.displayName}* (+${p.phoneNumber}) [${p.isWarm ? '🔥 Warm Chat' : '📇 Address Book'}] (Template #${p.templateIndex + 1}):\n"${p.sampleMessage}"`
+        );
+
+        return {
+          success: true,
+          message: `👀 *Previewing Next ${previews.length} Contact Save Reminders*:\n\n${lines.join('\n\n')}`,
+          data: previews,
+        };
       },
     },
   ];

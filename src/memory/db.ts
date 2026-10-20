@@ -272,6 +272,23 @@ export function initDatabase() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_channel_memes_posted ON channel_memes(last_posted_at, used_count);
+
+    -- Contact Save Reminders: Safe, human-paced, anti-ban contact outreach for WhatsApp status visibility
+    CREATE TABLE IF NOT EXISTS contact_save_reminders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contact_jid TEXT UNIQUE NOT NULL,
+      phone_number TEXT NOT NULL,
+      contact_name TEXT,
+      template_index INTEGER DEFAULT 0,
+      message_sent TEXT NOT NULL,
+      status TEXT DEFAULT 'pending', -- 'pending' | 'sent' | 'failed' | 'skipped'
+      error_reason TEXT,
+      created_at INTEGER NOT NULL,
+      sent_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contact_reminders_status ON contact_save_reminders(status);
+    CREATE INDEX IF NOT EXISTS idx_contact_reminders_phone ON contact_save_reminders(phone_number);
   `);
 
   // Safe migration for existing databases
@@ -934,4 +951,126 @@ export function getAllChannelMemes(limit = 30): ChannelMeme[] {
     return [];
   }
 }
+
+export interface ContactReminderRecord {
+  id: number;
+  contact_jid: string;
+  phone_number: string;
+  contact_name: string | null;
+  template_index: number;
+  message_sent: string;
+  status: 'pending' | 'sent' | 'failed' | 'skipped';
+  error_reason: string | null;
+  created_at: number;
+  sent_at: number | null;
+}
+
+/**
+ * Records that a contact save reminder message was successfully dispatched to a contact.
+ */
+export function recordContactReminderSent(
+  contactJid: string,
+  phoneNumber: string,
+  contactName: string,
+  templateIndex: number,
+  messageSent: string
+): void {
+  const now = Date.now();
+  try {
+    db.prepare(`
+      INSERT INTO contact_save_reminders (
+        contact_jid, phone_number, contact_name, template_index, message_sent, status, created_at, sent_at
+      ) VALUES (?, ?, ?, ?, ?, 'sent', ?, ?)
+      ON CONFLICT(contact_jid) DO UPDATE SET
+        phone_number = excluded.phone_number,
+        contact_name = excluded.contact_name,
+        template_index = excluded.template_index,
+        message_sent = excluded.message_sent,
+        status = 'sent',
+        sent_at = excluded.sent_at
+    `).run(contactJid, phoneNumber, contactName, templateIndex, messageSent, now, now);
+  } catch (err: any) {
+    console.error('[DB] Error recording contact reminder sent:', err?.message || err);
+  }
+}
+
+/**
+ * Records that a contact save reminder failed for a given contact.
+ */
+export function recordContactReminderFailed(
+  contactJid: string,
+  phoneNumber: string,
+  contactName: string,
+  errorReason: string
+): void {
+  const now = Date.now();
+  try {
+    db.prepare(`
+      INSERT INTO contact_save_reminders (
+        contact_jid, phone_number, contact_name, template_index, message_sent, status, error_reason, created_at
+      ) VALUES (?, ?, ?, 0, '', 'failed', ?, ?)
+      ON CONFLICT(contact_jid) DO UPDATE SET
+        status = 'failed',
+        error_reason = excluded.error_reason
+    `).run(contactJid, phoneNumber, contactName, errorReason, now);
+  } catch (err: any) {
+    console.error('[DB] Error recording contact reminder failed:', err?.message || err);
+  }
+}
+
+/**
+ * Checks whether a contact has already been messaged with a contact save reminder.
+ */
+export function isContactAlreadyReminded(jidOrPhone: string): boolean {
+  if (!jidOrPhone) return false;
+  const digits = jidOrPhone.replace(/\D/g, '');
+  try {
+    const row = db.prepare(`
+      SELECT 1 FROM contact_save_reminders
+      WHERE (contact_jid = ? OR phone_number = ? OR contact_jid LIKE ?)
+        AND status = 'sent'
+      LIMIT 1
+    `).get(jidOrPhone, digits, `%${digits}%`);
+    return Boolean(row);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Retrieves aggregate statistics for contact save reminders.
+ */
+export function getContactReminderStats(): {
+  totalReminded: number;
+  totalFailed: number;
+  latestSentAt: number;
+} {
+  try {
+    const sentRow = db.prepare(`SELECT COUNT(*) as c, MAX(sent_at) as latest FROM contact_save_reminders WHERE status = 'sent'`).get() as { c: number; latest: number | null };
+    const failedRow = db.prepare(`SELECT COUNT(*) as c FROM contact_save_reminders WHERE status = 'failed'`).get() as { c: number };
+    return {
+      totalReminded: sentRow?.c || 0,
+      totalFailed: failedRow?.c || 0,
+      latestSentAt: sentRow?.latest || 0,
+    };
+  } catch {
+    return { totalReminded: 0, totalFailed: 0, latestSentAt: 0 };
+  }
+}
+
+/**
+ * Returns recent reminder records.
+ */
+export function getAllContactReminders(limit = 100): ContactReminderRecord[] {
+  try {
+    return db.prepare(`
+      SELECT * FROM contact_save_reminders
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(limit) as unknown as ContactReminderRecord[];
+  } catch {
+    return [];
+  }
+}
+
 
