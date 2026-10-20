@@ -25,6 +25,9 @@ const envSchema = z.object({
   BOT_OWNERS: z.string().default('').transform((val) => 
     val.split(',').map((s) => s.trim()).filter(Boolean)
   ),
+  ELEVENLABS_API_KEY: z.string().optional(),
+  ELEVENLABS_VOICE_ID: z.string().optional(),
+  ELEVENLABS_MODEL_ID: z.string().optional(),
   PAIRING_METHOD: z.enum(['code', 'qr']).default('qr'),
   PAIRING_PHONE_NUMBER: z.string().default('07058967815'),
   SESSIONS_DIR: z.string().default('./sessions'),
@@ -111,6 +114,11 @@ export const config = {
     apiKey: process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || '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',
     model: process.env.HUGGINGFACE_MODEL || 'black-forest-labs/FLUX.1-Krea-dev',
     provider: process.env.HUGGINGFACE_PROVIDER || 'fal-ai',
+  },
+  elevenlabs: {
+    apiKey: process.env.ELEVENLABS_API_KEY || 'sk_272f012b27920530590cc1c553ec251b537e94fb261814f2',
+    voiceId: process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB',
+    modelId: process.env.ELEVENLABS_MODEL_ID || 'eleven_multilingual_v2',
   },
   paths: {
     sessions: path.resolve(process.env.SESSIONS_DIR || './sessions'),

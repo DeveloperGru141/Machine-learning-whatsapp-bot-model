@@ -161,17 +161,112 @@ export function formatPidginPhonetics(rawText: string): string {
 
 /**
  * Synthesizes natural human-like Nigerian & Pidgin voice notes with emotion, authentic phonetic
- * pronunciation, and warm microphone presence.
- * Defaults to warm Nigerian English/Pidgin (en-NG-AbeoNeural), with fallback to en-NG-EzinneNeural
- * and en-US-BrianMultilingualNeural.
+ * pronunciation, and warm microphone presence using ElevenLabs Neural TTS.
+ * Fallback to EdgeTTS and Google TTS if ElevenLabs is unavailable.
  * Transcodes to native OGG Opus (48kHz mono VoIP) so WhatsApp plays it as a real PTT voice note.
  */
 export async function synthesizeVoiceNote(
-  _text: string,
-  _voice?: string
+  text: string,
+  voice?: string
 ): Promise<Buffer | null> {
-  console.log('[TTS] Voice note synthesis is deactivated per system configuration.');
-  return null;
+  const spokenText = formatPidginPhonetics(text);
+  if (!spokenText) return null;
+
+  const tempDir = config.paths.temp;
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+
+  const hash = crypto.randomBytes(6).toString('hex');
+  const tempMp3File = path.join(tempDir, `tts_${hash}.mp3`);
+  const tempOggFile = path.join(tempDir, `tts_${hash}.ogg`);
+
+  const elevenLabsApiKey = config.elevenlabs?.apiKey;
+  const elevenLabsVoice = voice || config.elevenlabs?.voiceId || 'pNInz6obpgDQGcFmaJgB'; // Adam
+  const elevenLabsModel = config.elevenlabs?.modelId || 'eleven_multilingual_v2';
+
+  // 1. Primary Engine: ElevenLabs Humanlike Multilingual Neural TTS
+  if (elevenLabsApiKey) {
+    try {
+      console.log(`[TTS] 🎙️ Synthesizing humanlike voice note with ElevenLabs (${elevenLabsVoice}, model: ${elevenLabsModel})...`);
+      const elevenEndpoint = `https://api.elevenlabs.io/v1/text-to-speech/${elevenLabsVoice}?output_format=mp3_44100_128`;
+
+      const response = await fetch(elevenEndpoint, {
+        method: 'POST',
+        headers: {
+          'xi-api-key': elevenLabsApiKey,
+          'Content-Type': 'application/json',
+          'Accept': 'audio/mpeg',
+        },
+        body: JSON.stringify({
+          text: spokenText,
+          model_id: elevenLabsModel,
+          voice_settings: {
+            stability: 0.40,
+            similarity_boost: 0.85,
+            style: 0.35,
+            use_speaker_boost: true,
+          },
+        }),
+        signal: AbortSignal.timeout(25_000),
+      });
+
+      if (response.ok) {
+        const audioArray = await response.arrayBuffer();
+        const mp3Buffer = Buffer.from(audioArray);
+        fs.writeFileSync(tempMp3File, mp3Buffer);
+        console.log(`[TTS] ✅ ElevenLabs synthesized ${mp3Buffer.length} bytes of audio.`);
+
+        // Convert MP3 -> genuine WhatsApp OGG Opus PTT VoIP stream
+        if (ffmpegPath && fs.existsSync(ffmpegPath)) {
+          try {
+            await execFileAsync(ffmpegPath, [
+              '-y',
+              '-i',
+              tempMp3File,
+              '-af',
+              AUDIO_FILTER_CHAIN,
+              '-c:a',
+              'libopus',
+              '-b:a',
+              '64k',
+              '-vbr',
+              'on',
+              '-compression_level',
+              '10',
+              '-frame_duration',
+              '60',
+              '-application',
+              'voip',
+              '-ar',
+              '48000',
+              '-ac',
+              '1',
+              tempOggFile,
+            ]);
+            if (fs.existsSync(tempOggFile)) {
+              const oggData = fs.readFileSync(tempOggFile);
+              try { if (fs.existsSync(tempMp3File)) fs.unlinkSync(tempMp3File); } catch {}
+              try { if (fs.existsSync(tempOggFile)) fs.unlinkSync(tempOggFile); } catch {}
+              return oggData;
+            }
+          } catch (ffErr: any) {
+            console.warn('[TTS] ffmpeg conversion warning, returning MP3 buffer:', ffErr.message);
+          }
+        }
+        try { if (fs.existsSync(tempMp3File)) fs.unlinkSync(tempMp3File); } catch {}
+        return mp3Buffer;
+      } else {
+        const errText = await response.text();
+        console.warn(`[TTS] ElevenLabs returned ${response.status}:`, errText.slice(0, 160));
+      }
+    } catch (elevenErr: any) {
+      console.warn('[TTS] ElevenLabs synthesis failed, trying fallback:', elevenErr.message || elevenErr);
+    }
+  }
+
+  // 2. Fallback Engine: Edge-TTS and Google TTS
+  return oldSynthesizeVoiceNote(text, voice);
 }
 
 export async function oldSynthesizeVoiceNote(

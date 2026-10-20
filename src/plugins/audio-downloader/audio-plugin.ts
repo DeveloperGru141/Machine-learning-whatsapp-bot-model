@@ -1,12 +1,53 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
-import { transcodeToOggOpus } from '../../core/tts.js';
+import { transcodeToOggOpus, synthesizeVoiceNote } from '../../core/tts.js';
 
 export class AudioDownloaderPlugin implements IPlugin {
   name = 'AudioDownloader';
-  version = '1.0.0';
-  description = 'Downloads audio files, streams, or voice notes from direct URLs or media sources';
+  version = '2.0.0';
+  description = 'Downloads audio files and synthesizes natural human-like voice notes using ElevenLabs Neural TTS';
 
   tools: BotTool[] = [
+    {
+      name: 'send_voice_note',
+      description:
+        'Synthesizes and sends a warm, natural, human-like voice note (audio message) in authentic Nigerian English/Pidgin directly to the WhatsApp chat using ElevenLabs Neural TTS. Use whenever someone asks for a voice note, asks you to speak, say something with voice, send a vn, or when a voice note reply is appropriate.',
+      parameters: {
+        type: 'object',
+        properties: {
+          message: {
+            type: 'string',
+            description: 'The natural spoken message in English/Nigerian Pidgin to synthesize and send as a WhatsApp voice note.',
+          },
+        },
+        required: ['message'],
+      },
+      execute: async (args: { message: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const rawMessage = (args.message || '').trim();
+          if (!rawMessage) {
+            return { success: false, message: 'Please provide the message text to speak in the voice note.' };
+          }
+
+          console.log(`[AudioPlugin] 🎙️ Synthesizing voice note: "${rawMessage.slice(0, 60)}..."`);
+          const audioBuffer = await synthesizeVoiceNote(rawMessage);
+          if (!audioBuffer) {
+            return {
+              success: false,
+              message: 'Failed to synthesize voice note audio. Please try again shortly.',
+            };
+          }
+
+          await ctx.sendAudio(audioBuffer, true);
+          return {
+            success: true,
+            message: 'Voice note synthesized with ElevenLabs and sent successfully to WhatsApp!',
+          };
+        } catch (err: any) {
+          console.error('[AudioPlugin] Voice note error:', err);
+          return { success: false, message: `Failed to send voice note: ${err.message}` };
+        }
+      },
+    },
     {
       name: 'download_audio',
       description: 'Downloads an audio file or music track from a direct link or supported media URL and sends it as a WhatsApp audio note.',

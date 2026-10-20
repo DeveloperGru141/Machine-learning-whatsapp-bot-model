@@ -242,7 +242,21 @@ export class PluginRegistry {
       selected.add('generate_image');
     }
 
-    // 8. Video/Audio Downloaders, Link Summaries, & Document Reading
+    // 8. Voice Notes / TTS Synthesis (ElevenLabs)
+    if (
+      text.includes('voice') ||
+      text.includes('voice note') ||
+      text.includes('voicenote') ||
+      text.includes('vn') ||
+      text.includes('speak') ||
+      text.includes('say it') ||
+      text.includes('talk to me') ||
+      text.includes('audio message')
+    ) {
+      selected.add('send_voice_note');
+    }
+
+    // 9. Video/Audio Downloaders, Link Summaries, & Document Reading
     if (
       text.includes('http') ||
       text.includes('link') ||
