@@ -343,10 +343,21 @@ export class WhatsAppClient {
       if (!rawCreds?.registered && !rawCreds?.account && !rawCreds?.me?.lid) return;
 
       const zlib = await import('zlib');
+      const allFiles = fs.readdirSync(config.paths.sessions);
+      const essentialFiles = new Set<string>();
+      essentialFiles.add('creds.json');
+      for (const f of allFiles) {
+        if (f.startsWith('app-state-sync-key')) essentialFiles.add(f);
+      }
+      const preKeys = allFiles.filter((f) => f.startsWith('pre-key-')).slice(-20);
+      for (const f of preKeys) essentialFiles.add(f);
+      const sessionKeys = allFiles.filter((f) => f.startsWith('session-')).slice(-25);
+      for (const f of sessionKeys) essentialFiles.add(f);
+
       const filesMap: Record<string, string> = {};
-      for (const file of fs.readdirSync(config.paths.sessions)) {
+      for (const file of essentialFiles) {
         const fullPath = path.join(config.paths.sessions, file);
-        if (fs.statSync(fullPath).isFile()) {
+        if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
           filesMap[file] = fs.readFileSync(fullPath, 'utf8');
         }
       }
