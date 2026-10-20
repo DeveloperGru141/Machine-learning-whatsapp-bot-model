@@ -476,30 +476,42 @@ export class SchedulerPlugin implements IPlugin {
   }
 
   /**
-   * Automatically schedules the daily morning WhatsApp Status bundle (`status@broadcast`) at 07:15 AM
-   * featuring web-scraped memes, live tech news, Bible verses, and motivational quotes.
+   * Automatically schedules the daily morning WhatsApp Status bundle (`status@broadcast`) at 07:00 AM sharp
+   * featuring the animated winking avatar motion design video, web-scraped memes, live tech news, Bible verses, and motivational quotes.
    */
   public ensureMorningStatusSchedule(): void {
     try {
       const statusJid = 'status@broadcast';
       const existing = db
-        .prepare(`SELECT id FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_status_post' AND status = 'pending'`)
-        .get(statusJid);
+        .prepare(`SELECT id, time_of_day FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_status_post' AND status = 'pending'`)
+        .get(statusJid) as { id: number; time_of_day: string } | undefined;
 
-      if (!existing) {
-        const fireAt = getNextFireAtForTimeOfDay('07:15');
+      const fireAt = getNextFireAtForTimeOfDay('07:00');
+
+      if (existing) {
+        // Upgrade existing schedule to 07:00 AM sharp
+        db.prepare(`
+          UPDATE scheduled_tasks
+          SET time_of_day = '07:00',
+              fire_at = ?,
+              title = 'Daily 7:00 AM WhatsApp Status: Winking Avatar Motion Design & Morning Bundle',
+              description = 'Posts animated winking Forgelabs avatar motion design video, tech news digest, Bible verse, motivation, and memes at 7:00 AM'
+          WHERE id = ?
+        `).run(fireAt, existing.id);
+        console.log(`[Scheduler] 📸 Synchronized daily morning WhatsApp Status schedule to 07:00 AM sharp.`);
+      } else {
         insertScheduledTask(
           statusJid,
           '2348108574293@s.whatsapp.net',
-          'Daily morning WhatsApp Status bundle (Memes, Tech News, Bible Verse, Motivation)',
+          'Daily 7:00 AM WhatsApp Status: Winking Avatar Motion Design & Morning Bundle',
           fireAt,
           'daily',
           'morning_status_post',
-          '07:15',
-          'Post daily morning status bundle to status@broadcast',
+          '07:00',
+          'Posts animated winking Forgelabs avatar motion design video, tech news digest, Bible verse, motivation, and memes at 7:00 AM',
           'WhatsApp Status'
         );
-        console.log(`[Scheduler] 📸 Registered daily morning WhatsApp Status poster (memes, tech news, bible verse, motivation) at 07:15 AM.`);
+        console.log(`[Scheduler] 📸 Registered daily morning WhatsApp Status poster at 07:00 AM.`);
       }
     } catch (err: any) {
       console.warn('[Scheduler] Could not ensure morning status schedule:', err.message);
