@@ -67,7 +67,7 @@ export class PluginRegistry {
   }
 
   public getGroqToolDefinitions(isGroup?: boolean): any[] {
-    const groupOnlyTools = new Set(['tag_all', 'kick_member', 'set_group_mode']);
+    const groupOnlyTools = new Set(['tag_all']);
     let tools = this.getAllTools();
     if (isGroup === false) {
       tools = tools.filter((t) => !groupOnlyTools.has(t.name));
@@ -331,6 +331,25 @@ export class PluginRegistry {
       selected.add('list_admin_privileges');
     }
 
+    
+    // Group Moderation & Mode Toggle (Available in both Groups and DMs for Remote Admin)
+    if (
+      text.includes('lock') ||
+      text.includes('unlock') ||
+      text.includes('open group') ||
+      text.includes('close group') ||
+      text.includes('mute group') ||
+      text.includes('unmute group') ||
+      text.includes('group locked') ||
+      text.includes('still locked') ||
+      text.includes('unlock it') ||
+      text.includes('open it') ||
+      text.includes('lock it')
+    ) {
+      selected.add('set_group_mode');
+      selected.add('get_group_info');
+    }
+
     if (isGroup) {
       if (
         text.includes('tag') ||
@@ -455,8 +474,14 @@ export class PluginRegistry {
       delete_message: 'delete_group_message',
       delete_msg: 'delete_group_message',
       revoke_message: 'delete_group_message',
-      lock_group: 'set_group_mode',
+            open_group: 'set_group_mode',
       unlock_group: 'set_group_mode',
+      lock_group: 'set_group_mode',
+      close_group: 'set_group_mode',
+      mute_group: 'set_group_mode',
+      unmute_group: 'set_group_mode',
+      open_chat: 'set_group_mode',
+      unlock_chat: 'set_group_mode',
       lock_settings: 'set_group_mode',
       unlock_settings: 'set_group_mode',
       group_info: 'get_group_info',

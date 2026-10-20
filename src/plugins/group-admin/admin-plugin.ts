@@ -21,6 +21,55 @@ export class GroupAdminPlugin implements IPlugin {
    * Helper to verify if the bot itself has admin rights in the group.
    * Also synchronizes the live admin status to the known_groups database table.
    */
+  
+  /**
+   * Resolves a target group from name keyword, subject, or JID.
+   */
+  public async resolveTargetGroup(sock: any, rawGroup?: string): Promise<{ jid: string; subject: string } | null> {
+    const search = (rawGroup || '').trim();
+    if (!search) return null;
+
+    if (search.endsWith('@g.us')) {
+      const known = findKnownGroup(search);
+      return { jid: search, subject: known?.subject || search };
+    }
+
+    const cached = findKnownGroup(search);
+    if (cached) {
+      return { jid: cached.group_jid, subject: cached.subject };
+    }
+
+    if (sock?.groupFetchAllParticipating) {
+      try {
+        const participating = await sock.groupFetchAllParticipating();
+        const lowerSearch = search.toLowerCase();
+
+        // 1. Exact or substring match
+        for (const [jid, meta] of Object.entries(participating) as [string, any][]) {
+          const sub = (meta.subject || '').toLowerCase();
+          if (sub === lowerSearch || sub.includes(lowerSearch) || lowerSearch.includes(sub)) {
+            upsertKnownGroup(jid, meta.subject || search, meta.participants?.length || 0);
+            return { jid, subject: meta.subject || search };
+          }
+        }
+
+        // 2. Word overlap match (e.g. "empire" matching "Empire discussion group 💯💸")
+        const searchWords = lowerSearch.split(/\s+/).filter(w => w.length > 2);
+        for (const [jid, meta] of Object.entries(participating) as [string, any][]) {
+          const sub = (meta.subject || '').toLowerCase();
+          if (searchWords.some(w => sub.includes(w))) {
+            upsertKnownGroup(jid, meta.subject || search, meta.participants?.length || 0);
+            return { jid, subject: meta.subject || search };
+          }
+        }
+      } catch (err: any) {
+        console.warn('[GroupAdmin] Error fetching participating groups:', err?.message || err);
+      }
+    }
+
+    return null;
+  }
+
   public async isBotAdmin(sock: any, groupJid: string): Promise<boolean> {
     if (!groupJid || !groupJid.endsWith('@g.us') || !sock?.groupMetadata) return false;
     try {
@@ -726,7 +775,7 @@ export class GroupAdminPlugin implements IPlugin {
     {
       name: 'set_group_mode',
       description:
-        'Locks or unlocks the group chat (announcement mode: only admins can message vs all members) OR locks/unlocks editing group info. Requires bot admin privileges.',
+        'Locks or unlocks the group chat (announcement mode: only admins can message vs all members) OR locks/unlocks editing group info. Can be invoked directly in the group or remotely from DM by owner Ademola / admins.',
       parameters: {
         type: 'object',
         properties: {
@@ -734,31 +783,68 @@ export class GroupAdminPlugin implements IPlugin {
             type: 'string',
             enum: ['announcement', 'not_announcement', 'locked', 'unlocked'],
             description:
-              '"announcement" to mute members (admin-only chat), "not_announcement" to open group for everyone, "locked" to restrict editing group info to admins only, "unlocked" to allow all members to edit group info.',
+              '"announcement" to mute members (admin-only chat/lock group), "not_announcement" to open/unlock group for everyone, "locked" to restrict editing group info to admins only, "unlocked" to allow all members to edit group info.',
+          },
+          group: {
+            type: 'string',
+            description:
+              'Optional name or JID of the group to lock/unlock (e.g. "Empire discussion group" or "120363417924468197@g.us"). If not specified in a group, defaults to the current group.',
           },
         },
         required: ['mode'],
       },
       execute: async (
-        args: { mode: 'announcement' | 'not_announcement' | 'locked' | 'unlocked' },
+        args: { mode: 'announcement' | 'not_announcement' | 'locked' | 'unlocked'; group?: string },
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
-        if (!ctx.isGroup) {
-          return { success: false, message: 'This tool is only available in groups.' };
+        let targetGroupJid = ctx.chatJid;
+        let targetGroupSubject = '';
+
+        if (args.group) {
+          const resolved = await this.resolveTargetGroup(ctx.sock, args.group);
+          if (resolved) {
+            targetGroupJid = resolved.jid;
+            targetGroupSubject = resolved.subject;
+          } else {
+            return {
+              success: false,
+              message: `Could not find a group matching "${args.group}". Please check the group name or ask "which groups are you in?".`,
+            };
+          }
+        } else if (!ctx.isGroup) {
+          const known = getAllKnownGroups(10);
+          const adminGroups = known.filter((g) => g.is_admin);
+          if (adminGroups.length === 1) {
+            targetGroupJid = adminGroups[0].group_jid;
+            targetGroupSubject = adminGroups[0].subject;
+          } else {
+            return {
+              success: false,
+              message: 'Please specify which group you want to lock or unlock (e.g., set_group_mode(mode: "not_announcement", group: "Empire discussion group")).',
+            };
+          }
         }
 
-        const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
-        if (!botIsAdmin) {
-          return { success: false, message: 'I need to be made an admin in this group to change group settings.' };
+        if (!targetGroupJid || !targetGroupJid.endsWith('@g.us')) {
+          return { success: false, message: 'Please specify a valid group to lock or unlock.' };
         }
 
-        const senderIsAdmin = await this.isUserAdmin(ctx.sock, ctx.chatJid, ctx.senderJid);
+        const isOwner = userProfileManager.isOwner(ctx.senderJid);
+        const senderIsAdmin = isOwner || (await this.isUserAdmin(ctx.sock, targetGroupJid, ctx.senderJid));
         if (!senderIsAdmin) {
-          return { success: false, message: 'Only group admins can change group settings.' };
+          return { success: false, message: 'Only group admins or my creator Ademola can change group settings.' };
+        }
+
+        const botIsAdmin = await this.isBotAdmin(ctx.sock, targetGroupJid);
+        if (!botIsAdmin) {
+          return {
+            success: false,
+            message: `I need to be made an admin in "${targetGroupSubject || 'this group'}" to change its settings.`,
+          };
         }
 
         try {
-          await ctx.sock.groupSettingUpdate(ctx.chatJid, args.mode);
+          await ctx.sock.groupSettingUpdate(targetGroupJid, args.mode);
           let label = '';
           if (args.mode === 'announcement') {
             label = '🔒 Group locked: Only Admins can send messages.';
@@ -770,10 +856,17 @@ export class GroupAdminPlugin implements IPlugin {
             label = '🔓 Group info unlocked: All members can edit group title, icon, and description.';
           }
 
+          logAutonomousAction(
+            'group_moderation',
+            targetGroupJid,
+            targetGroupSubject || 'Group',
+            `Group mode changed to ${args.mode} by ${isOwner ? 'Ademola' : ctx.senderJid}`
+          );
+
           return {
             success: true,
-            message: `Group setting successfully updated: ${label}`,
-            data: { mode: args.mode },
+            message: `Group setting successfully updated for "${targetGroupSubject || 'the group'}": ${label}`,
+            data: { mode: args.mode, groupJid: targetGroupJid, groupSubject: targetGroupSubject },
           };
         } catch (err: any) {
           return { success: false, message: `Failed to update group setting: ${err.message}` };
