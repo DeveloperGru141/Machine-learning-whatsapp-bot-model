@@ -204,7 +204,7 @@ export class WhatsAppClient {
 
   public isRegistered(): boolean {
     const creds = this.sock?.authState?.creds;
-    return Boolean(creds?.registered || creds?.account);
+    return Boolean(creds?.registered || creds?.account || creds?.me?.lid);
   }
 
   /**
@@ -339,7 +339,7 @@ export class WhatsAppClient {
 
     try {
       const rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
-      if (!rawCreds?.registered && !rawCreds?.account) return;
+      if (!rawCreds?.registered && !rawCreds?.account && !rawCreds?.me?.lid) return;
 
       const zlib = await import('zlib');
       const filesMap: Record<string, string> = {};
@@ -419,7 +419,7 @@ export class WhatsAppClient {
       if (fs.existsSync(credsFile)) {
         try {
           const rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
-          const isFullyPaired = Boolean(rawCreds?.registered || rawCreds?.account);
+          const isFullyPaired = Boolean(rawCreds?.registered || rawCreds?.account || (rawCreds?.me?.id && rawCreds?.me?.lid));
           const existingPhone = (rawCreds?.me?.id || '').split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
           const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '07058967815');
 
@@ -557,7 +557,7 @@ export class WhatsAppClient {
           const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
           const errorMsg = (lastDisconnect?.error as any)?.message || (lastDisconnect?.error as any)?.output?.payload?.message || '';
           const isStreamConflict = errorMsg.includes('conflict') || errorMsg.includes('Stream Errored');
-          const isRegistered = Boolean(this.sock?.authState?.creds?.registered || this.sock?.authState?.creds?.account);
+          const isRegistered = Boolean(this.sock?.authState?.creds?.registered || this.sock?.authState?.creds?.account || this.sock?.authState?.creds?.me?.lid);
           const isExplicitLogout = isRegistered && statusCode === DisconnectReason.loggedOut && !isStreamConflict;
 
           console.log(

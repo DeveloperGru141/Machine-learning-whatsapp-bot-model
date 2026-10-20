@@ -28,6 +28,28 @@ import { healthMonitor } from './core/health-monitor.js';
 import { llmClient } from './agent/llm-client.js';
 import { antiBanEngine } from './security/anti-ban.js';
 
+
+// In-memory capture of live server logs (last 500 lines) for Render /logs endpoint
+export const liveConsoleLogs: string[] = [];
+function recordLog(level: string, args: any[]) {
+  const ts = new Date().toISOString().substring(11, 19);
+  const text = args.map((a) => (typeof a === 'object' ? (a?.stack || JSON.stringify(a)) : String(a))).join(' ');
+  liveConsoleLogs.push(`[${ts}] [${level}] ${text}`);
+  if (liveConsoleLogs.length > 500) liveConsoleLogs.shift();
+}
+
+const originalConsoleLog = console.log;
+console.log = (...args: any[]) => {
+  recordLog('INFO', args);
+  originalConsoleLog.apply(console, args);
+};
+
+const originalConsoleWarn = console.warn;
+console.warn = (...args: any[]) => {
+  recordLog('WARN', args);
+  originalConsoleWarn.apply(console, args);
+};
+
 // Suppress noisy internal libsignal decrypt/Bad MAC dumps (Baileys handles Signal protocol retries automatically)
 const originalConsoleError = console.error;
 console.error = (...args: any[]) => {
@@ -200,6 +222,12 @@ function startHealthServer() {
       return;
     }
 
+    
+    if (req.url && (req.url.startsWith('/logs') || req.url.startsWith('/render-logs') || req.url.startsWith('/console'))) {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end(liveConsoleLogs.join('\n') || '[Server] No logs recorded yet.');
+      return;
+    }
     if (req.url === '/' || req.url === '/health' || req.url === '/status') {
       const report = healthMonitor.getHealthReport();
       const payload = JSON.stringify({
