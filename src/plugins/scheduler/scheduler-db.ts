@@ -66,30 +66,183 @@ const markTaskFailedStmt = db.prepare(`
 `);
 
 /**
- * Calculates the next timestamp for a given HH:MM string (defaults to 07:00).
+ * Resolves local date and time parts in a specific timezone (defaults to Africa/Lagos = WAT = UTC+1).
  */
-export function getNextFireAtForTimeOfDay(timeOfDay: string = '07:00'): number {
+export function getTimeZoneParts(
+  date: Date = new Date(),
+  timeZone: string = process.env.BOT_TIMEZONE || 'Africa/Lagos'
+): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+    hour12: false,
+  });
+
+  const parts = formatter.formatToParts(date);
+  const map: Record<string, number> = {};
+  for (const part of parts) {
+    if (part.type !== 'literal') {
+      map[part.type] = parseInt(part.value, 10);
+    }
+  }
+  if (map.hour === 24) map.hour = 0;
+  return {
+    year: map.year || date.getUTCFullYear(),
+    month: map.month || date.getUTCMonth() + 1,
+    day: map.day || date.getUTCDate(),
+    hour: map.hour ?? date.getUTCHours(),
+    minute: map.minute ?? date.getUTCMinutes(),
+    second: map.second ?? date.getUTCSeconds(),
+  };
+}
+
+/**
+ * Calculates the millisecond offset between the specified timezone and UTC at a given reference date.
+ */
+export function getTimezoneOffsetMs(
+  date: Date = new Date(),
+  timeZone: string = process.env.BOT_TIMEZONE || 'Africa/Lagos'
+): number {
+  const utcDate = new Date(date.toLocaleString('en-US', { timeZone: 'UTC' }));
+  const tzDate = new Date(date.toLocaleString('en-US', { timeZone }));
+  return tzDate.getTime() - utcDate.getTime();
+}
+
+/**
+ * Converts a year/month/day/hour/minute in the specified timezone into an exact UTC epoch timestamp (ms).
+ */
+export function getTargetUtcTimestamp(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  timeZone: string = process.env.BOT_TIMEZONE || 'Africa/Lagos'
+): number {
+  const naiveUtc = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  const offset = getTimezoneOffsetMs(new Date(naiveUtc), timeZone);
+  return naiveUtc - offset;
+}
+
+/**
+ * Calculates the next UTC epoch timestamp for a given HH:MM string in Nigeria / Africa/Lagos (WAT, UTC+1).
+ * If the target time has already passed today in the target timezone, it schedules for tomorrow at that time.
+ */
+export function getNextFireAtForTimeOfDay(
+  timeOfDay: string = '07:00',
+  timeZone: string = process.env.BOT_TIMEZONE || 'Africa/Lagos'
+): number {
   const parts = timeOfDay.split(':');
   const targetHour = parseInt(parts[0], 10) || 7;
   const targetMinute = parseInt(parts[1], 10) || 0;
 
   const now = new Date();
-  const next = new Date(now);
-  next.setHours(targetHour, targetMinute, 0, 0);
+  const nowParts = getTimeZoneParts(now, timeZone);
 
-  if (next.getTime() <= now.getTime()) {
-    next.setDate(next.getDate() + 1);
+  let fireAt = getTargetUtcTimestamp(nowParts.year, nowParts.month, nowParts.day, targetHour, targetMinute, timeZone);
+
+  if (fireAt <= now.getTime()) {
+    const tomorrowDate = new Date(Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day + 1));
+    const tomParts = getTimeZoneParts(tomorrowDate, timeZone);
+    fireAt = getTargetUtcTimestamp(tomParts.year, tomParts.month, tomParts.day, targetHour, targetMinute, timeZone);
   }
-  return next.getTime();
+
+  return fireAt;
 }
 
 /**
- * Advances a fire_at timestamp by 24 hours.
+ * Advances a fire_at timestamp by 1 day in the target timezone.
  */
-export function advanceToNextDay(currentFireAt: number): number {
-  const next = new Date(currentFireAt);
-  next.setDate(next.getDate() + 1);
-  return next.getTime();
+export function advanceToNextDay(
+  currentFireAt: number,
+  timeZone: string = process.env.BOT_TIMEZONE || 'Africa/Lagos'
+): number {
+  const currentDate = new Date(currentFireAt);
+  const parts = getTimeZoneParts(currentDate, timeZone);
+  const nextDay = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1));
+  const tomParts = getTimeZoneParts(nextDay, timeZone);
+  return getTargetUtcTimestamp(tomParts.year, tomParts.month, tomParts.day, parts.hour, parts.minute, timeZone);
+}
+
+/**
+ * Checks if a specific daily task has already successfully fired/posted today in Nigeria / Africa/Lagos.
+ */
+export function hasFiredToday(
+  topic: string,
+  timeZone: string = process.env.BOT_TIMEZONE || 'Africa/Lagos'
+): boolean {
+  const now = new Date();
+  const nowParts = getTimeZoneParts(now, timeZone);
+  const startOfDayUtc = getTargetUtcTimestamp(nowParts.year, nowParts.month, nowParts.day, 0, 0, timeZone);
+
+  try {
+    if (topic === 'morning_status_post') {
+      const row = db
+        .prepare(
+          `SELECT COUNT(*) as count FROM chat_logs WHERE chat_jid = 'status@broadcast' AND message_text LIKE '%[Status: Motion Design]%' AND timestamp >= ?`
+        )
+        .get(startOfDayUtc) as { count: number } | undefined;
+      return (row?.count || 0) > 0;
+    }
+
+    if (topic === 'morning_group_motivation') {
+      const row = db
+        .prepare(
+          `SELECT COUNT(*) as count FROM chat_logs WHERE (message_text LIKE '%Morning Charge%' OR message_text LIKE '%🌅 Good Morning%') AND timestamp >= ?`
+        )
+        .get(startOfDayUtc) as { count: number } | undefined;
+      return (row?.count || 0) > 0;
+    }
+
+    if (topic === 'owner_health_report') {
+      const row = db
+        .prepare(
+          `SELECT COUNT(*) as count FROM chat_logs WHERE chat_jid LIKE '2348108574293%' AND (message_text LIKE '%Health Report%' OR message_text LIKE '%SYSTEM STATUS%') AND timestamp >= ?`
+        )
+        .get(startOfDayUtc) as { count: number } | undefined;
+      return (row?.count || 0) > 0;
+    }
+
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) as count FROM scheduled_tasks WHERE topic = ? AND status = 'fired' AND fire_at >= ?`
+      )
+      .get(topic, startOfDayUtc) as { count: number } | undefined;
+    return (row?.count || 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Calculates initial fire_at for recurring morning tasks.
+ * If today's post was missed and it is still morning (between targetHour and 11:00 AM WAT),
+ * triggers catch-up in 60 seconds (Date.now() + 60_000).
+ * Otherwise, schedules for the next occurrence of timeOfDay (tomorrow 07:00 WAT).
+ */
+export function getInitialScheduleFireAt(
+  topic: string,
+  timeOfDay: string = '07:00',
+  timeZone: string = process.env.BOT_TIMEZONE || 'Africa/Lagos'
+): number {
+  const parts = timeOfDay.split(':');
+  const targetHour = parseInt(parts[0], 10) || 7;
+  const now = new Date();
+  const nowParts = getTimeZoneParts(now, timeZone);
+
+  const firedToday = hasFiredToday(topic, timeZone);
+
+  // If it hasn't fired yet today and current time is between targetHour and 11:00 AM WAT, trigger catchup in 60s
+  if (!firedToday && nowParts.hour >= targetHour && nowParts.hour < 11) {
+    return now.getTime() + 60_000;
+  }
+
+  return getNextFireAtForTimeOfDay(timeOfDay, timeZone);
 }
 
 /**

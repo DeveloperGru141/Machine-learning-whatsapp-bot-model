@@ -12,6 +12,8 @@ import {
   rescheduleRecurringTask,
   getActiveDailyBroadcasts,
   cancelScheduledTask,
+  getInitialScheduleFireAt,
+  hasFiredToday,
   ScheduledTask,
 } from './scheduler-db.js';
 import { chatLogger } from '../../memory/chat-logger.js';
@@ -358,8 +360,14 @@ export async function postMorningStatusBundle(
     const cat = categoriesToPost[i];
     try {
       if (cat === 'motion_intro') {
-        const videoPath = path.resolve('./assets/status_motion_design.mp4');
-        if (fs.existsSync(videoPath)) {
+        const candidatePaths = [
+          path.resolve('./assets/status_motion_design.mp4'),
+          path.join(process.cwd(), 'assets', 'status_motion_design.mp4'),
+          path.resolve(__dirname, '../../../assets/status_motion_design.mp4'),
+          path.resolve(__dirname, '../../assets/status_motion_design.mp4'),
+        ];
+        const videoPath = candidatePaths.find((p) => fs.existsSync(p));
+        if (videoPath) {
           const videoBuffer = fs.readFileSync(videoPath);
           await socket.sendMessage(
             'status@broadcast',
@@ -372,6 +380,8 @@ export async function postMorningStatusBundle(
           );
           chatLogger.logOutboundMessage('status@broadcast', '[Status: Motion Design] Forgelabs Assistant Intro Video');
           postedTypes.push('motion_intro');
+        } else {
+          console.warn('[StatusPoster] Notice: status_motion_design.mp4 not found in candidate paths:', candidatePaths);
         }
       } else if (cat === 'bible_verse') {
         const text = await generateMorningContent('bible_verses');
@@ -482,11 +492,22 @@ export class SchedulerPlugin implements IPlugin {
       const ownerPhone = '2348108574293';
       const ownerJid = `${ownerPhone}@s.whatsapp.net`;
       const existing = db
-        .prepare(`SELECT id FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'owner_health_report' AND status = 'pending'`)
-        .get(ownerJid);
+        .prepare(`SELECT id, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'owner_health_report' AND status = 'pending'`)
+        .get(ownerJid) as { id: number; fire_at: number } | undefined;
 
-      if (!existing) {
-        const fireAt = getNextFireAtForTimeOfDay('07:00');
+      const fireAt = getInitialScheduleFireAt('owner_health_report', '07:00');
+
+      if (existing) {
+        db.prepare(`
+          UPDATE scheduled_tasks
+          SET time_of_day = '07:00',
+              fire_at = ?,
+              message = 'Daily owner system health report',
+              custom_prompt = 'Automated daily health report for Ademola'
+          WHERE id = ?
+        `).run(fireAt, existing.id);
+        console.log(`[Scheduler] 🩺 Synchronized daily morning health report for owner Ademola (fireAt: ${new Date(fireAt).toLocaleTimeString()}).`);
+      } else {
         insertScheduledTask(
           ownerJid,
           ownerJid,
@@ -498,7 +519,7 @@ export class SchedulerPlugin implements IPlugin {
           'Automated daily health report for Ademola',
           'Ademola Direct'
         );
-        console.log(`[Scheduler] 🩺 Registered daily morning health report for owner Ademola at 07:00 AM.`);
+        console.log(`[Scheduler] 🩺 Registered daily morning health report for owner Ademola at 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleTimeString()}).`);
       }
     } catch (err: any) {
       console.warn('[Scheduler] Could not ensure owner health schedule:', err.message);
@@ -513,10 +534,10 @@ export class SchedulerPlugin implements IPlugin {
     try {
       const statusJid = 'status@broadcast';
       const existing = db
-        .prepare(`SELECT id, time_of_day FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_status_post' AND status = 'pending'`)
-        .get(statusJid) as { id: number; time_of_day: string } | undefined;
+        .prepare(`SELECT id, time_of_day, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_status_post' AND status = 'pending'`)
+        .get(statusJid) as { id: number; time_of_day: string; fire_at: number } | undefined;
 
-      const fireAt = getNextFireAtForTimeOfDay('07:00');
+      const fireAt = getInitialScheduleFireAt('morning_status_post', '07:00');
 
       if (existing) {
         // Upgrade existing schedule to 07:00 AM sharp
@@ -528,7 +549,7 @@ export class SchedulerPlugin implements IPlugin {
               custom_prompt = 'Posts animated winking Forgelabs avatar motion design video, tech news digest, Bible verse, motivation, and memes at 7:00 AM'
           WHERE id = ?
         `).run(fireAt, existing.id);
-        console.log(`[Scheduler] 📸 Synchronized daily morning WhatsApp Status schedule to 07:00 AM sharp.`);
+        console.log(`[Scheduler] 📸 Synchronized daily morning WhatsApp Status schedule to 07:00 AM sharp (fireAt: ${new Date(fireAt).toLocaleTimeString()}).`);
       } else {
         insertScheduledTask(
           statusJid,
@@ -541,7 +562,7 @@ export class SchedulerPlugin implements IPlugin {
           'Posts animated winking Forgelabs avatar motion design video, tech news digest, Bible verse, motivation, and memes at 7:00 AM',
           'WhatsApp Status'
         );
-        console.log(`[Scheduler] 📸 Registered daily morning WhatsApp Status poster at 07:00 AM.`);
+        console.log(`[Scheduler] 📸 Registered daily morning WhatsApp Status poster at 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleTimeString()}).`);
       }
     } catch (err: any) {
       console.warn('[Scheduler] Could not ensure morning status schedule:', err.message);
@@ -556,10 +577,10 @@ export class SchedulerPlugin implements IPlugin {
     try {
       const broadcastJid = 'all_groups@broadcast';
       const existing = db
-        .prepare(`SELECT id, time_of_day FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_group_motivation' AND status = 'pending'`)
-        .get(broadcastJid) as { id: number; time_of_day: string } | undefined;
+        .prepare(`SELECT id, time_of_day, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_group_motivation' AND status = 'pending'`)
+        .get(broadcastJid) as { id: number; time_of_day: string; fire_at: number } | undefined;
 
-      const fireAt = getNextFireAtForTimeOfDay('07:00');
+      const fireAt = getInitialScheduleFireAt('morning_group_motivation', '07:00');
 
       if (existing) {
         db.prepare(`
@@ -570,7 +591,7 @@ export class SchedulerPlugin implements IPlugin {
               custom_prompt = 'Greets members of every participating group and delivers a niche-tailored quote scraped from WhatsApp Channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k)'
           WHERE id = ?
         `).run(fireAt, existing.id);
-        console.log(`[Scheduler] 🌅 Synchronized daily morning group motivation schedule to 07:00 AM sharp.`);
+        console.log(`[Scheduler] 🌅 Synchronized daily morning group motivation schedule to 07:00 AM sharp (fireAt: ${new Date(fireAt).toLocaleTimeString()}).`);
       } else {
         insertScheduledTask(
           broadcastJid,
@@ -583,7 +604,7 @@ export class SchedulerPlugin implements IPlugin {
           'Greets members of every participating group and delivers a niche-tailored quote scraped from WhatsApp Channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k)',
           'All Participating Groups'
         );
-        console.log(`[Scheduler] 🌅 Registered daily morning group motivation broadcaster at 07:00 AM.`);
+        console.log(`[Scheduler] 🌅 Registered daily morning group motivation broadcaster at 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleTimeString()}).`);
       }
     } catch (err: any) {
       console.warn('[Scheduler] Could not ensure morning group motivation schedule:', err.message);
@@ -601,9 +622,17 @@ export class SchedulerPlugin implements IPlugin {
         .prepare(`SELECT id, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'channel_meme_2hr_post' AND status = 'pending'`)
         .get(statusJid) as { id: number; fire_at: number } | undefined;
 
-      const fireAt = Date.now() + 2 * 60 * 60 * 1000;
+      const cooldown = getMemeCooldownStatus();
+      // If cooldown elapsed (can post now), fire in 60 seconds; otherwise wait for remaining cooldown
+      const targetDelay = cooldown.canPost ? 60_000 : Math.max(60_000, cooldown.remainingMs);
+      const fireAt = Date.now() + targetDelay;
 
-      if (!existing) {
+      if (existing) {
+        // If the existing task is scheduled more than 2 hours in the future or expired, synchronize it
+        if (existing.fire_at > Date.now() + 2 * 60 * 60 * 1000 || existing.fire_at < Date.now() - 60_000) {
+          db.prepare(`UPDATE scheduled_tasks SET fire_at = ? WHERE id = ?`).run(fireAt, existing.id);
+        }
+      } else {
         insertScheduledTask(
           statusJid,
           '2348108574293@s.whatsapp.net',
@@ -615,7 +644,7 @@ export class SchedulerPlugin implements IPlugin {
           'Scrapes and posts viral memes from WhatsApp Channel Memes (0029Vb6oS4LJkK7AvtORyH46) with 2-hour cooldown',
           'WhatsApp Status'
         );
-        console.log(`[Scheduler] 😂 Registered 2-hour meme poster schedule with strict 2hr cooldown.`);
+        console.log(`[Scheduler] 😂 Registered 2-hour meme poster schedule with strict 2hr cooldown (fireAt: ${new Date(fireAt).toLocaleTimeString()}).`);
       }
     } catch (err: any) {
       console.warn('[Scheduler] Could not ensure 2-hour meme schedule:', err.message);
@@ -652,40 +681,48 @@ export class SchedulerPlugin implements IPlugin {
         }
 
         try {
-          if (task.topic === 'morning_status_post' || task.chat_jid === 'status@broadcast') {
-            await postMorningStatusBundle(socket, 'all');
-            if (task.recurring_cron === 'daily') {
-              const nextFireAt = advanceToNextDay(task.fire_at);
-              rescheduleRecurringTask(task.id, nextFireAt);
-              console.log(
-                `[Scheduler] 🔄 Daily WhatsApp Status bundle #${task.id} posted and rescheduled for tomorrow at ${new Date(nextFireAt).toLocaleString()}.`
-              );
-            } else {
-              markTaskFired(task.id);
-            }
-            continue;
-          }
-
-          if (task.topic === 'morning_group_motivation' || task.chat_jid === 'all_groups@broadcast') {
-            await broadcastMorningGroupMotivation(socket);
-            if (task.recurring_cron === 'daily') {
-              const nextFireAt = advanceToNextDay(task.fire_at);
-              rescheduleRecurringTask(task.id, nextFireAt);
-              console.log(
-                `[Scheduler] 🔄 Daily morning group motivation #${task.id} broadcasted and rescheduled for tomorrow at ${new Date(nextFireAt).toLocaleString()}.`
-              );
-            } else {
-              markTaskFired(task.id);
-            }
-            continue;
-          }
-
+          // 1. Recurring 2-Hour Memes (with strict cooldown check)
           if (task.topic === 'channel_meme_2hr_post') {
             await postChannelMemeWithCooldown(socket, false, task.chat_jid);
             const nextFireAt = Date.now() + 2 * 60 * 60 * 1000;
             rescheduleRecurringTask(task.id, nextFireAt);
             console.log(
               `[Scheduler] 🔄 2-Hour Meme Task #${task.id} processed and rescheduled for ${new Date(nextFireAt).toLocaleTimeString()}.`
+            );
+            continue;
+          }
+
+          // 2. Daily 07:00 AM WhatsApp Status Bundle (motion design video, Bible verse, quotes, tech news, meme)
+          if (task.topic === 'morning_status_post') {
+            await postMorningStatusBundle(socket, 'all');
+            const nextFireAt = getNextFireAtForTimeOfDay('07:00');
+            rescheduleRecurringTask(task.id, nextFireAt);
+            console.log(
+              `[Scheduler] 🔄 Daily WhatsApp Status bundle #${task.id} posted and rescheduled for next 07:00 WAT (${new Date(nextFireAt).toLocaleString()}).`
+            );
+            continue;
+          }
+
+          // 3. Daily 07:00 AM Morning Group Motivation across all participating groups
+          if (task.topic === 'morning_group_motivation') {
+            await broadcastMorningGroupMotivation(socket);
+            const nextFireAt = getNextFireAtForTimeOfDay('07:00');
+            rescheduleRecurringTask(task.id, nextFireAt);
+            console.log(
+              `[Scheduler] 🔄 Daily morning group motivation #${task.id} broadcasted and rescheduled for next 07:00 WAT (${new Date(nextFireAt).toLocaleString()}).`
+            );
+            continue;
+          }
+
+          // 4. Daily 07:00 AM Owner Health Report
+          if (task.topic === 'owner_health_report') {
+            const outboundText = await generateMorningContent('owner_health_report', task.custom_prompt || task.message);
+            await socket.sendMessage(task.chat_jid, { text: outboundText });
+            chatLogger.logOutboundMessage(task.chat_jid, outboundText);
+            const nextFireAt = getNextFireAtForTimeOfDay('07:00');
+            rescheduleRecurringTask(task.id, nextFireAt);
+            console.log(
+              `[Scheduler] 🔄 Daily owner health report #${task.id} sent and rescheduled for next 07:00 WAT (${new Date(nextFireAt).toLocaleString()}).`
             );
             continue;
           }

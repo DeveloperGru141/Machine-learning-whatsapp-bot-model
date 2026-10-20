@@ -1,3 +1,4 @@
+process.env.TZ = process.env.BOT_TIMEZONE || 'Africa/Lagos';
 import dns from 'dns';
 try {
   dns.setDefaultResultOrder('ipv4first');

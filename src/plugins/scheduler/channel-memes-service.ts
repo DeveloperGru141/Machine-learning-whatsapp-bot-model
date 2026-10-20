@@ -261,6 +261,13 @@ export async function postChannelMemeWithCooldown(
     return { success: false, message: msg, cooldown };
   }
 
+  // Try scraping fresh memes first if online
+  if (socket) {
+    try {
+      await scrapeWhatsAppChannelMemes(socket);
+    } catch {}
+  }
+
   const meme = getFreshestMemeForPosting();
   if (!meme) {
     return { success: false, message: 'No memes found in the channel meme bank.', cooldown };
