@@ -289,6 +289,13 @@ export function initDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_contact_reminders_status ON contact_save_reminders(status);
     CREATE INDEX IF NOT EXISTS idx_contact_reminders_phone ON contact_save_reminders(phone_number);
+
+    -- Bot Runtime Settings (TTS Voice ID, feature toggles, cadence configuration)
+    CREATE TABLE IF NOT EXISTS bot_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `);
 
   // Safe migration for existing databases
@@ -1072,5 +1079,36 @@ export function getAllContactReminders(limit = 100): ContactReminderRecord[] {
     return [];
   }
 }
+
+/**
+ * Retrieves a persistent bot configuration setting from SQLite bot_settings table.
+ */
+export function getBotSetting(key: string, defaultValue = ''): string {
+  try {
+    const row = db.prepare('SELECT value FROM bot_settings WHERE key = ? LIMIT 1').get(key) as { value: string } | undefined;
+    return row?.value || defaultValue;
+  } catch {
+    return defaultValue;
+  }
+}
+
+/**
+ * Persists a bot configuration setting to SQLite bot_settings table.
+ */
+export function setBotSetting(key: string, value: string): void {
+  try {
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO bot_settings (key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `).run(key, value, now);
+  } catch (err: any) {
+    console.error(`[DB] Error setting bot_setting for key ${key}:`, err?.message || err);
+  }
+}
+
 
 

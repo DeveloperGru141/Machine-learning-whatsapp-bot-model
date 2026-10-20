@@ -6,7 +6,7 @@ import makeWASocket, {
   proto,
   Browsers,
 } from '@whiskeysockets/baileys';
-import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied, saveChannelQuote } from '../memory/db.js';
+import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied, saveChannelQuote, setBotSetting } from '../memory/db.js';
 import { parseQuoteFromText, WHATSAPP_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-quotes-service.js';
 import { stickerEngine } from '../plugins/stickers/sticker-engine.js';
 import pino from 'pino';
@@ -1129,6 +1129,22 @@ export class WhatsAppClient {
       try {
         console.log(`[WhatsAppClient] Downloading voicenote from ${normalized.senderName}...`);
         const audioBuffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
+
+        // If sent by creator & owner Ademola, save as a high-fidelity voice sample for ElevenLabs voice cloning
+        if (isOwnerUser && audioBuffer && audioBuffer.length > 5000) {
+          try {
+            const voiceDir = path.resolve('./data/voice_samples');
+            if (!fs.existsSync(voiceDir)) fs.mkdirSync(voiceDir, { recursive: true });
+            const sampleFile = path.join(voiceDir, 'ademola_voice_sample.ogg');
+            fs.writeFileSync(sampleFile, audioBuffer);
+            setBotSetting('ademola_voice_sample_at', String(Date.now()));
+            setBotSetting('ademola_voice_sample_path', sampleFile);
+            console.log(`[WhatsAppClient] 🎙️ Saved fresh voice sample from Ademola (${audioBuffer.length} bytes) for TTS voice cloning!`);
+          } catch (sampleErr: any) {
+            console.warn('[WhatsAppClient] Could not save voice sample:', sampleErr.message);
+          }
+        }
+
         const transcript = await transcribeAudioBuffer(audioBuffer);
         if (transcript) {
           promptText = `[User sent a voice message]: "${transcript}"\n(Respond clearly and naturally with a text reply in authentic Nigerian WhatsApp flow)`;

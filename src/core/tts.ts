@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { config } from '../config/env.js';
+import { getBotSetting } from '../memory/db.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -21,7 +22,8 @@ const AUDIO_FILTER_CHAIN =
 
 /**
  * Infuses generic written sentences with natural spoken Nigerian Pidgin / Naija voice-note warmth
- * and conversational cadence so voice notes never sound like flat, generic text readouts.
+ * and conversational cadence mimicking creator Ademola's signature Lagos/Naija Pidgin speaking style:
+ * Laid-back, street-smart, confident, brotherly, with authentic markers ("omooo", "bayii", "shaa", "oyaa naw").
  */
 export function enrichSpokenPidginCadence(rawText: string): string {
   let text = (rawText || '').trim();
@@ -35,31 +37,37 @@ export function enrichSpokenPidginCadence(rawText: string): string {
     .replace(/\s+/g, ' ')
     .trim();
 
-  // Replace stiff/generic English phrases with natural spoken Naija Pidgin equivalents
+  // Replace stiff/generic English phrases with Ademola's authentic spoken Naija Pidgin equivalents
   text = text
-    .replace(/\bI am doing well\b/gi, 'I dey kampe my guy')
-    .replace(/\bHow are you doing\b/gi, 'How far na, how body')
-    .replace(/\bWhat is going on\b/gi, 'Wetin dey sup')
-    .replace(/\bNo problem at all\b/gi, 'No wahala at all')
-    .replace(/\bDon't worry about it\b/gi, 'No worry yourself abeg')
-    .replace(/\bPlease wait a moment\b/gi, 'Hold on small abeg')
-    .replace(/\bI understand what you mean\b/gi, 'I grab wetin you talk')
+    .replace(/\bI am doing well\b/gi, 'I dey kampe bayii')
+    .replace(/\bHow are you doing\b/gi, 'How far na, wetin dey sup')
+    .replace(/\bWhat is going on\b/gi, 'Wetin dey sup bayii')
+    .replace(/\bNo problem at all\b|\bNo problem\b/gi, 'No wahala at all')
+    .replace(/\bDon't worry about it\b|\bDon't worry\b/gi, 'No worry shaa, no wahala')
+    .replace(/\bPlease wait a moment\b|\bWait a second\b/gi, 'Hold on small abeg')
+    .replace(/\bI understand what you mean\b|\bI understand\b/gi, 'I grab wetin you talk')
+    .replace(/\bDo you understand\b|\bYou understand\b/gi, 'You dey grab?')
     .replace(/\bTo be honest\b/gi, 'No go lie for you')
     .replace(/\bFor real\b/gi, 'no cap')
-    .replace(/\bLet me know\b/gi, 'Just yarn me');
+    .replace(/\bRight now\b|\bAt the moment\b/gi, 'bayii')
+    .replace(/\bAnyway\b|\bRegardless\b/gi, 'shaa')
+    .replace(/\bCan you\b|\bAre you able to\b/gi, 'You fit')
+    .replace(/\bLet me know\b/gi, 'Just yarn me')
+    .replace(/\bTell me\b/gi, 'Yarn me');
 
-  // If the script is very plain and lacks any natural spoken opener/interjection, add a warm Naija conversational lead-in
+  // If the script is very plain and lacks any natural spoken opener/interjection, add Ademola's signature Naija conversational lead-in
   const hasConversationalOpener =
-    /^(omo|abeg|guy|my guy|bro|boss|chief|yo|haha|chai|see ehn|wait|honestly|nah|yeah|how far|wetin|no wahala|ademola)/i.test(
+    /^(omooo?|abeg|guy|my guy|bro|boss|chief|yo|haha|chai|see ehn|wait|honestly|nah|yeah|how far|wetin|no wahala|ademola|oyaa)/i.test(
       text
     );
   if (!hasConversationalOpener && text.length > 18) {
     const openers = [
-      'Omo my guy, ',
-      'See ehn, ',
-      'Chai, ',
+      'Omooo, ',
+      'See wetin dey sup bayii, ',
+      'Oyaa naw, ',
+      'No wahala at all, ',
       'My guy, ',
-      'No wahala na, ',
+      'How far na, ',
     ];
     const idx = text.length % openers.length;
     text = `${openers[idx]}${text.charAt(0).toLowerCase()}${text.slice(1)}`;
@@ -181,9 +189,16 @@ export async function synthesizeVoiceNote(
   const tempMp3File = path.join(tempDir, `tts_${hash}.mp3`);
   const tempOggFile = path.join(tempDir, `tts_${hash}.ogg`);
 
-  const elevenLabsApiKey = config.elevenlabs?.apiKey;
-  const elevenLabsVoice = voice || config.elevenlabs?.voiceId || 'pNInz6obpgDQGcFmaJgB'; // Adam
+  const dynamicVoiceId = getBotSetting('elevenlabs_voice_id', config.elevenlabs?.voiceId) || 'pNInz6obpgDQGcFmaJgB';
+  const dynamicProvider = getBotSetting('tts_provider', 'elevenlabs');
+  const elevenLabsVoice = voice || dynamicVoiceId;
   const elevenLabsModel = config.elevenlabs?.modelId || 'eleven_multilingual_v2';
+  const elevenLabsApiKey = config.elevenlabs?.apiKey;
+
+  // If user or system configured native Nigerian Edge-TTS or provider is edge-tts, route directly
+  if (dynamicProvider === 'edge-tts' || elevenLabsVoice === 'en-NG-AbeoNeural' || elevenLabsVoice === 'edge-tts') {
+    return oldSynthesizeVoiceNote(text, 'en-NG-AbeoNeural');
+  }
 
   // 1. Primary Engine: ElevenLabs Humanlike Multilingual Neural TTS
   if (elevenLabsApiKey) {
@@ -202,9 +217,9 @@ export async function synthesizeVoiceNote(
           text: spokenText,
           model_id: elevenLabsModel,
           voice_settings: {
-            stability: 0.40,
-            similarity_boost: 0.85,
-            style: 0.35,
+            stability: 0.50,
+            similarity_boost: 0.80,
+            style: 0.20,
             use_speaker_boost: true,
           },
         }),
