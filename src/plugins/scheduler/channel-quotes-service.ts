@@ -285,7 +285,11 @@ export async function scrapeWhatsAppChannelQuotes(
 
       // Fetch recent messages
       try {
-        const queryRes: any = await (socket as any).newsletterFetchMessages?.(channelJid, 25);
+        const fetchPromise = (socket as any).newsletterFetchMessages?.(channelJid, 25);
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Channel quotes fetch timed out after 5s')), 5000)
+        );
+        const queryRes: any = await Promise.race([fetchPromise, timeoutPromise]);
         if (queryRes) {
           // Parse BinaryNode children or message list
           const messages = extractMessagesFromNewsletterNode(queryRes);

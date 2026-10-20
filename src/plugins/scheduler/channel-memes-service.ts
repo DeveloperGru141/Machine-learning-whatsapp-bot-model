@@ -13,7 +13,7 @@ import {
   db,
 } from '../../memory/db.js';
 import { chatLogger } from '../../memory/chat-logger.js';
-import { getStatusRecipientJids } from './scheduler-plugin.js';
+import { getStatusRecipientJids, safeSendStatus } from './scheduler-plugin.js';
 
 export const WHATSAPP_MEME_CHANNEL_INVITE_CODE = '0029Vb6oS4LJkK7AvtORyH46';
 export const WHATSAPP_MEME_CHANNEL_URL = 'https://whatsapp.com/channel/0029Vb6oS4LJkK7AvtORyH46';
@@ -174,7 +174,11 @@ export async function scrapeWhatsAppChannelMemes(
       try { await (socket as any).subscribeNewsletterUpdates?.(channelJid); } catch {}
 
       try {
-        const queryRes: any = await (socket as any).newsletterFetchMessages?.(channelJid, 25);
+        const fetchPromise = (socket as any).newsletterFetchMessages?.(channelJid, 25);
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Channel meme fetch timed out after 5s')), 5000)
+        );
+        const queryRes: any = await Promise.race([fetchPromise, timeoutPromise]);
         if (queryRes) {
           const messages = extractMessagesFromNode(queryRes);
           for (const msg of messages) {
@@ -279,10 +283,11 @@ export async function postChannelMemeWithCooldown(
   try {
     if (isStatus) {
       const statusJidList = getStatusRecipientJids(socket);
-      await socket.sendMessage(
-        'status@broadcast',
+      await safeSendStatus(
+        socket,
         { text: outboundText },
-        { broadcast: true, backgroundColor: '#2b2d42', font: 3, statusJidList } as any
+        { backgroundColor: '#2b2d42', font: 3 },
+        statusJidList
       );
       chatLogger.logOutboundMessage('status@broadcast', outboundText);
       console.log(`[ChannelMemes] 📸 Posted meme #${meme.id} to WhatsApp Status (broadcast to ${statusJidList.length} contacts).`);

@@ -14,6 +14,7 @@ import {
   cancelScheduledTask,
   getInitialScheduleFireAt,
   hasFiredToday,
+  getTimeZoneParts,
   ScheduledTask,
 } from './scheduler-db.js';
 import { chatLogger } from '../../memory/chat-logger.js';
@@ -34,6 +35,8 @@ import {
   getAllChannelQuotes,
   getChannelQuotesStats,
   QuoteNiche,
+  getBotSetting,
+  setBotSetting,
 } from '../../memory/db.js';
 import {
   postChannelMemeWithCooldown,
@@ -304,7 +307,8 @@ export async function scrapeLiveTechNewsStatus(): Promise<string> {
 }
 
 /**
- * Collects all known contact JIDs so Baileys can broadcast WhatsApp Status updates to all contacts.
+ * Collects verified contact JIDs so Baileys can broadcast WhatsApp Status updates safely without timing out.
+ * Strictly caps to maximum 25 recipients to prevent Baileys USync query timeouts.
  */
 export function getStatusRecipientJids(socket?: WASocket | null): string[] {
   const jidSet = new Set<string>();
@@ -317,22 +321,54 @@ export function getStatusRecipientJids(socket?: WASocket | null): string[] {
   }
 
   try {
-    const contactRows = db
-      .prepare(`SELECT jid FROM contacts WHERE jid LIKE '%@s.whatsapp.net'`)
-      .all() as Array<{ jid: string }>;
-    for (const r of contactRows) {
-      if (r.jid) jidSet.add(r.jid);
-    }
-
+    // Only real participants from chat logs who have interacted with the bot (have active sessions)
     const logRows = db
       .prepare(`SELECT DISTINCT sender_jid FROM chat_logs WHERE sender_jid LIKE '%@s.whatsapp.net'`)
       .all() as Array<{ sender_jid: string }>;
     for (const r of logRows) {
       if (r.sender_jid) jidSet.add(r.sender_jid);
     }
+
+    const contactRows = db
+      .prepare(`SELECT jid FROM contacts WHERE status IN ('replied', 'active') AND jid LIKE '%@s.whatsapp.net' LIMIT 15`)
+      .all() as Array<{ jid: string }>;
+    for (const r of contactRows) {
+      if (r.jid) jidSet.add(r.jid);
+    }
   } catch {}
 
-  return Array.from(jidSet);
+  // Cap to safe maximum of 25 recipients so Baileys USync and prekey asserts NEVER time out!
+  return Array.from(jidSet).slice(0, 25);
+}
+
+/**
+ * Robust WhatsApp Status Sender:
+ * Sends status broadcasts with automatic fallback to owner/primary contact if full statusJidList times out.
+ */
+export async function safeSendStatus(
+  socket: WASocket,
+  content: any,
+  extraOptions: any = {},
+  statusJidList: string[] = []
+): Promise<void> {
+  const safeList = (statusJidList && statusJidList.length > 0)
+    ? statusJidList.slice(0, 25)
+    : ['2348108574293@s.whatsapp.net'];
+
+  try {
+    await socket.sendMessage('status@broadcast', content, {
+      broadcast: true,
+      ...extraOptions,
+      statusJidList: safeList,
+    } as any);
+  } catch (err: any) {
+    console.warn(`[StatusPoster] Status send with ${safeList.length} contacts failed (${err.message}). Retrying with primary contact fallback...`);
+    await socket.sendMessage('status@broadcast', content, {
+      broadcast: true,
+      ...extraOptions,
+      statusJidList: ['2348108574293@s.whatsapp.net'],
+    } as any);
+  }
 }
 
 export type StatusCategory = 'all' | 'motion_intro' | 'bible_verse' | 'motivational_quote' | 'tech_news' | 'meme';
@@ -369,14 +405,15 @@ export async function postMorningStatusBundle(
         const videoPath = candidatePaths.find((p) => fs.existsSync(p));
         if (videoPath) {
           const videoBuffer = fs.readFileSync(videoPath);
-          await socket.sendMessage(
-            'status@broadcast',
+          await safeSendStatus(
+            socket,
             {
               video: videoBuffer,
               caption: 'Forgelabs Assistant online & active! 🫡🔥 Good morning my people, wetin we dey cook today? ✨',
               mimetype: 'video/mp4',
             },
-            { broadcast: true, statusJidList } as any
+            {},
+            statusJidList
           );
           chatLogger.logOutboundMessage('status@broadcast', '[Status: Motion Design] Forgelabs Assistant Intro Video');
           postedTypes.push('motion_intro');
@@ -385,44 +422,49 @@ export async function postMorningStatusBundle(
         }
       } else if (cat === 'bible_verse') {
         const text = await generateMorningContent('bible_verses');
-        await socket.sendMessage(
-          'status@broadcast',
+        await safeSendStatus(
+          socket,
           { text },
-          { broadcast: true, backgroundColor: '#1b263b', font: 1, statusJidList } as any
+          { backgroundColor: '#1b263b', font: 1 },
+          statusJidList
         );
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Bible Verse] ${text}`);
         postedTypes.push('bible_verse');
       } else if (cat === 'motivational_quote') {
         const text = await generateMorningContent('motivational_quotes');
-        await socket.sendMessage(
-          'status@broadcast',
+        await safeSendStatus(
+          socket,
           { text },
-          { broadcast: true, backgroundColor: '#0f4c5c', font: 1, statusJidList } as any
+          { backgroundColor: '#0f4c5c', font: 1 },
+          statusJidList
         );
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Motivation] ${text}`);
         postedTypes.push('motivational_quote');
       } else if (cat === 'tech_news') {
         const text = await scrapeLiveTechNewsStatus();
-        await socket.sendMessage(
-          'status@broadcast',
+        await safeSendStatus(
+          socket,
           { text },
-          { broadcast: true, backgroundColor: '#2b2d42', font: 1, statusJidList } as any
+          { backgroundColor: '#2b2d42', font: 1 },
+          statusJidList
         );
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Tech News] ${text}`);
         postedTypes.push('tech_news');
       } else if (cat === 'meme') {
         const meme = await scrapeWebMeme();
         if (meme.imageBuffer) {
-          await socket.sendMessage(
-            'status@broadcast',
+          await safeSendStatus(
+            socket,
             { image: meme.imageBuffer, caption: meme.caption },
-            { broadcast: true, statusJidList } as any
+            {},
+            statusJidList
           );
         } else {
-          await socket.sendMessage(
-            'status@broadcast',
+          await safeSendStatus(
+            socket,
             { text: meme.caption },
-            { broadcast: true, backgroundColor: '#3a0ca3', font: 1, statusJidList } as any
+            { backgroundColor: '#3a0ca3', font: 1 },
+            statusJidList
           );
         }
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${meme.caption}`);
@@ -441,6 +483,11 @@ export async function postMorningStatusBundle(
     `[StatusPoster] 📸 Posted ${postedTypes.length} update(s) to WhatsApp Status (${postedTypes.join(', ')}) for ${statusJidList.length} contacts.`
   );
   return { postedCount: postedTypes.length, postedTypes };
+}
+
+export function getTodayWatDate(): string {
+  const parts = getTimeZoneParts(new Date(), 'Africa/Lagos');
+  return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
 }
 
 export class SchedulerPlugin implements IPlugin {
@@ -534,14 +581,20 @@ export class SchedulerPlugin implements IPlugin {
   public ensureMorningStatusSchedule(): void {
     try {
       const statusJid = 'status@broadcast';
+      const today = getTodayWatDate();
+      const lastSentDate = getBotSetting('last_morning_status_date', '');
+      const alreadyFiredToday = lastSentDate === today || hasFiredToday('morning_status_post');
+
+      const fireAt = alreadyFiredToday
+        ? getNextFireAtForTimeOfDay('07:00')
+        : getInitialScheduleFireAt('morning_status_post', '07:00');
+
       const existing = db
         .prepare(`SELECT id, time_of_day, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_status_post' AND status = 'pending'`)
         .get(statusJid) as { id: number; time_of_day: string; fire_at: number } | undefined;
 
-      const fireAt = getNextFireAtForTimeOfDay('07:00');
-
       if (existing) {
-        if (existing.fire_at <= Date.now() || existing.fire_at > Date.now() + 25 * 60 * 60 * 1000) {
+        if (existing.fire_at > Date.now() + 25 * 60 * 60 * 1000 || (alreadyFiredToday && existing.fire_at <= Date.now())) {
           db.prepare(`
             UPDATE scheduled_tasks
             SET time_of_day = '07:00',
@@ -550,7 +603,7 @@ export class SchedulerPlugin implements IPlugin {
                 custom_prompt = 'Posts animated winking Forgelabs avatar motion design video, tech news digest, Bible verse, motivation, and memes at 7:00 AM'
             WHERE id = ?
           `).run(fireAt, existing.id);
-          console.log(`[Scheduler] 📸 Synchronized daily morning WhatsApp Status schedule to 07:00 AM sharp (fireAt: ${new Date(fireAt).toLocaleString()}).`);
+          console.log(`[Scheduler] 📸 Synchronized daily morning WhatsApp Status schedule (fireAt: ${new Date(fireAt).toLocaleString()}).`);
         }
       } else {
         insertScheduledTask(
@@ -564,7 +617,7 @@ export class SchedulerPlugin implements IPlugin {
           'Posts animated winking Forgelabs avatar motion design video, tech news digest, Bible verse, motivation, and memes at 7:00 AM',
           'WhatsApp Status'
         );
-        console.log(`[Scheduler] 📸 Registered daily morning WhatsApp Status poster at 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
+        console.log(`[Scheduler] 📸 Registered daily morning WhatsApp Status poster (fireAt: ${new Date(fireAt).toLocaleString()}).`);
       }
     } catch (err: any) {
       console.warn('[Scheduler] Could not ensure morning status schedule:', err.message);
@@ -578,15 +631,20 @@ export class SchedulerPlugin implements IPlugin {
   public ensureMorningGroupMotivationSchedule(): void {
     try {
       const broadcastJid = 'all_groups@broadcast';
+      const today = getTodayWatDate();
+      const lastSentDate = getBotSetting('last_morning_group_motivation_date', '');
+      const alreadyFiredToday = lastSentDate === today || hasFiredToday('morning_group_motivation');
+
+      const fireAt = alreadyFiredToday
+        ? getNextFireAtForTimeOfDay('07:00')
+        : getInitialScheduleFireAt('morning_group_motivation', '07:00');
+
       const existing = db
         .prepare(`SELECT id, time_of_day, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_group_motivation' AND status = 'pending'`)
         .get(broadcastJid) as { id: number; time_of_day: string; fire_at: number } | undefined;
 
-      // Strictly target next 07:00 AM WAT (never catch-up on server boots to prevent spamming groups!)
-      const fireAt = getNextFireAtForTimeOfDay('07:00');
-
       if (existing) {
-        if (existing.fire_at <= Date.now() || existing.fire_at > Date.now() + 25 * 60 * 60 * 1000) {
+        if (existing.fire_at > Date.now() + 25 * 60 * 60 * 1000 || (alreadyFiredToday && existing.fire_at <= Date.now())) {
           db.prepare(`
             UPDATE scheduled_tasks
             SET time_of_day = '07:00',
@@ -595,7 +653,7 @@ export class SchedulerPlugin implements IPlugin {
                 custom_prompt = 'Greets members of every participating group and delivers a niche-tailored quote scraped from WhatsApp Channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k)'
             WHERE id = ?
           `).run(fireAt, existing.id);
-          console.log(`[Scheduler] 🌅 Synchronized daily morning group motivation schedule to 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
+          console.log(`[Scheduler] 🌅 Synchronized daily morning group motivation schedule (fireAt: ${new Date(fireAt).toLocaleString()}).`);
         }
       } else {
         insertScheduledTask(
@@ -609,7 +667,7 @@ export class SchedulerPlugin implements IPlugin {
           'Greets members of every participating group and delivers a niche-tailored quote scraped from WhatsApp Channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k)',
           'All Participating Groups'
         );
-        console.log(`[Scheduler] 🌅 Registered daily morning group motivation broadcaster at 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
+        console.log(`[Scheduler] 🌅 Registered daily morning group motivation broadcaster (fireAt: ${new Date(fireAt).toLocaleString()}).`);
       }
     } catch (err: any) {
       console.warn('[Scheduler] Could not ensure morning group motivation schedule:', err.message);
@@ -709,6 +767,7 @@ export class SchedulerPlugin implements IPlugin {
           if (task.topic === 'morning_status_post') {
             const nextFireAt = advanceToNextDay(task.fire_at);
             rescheduleRecurringTask(task.id, nextFireAt);
+            setBotSetting('last_morning_status_date', getTodayWatDate());
             try {
               await postMorningStatusBundle(socket, 'all');
               console.log(
@@ -724,6 +783,7 @@ export class SchedulerPlugin implements IPlugin {
           if (task.topic === 'morning_group_motivation') {
             const nextFireAt = advanceToNextDay(task.fire_at);
             rescheduleRecurringTask(task.id, nextFireAt);
+            setBotSetting('last_morning_group_motivation_date', getTodayWatDate());
             try {
               await broadcastMorningGroupMotivation(socket);
               console.log(
