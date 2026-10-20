@@ -241,6 +241,21 @@ export function initDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_contact_relay_target ON contact_relay_sessions(target_jid, status);
     CREATE INDEX IF NOT EXISTS idx_contact_relay_phone ON contact_relay_sessions(target_phone, status);
+
+    -- WhatsApp Channel Motivational Quotes Bank (scraped from Quotes📖 channel 0029Vb7S3VAFCCoXEIdW5n2k)
+    CREATE TABLE IF NOT EXISTS channel_quotes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      quote_text TEXT NOT NULL UNIQUE,
+      author TEXT,
+      niche TEXT NOT NULL, -- 'tech_coding' | 'wealth_business' | 'academic_discipline' | 'general_growth'
+      channel_source TEXT DEFAULT '0029Vb7S3VAFCCoXEIdW5n2k',
+      channel_message_id TEXT,
+      used_count INTEGER DEFAULT 0,
+      last_used_at INTEGER DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_channel_quotes_niche ON channel_quotes(niche, used_count);
   `);
 
   // Safe migration for existing databases
@@ -661,6 +676,129 @@ export function markRelaySessionReplied(id: number): void {
     `).run(Date.now(), id);
   } catch (err: any) {
     console.error('[DB] Error marking relay session replied:', err?.message || err);
+  }
+}
+
+export type QuoteNiche = 'tech_coding' | 'wealth_business' | 'academic_discipline' | 'general_growth';
+
+export interface ChannelQuote {
+  id: number;
+  quote_text: string;
+  author: string | null;
+  niche: QuoteNiche;
+  channel_source: string;
+  channel_message_id: string | null;
+  used_count: number;
+  last_used_at: number;
+  created_at: number;
+}
+
+/**
+ * Inserts or updates a quote scraped from the WhatsApp channel.
+ */
+export function saveChannelQuote(
+  quoteText: string,
+  author?: string | null,
+  niche: QuoteNiche = 'general_growth',
+  channelSource: string = '0029Vb7S3VAFCCoXEIdW5n2k',
+  messageId?: string | null
+): boolean {
+  try {
+    const cleanText = (quoteText || '').trim();
+    if (!cleanText || cleanText.length < 10) return false;
+
+    const cleanAuthor = author ? author.trim() : null;
+
+    db.prepare(`
+      INSERT INTO channel_quotes (quote_text, author, niche, channel_source, channel_message_id, used_count, last_used_at, created_at)
+      VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+      ON CONFLICT(quote_text) DO UPDATE SET
+        author = COALESCE(excluded.author, channel_quotes.author),
+        niche = CASE WHEN channel_quotes.niche = 'general_growth' THEN excluded.niche ELSE channel_quotes.niche END
+    `).run(cleanText, cleanAuthor, niche, channelSource, messageId || null, Date.now());
+    return true;
+  } catch (err: any) {
+    console.error('[DB] Error saving channel quote:', err?.message || err);
+    return false;
+  }
+}
+
+/**
+ * Retrieves the freshest, least recently used quote matching a specific niche.
+ */
+export function getFreshestQuoteForNiche(niche: QuoteNiche): ChannelQuote | null {
+  try {
+    // Pick from matching niche with lowest used_count, ordered by last_used_at ASC
+    let quote = db.prepare(`
+      SELECT * FROM channel_quotes
+      WHERE niche = ?
+      ORDER BY used_count ASC, last_used_at ASC, RANDOM()
+      LIMIT 1
+    `).get(niche) as unknown as ChannelQuote | undefined;
+
+    // Fallback to general_growth if niche has no quotes yet
+    if (!quote) {
+      quote = db.prepare(`
+        SELECT * FROM channel_quotes
+        ORDER BY used_count ASC, last_used_at ASC, RANDOM()
+        LIMIT 1
+      `).get() as unknown as ChannelQuote | undefined;
+    }
+
+    return quote || null;
+  } catch (err: any) {
+    console.error('[DB] Error getting quote for niche:', err?.message || err);
+    return null;
+  }
+}
+
+/**
+ * Marks a quote as used so the scheduler rotates smoothly without repeating recently used quotes.
+ */
+export function markQuoteUsed(id: number): void {
+  try {
+    db.prepare(`
+      UPDATE channel_quotes
+      SET used_count = used_count + 1, last_used_at = ?
+      WHERE id = ?
+    `).run(Date.now(), id);
+  } catch (err: any) {
+    console.error('[DB] Error marking quote used:', err?.message || err);
+  }
+}
+
+/**
+ * Returns all stored channel quotes with pagination.
+ */
+export function getAllChannelQuotes(limit = 100): ChannelQuote[] {
+  try {
+    return db.prepare(`
+      SELECT * FROM channel_quotes
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(limit) as unknown as ChannelQuote[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Retrieves statistics about stored quotes.
+ */
+export function getChannelQuotesStats(): { total: number; byNiche: Record<string, number> } {
+  try {
+    const totalRow = db.prepare('SELECT COUNT(*) as count FROM channel_quotes').get() as { count: number };
+    const rows = db.prepare('SELECT niche, COUNT(*) as count FROM channel_quotes GROUP BY niche').all() as Array<{ niche: string; count: number }>;
+    const byNiche: Record<string, number> = {};
+    for (const r of rows) {
+      byNiche[r.niche] = r.count;
+    }
+    return {
+      total: totalRow?.count || 0,
+      byNiche,
+    };
+  } catch {
+    return { total: 0, byNiche: {} };
   }
 }
 

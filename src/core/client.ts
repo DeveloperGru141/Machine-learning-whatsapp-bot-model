@@ -6,7 +6,8 @@ import makeWASocket, {
   proto,
   Browsers,
 } from '@whiskeysockets/baileys';
-import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied } from '../memory/db.js';
+import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied, saveChannelQuote } from '../memory/db.js';
+import { parseQuoteFromText, WHATSAPP_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-quotes-service.js';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { Boom } from '@hapi/boom';
@@ -911,6 +912,25 @@ export class WhatsAppClient {
           stickerFilename: normalized.stickerFilename,
           timestamp: effectiveMsgTime,
         });
+      }
+      return;
+    }
+
+    // 3. Handle live incoming messages from WhatsApp Channel (Quotes📖)
+    if (msg.key?.remoteJid?.endsWith('@newsletter')) {
+      const normalized = normalizeMessage(msg);
+      if (normalized?.text) {
+        const parsed = parseQuoteFromText(normalized.text);
+        if (parsed) {
+          saveChannelQuote(
+            parsed.quote,
+            parsed.author,
+            parsed.niche,
+            WHATSAPP_CHANNEL_INVITE_CODE,
+            msg.key.id || undefined
+          );
+          console.log(`[WhatsAppClient] 📖 Ingested real-time quote from channel: "${parsed.quote.slice(0, 30)}..." (${parsed.niche})`);
+        }
       }
       return;
     }

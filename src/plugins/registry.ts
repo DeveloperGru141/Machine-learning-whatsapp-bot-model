@@ -208,13 +208,15 @@ export class PluginRegistry {
       selected.add('send_message_to_contact');
     }
 
-    // 6. Reminders & Daily Scheduled Broadcasts
+    // 6. Reminders, Daily Scheduled Broadcasts, & WhatsApp Channel Motivation
     if (
       text.includes('remind') ||
       text.includes('alarm') ||
       text.includes('timer') ||
       text.includes('schedule') ||
       text.includes('quote') ||
+      text.includes('motivation') ||
+      text.includes('channel') ||
       text.includes('verse') ||
       text.includes('broadcast') ||
       text.includes('daily') ||
@@ -224,6 +226,9 @@ export class PluginRegistry {
       selected.add('schedule_daily_broadcast');
       selected.add('list_scheduled_broadcasts');
       selected.add('cancel_scheduled_broadcast');
+      selected.add('broadcast_group_motivation');
+      selected.add('scrape_channel_quotes');
+      selected.add('list_channel_quotes');
     }
 
     // 7. Image Generation (FLUX.1-Krea-dev via Hugging Face router)
@@ -458,6 +463,10 @@ export class PluginRegistry {
       lookup_contact: 'get_contact',
       schedule_reminder: 'set_reminder',
       post_status: 'post_whatsapp_status',
+      broadcast_motivation: 'broadcast_group_motivation',
+      post_morning_motivation: 'broadcast_group_motivation',
+      scrape_quotes: 'scrape_channel_quotes',
+      get_channel_quotes: 'list_channel_quotes',
       reply_unreplied: 'reply_unreplied_messages',
       join_group_via_invite_link: 'join_group',
       join_whatsapp_group: 'join_group',

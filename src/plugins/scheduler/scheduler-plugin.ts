@@ -20,6 +20,19 @@ import { healthMonitor } from '../../core/health-monitor.js';
 import { db } from '../../memory/db.js';
 import { config, normalizePhoneNumber } from '../../config/env.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
+import {
+  broadcastMorningGroupMotivation,
+  scrapeWhatsAppChannelQuotes,
+  seedChannelQuotesIfEmpty,
+  WHATSAPP_CHANNEL_INVITE_CODE,
+  WHATSAPP_CHANNEL_URL,
+  WHATSAPP_CHANNEL_NAME,
+} from './channel-quotes-service.js';
+import {
+  getAllChannelQuotes,
+  getChannelQuotesStats,
+  QuoteNiche,
+} from '../../memory/db.js';
 
 let activeSocket: WASocket | null = null;
 
@@ -426,10 +439,14 @@ export class SchedulerPlugin implements IPlugin {
   public async onLoad(): Promise<void> {
     console.log('[Scheduler] Initializing reminder scheduler loop (every 30s)...');
 
+    // Seed motivational quotes from WhatsApp channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k)
+    seedChannelQuotesIfEmpty();
     // Automatically ensure daily morning health status report is registered for owner Ademola (08108574293)
     this.ensureOwnerHealthSchedule();
-    // Automatically ensure daily morning WhatsApp Status posting (memes, tech news, bible verses, motivation) at 07:15 AM
+    // Automatically ensure daily morning WhatsApp Status posting (memes, tech news, bible verses, motivation) at 07:00 AM
     this.ensureMorningStatusSchedule();
+    // Automatically ensure daily morning group motivational greetings at 07:00 AM across all participating groups
+    this.ensureMorningGroupMotivationSchedule();
 
     if (this.timerInterval) {
       clearInterval(this.timerInterval);
@@ -494,8 +511,8 @@ export class SchedulerPlugin implements IPlugin {
           UPDATE scheduled_tasks
           SET time_of_day = '07:00',
               fire_at = ?,
-              title = 'Daily 7:00 AM WhatsApp Status: Winking Avatar Motion Design & Morning Bundle',
-              description = 'Posts animated winking Forgelabs avatar motion design video, tech news digest, Bible verse, motivation, and memes at 7:00 AM'
+              message = 'Daily 7:00 AM WhatsApp Status: Winking Avatar Motion Design & Morning Bundle',
+              custom_prompt = 'Posts animated winking Forgelabs avatar motion design video, tech news digest, Bible verse, motivation, and memes at 7:00 AM'
           WHERE id = ?
         `).run(fireAt, existing.id);
         console.log(`[Scheduler] 📸 Synchronized daily morning WhatsApp Status schedule to 07:00 AM sharp.`);
@@ -515,6 +532,48 @@ export class SchedulerPlugin implements IPlugin {
       }
     } catch (err: any) {
       console.warn('[Scheduler] Could not ensure morning status schedule:', err.message);
+    }
+  }
+
+  /**
+   * Automatically schedules the daily 07:00 AM morning motivational broadcast across all participating WhatsApp groups,
+   * greeting members warmly and sharing a niche-tailored quote scraped from WhatsApp Channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k).
+   */
+  public ensureMorningGroupMotivationSchedule(): void {
+    try {
+      const broadcastJid = 'all_groups@broadcast';
+      const existing = db
+        .prepare(`SELECT id, time_of_day FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_group_motivation' AND status = 'pending'`)
+        .get(broadcastJid) as { id: number; time_of_day: string } | undefined;
+
+      const fireAt = getNextFireAtForTimeOfDay('07:00');
+
+      if (existing) {
+        db.prepare(`
+          UPDATE scheduled_tasks
+          SET time_of_day = '07:00',
+              fire_at = ?,
+              message = 'Daily 7:00 AM Group Motivation & Morning Greetings',
+              custom_prompt = 'Greets members of every participating group and delivers a niche-tailored quote scraped from WhatsApp Channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k)'
+          WHERE id = ?
+        `).run(fireAt, existing.id);
+        console.log(`[Scheduler] 🌅 Synchronized daily morning group motivation schedule to 07:00 AM sharp.`);
+      } else {
+        insertScheduledTask(
+          broadcastJid,
+          '2348108574293@s.whatsapp.net',
+          'Daily 7:00 AM Group Motivation & Morning Greetings',
+          fireAt,
+          'daily',
+          'morning_group_motivation',
+          '07:00',
+          'Greets members of every participating group and delivers a niche-tailored quote scraped from WhatsApp Channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k)',
+          'All Participating Groups'
+        );
+        console.log(`[Scheduler] 🌅 Registered daily morning group motivation broadcaster at 07:00 AM.`);
+      }
+    } catch (err: any) {
+      console.warn('[Scheduler] Could not ensure morning group motivation schedule:', err.message);
     }
   }
 
@@ -555,6 +614,20 @@ export class SchedulerPlugin implements IPlugin {
               rescheduleRecurringTask(task.id, nextFireAt);
               console.log(
                 `[Scheduler] 🔄 Daily WhatsApp Status bundle #${task.id} posted and rescheduled for tomorrow at ${new Date(nextFireAt).toLocaleString()}.`
+              );
+            } else {
+              markTaskFired(task.id);
+            }
+            continue;
+          }
+
+          if (task.topic === 'morning_group_motivation' || task.chat_jid === 'all_groups@broadcast') {
+            await broadcastMorningGroupMotivation(socket);
+            if (task.recurring_cron === 'daily') {
+              const nextFireAt = advanceToNextDay(task.fire_at);
+              rescheduleRecurringTask(task.id, nextFireAt);
+              console.log(
+                `[Scheduler] 🔄 Daily morning group motivation #${task.id} broadcasted and rescheduled for tomorrow at ${new Date(nextFireAt).toLocaleString()}.`
               );
             } else {
               markTaskFired(task.id);
@@ -932,6 +1005,126 @@ export class SchedulerPlugin implements IPlugin {
           };
         } catch (err: any) {
           return { success: false, message: `Failed to post WhatsApp Status: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'broadcast_group_motivation',
+      description:
+        'Broadcasts a warm, energetic morning greeting and a niche-tailored motivational quote (scraped from WhatsApp Channel Quotes📖: 0029Vb7S3VAFCCoXEIdW5n2k) to every WhatsApp group the bot is in, or to a specific group on demand.',
+      parameters: {
+        type: 'object',
+        properties: {
+          group: {
+            type: 'string',
+            description:
+              'Optional name or JID of the target WhatsApp group. If omitted, broadcasts to all participating groups with safe anti-ban pacing.',
+          },
+        },
+      },
+      execute: async (args: { group?: string; group_jid?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const socket = this.sock || ctx.sock || activeSocket;
+          if (!socket) {
+            return { success: false, message: 'WhatsApp socket is not connected.' };
+          }
+
+          let targetJid: string | undefined = undefined;
+          const groupQuery = (args.group || args.group_jid || '').trim();
+          if (groupQuery) {
+            if (groupQuery.endsWith('@g.us')) {
+              targetJid = groupQuery;
+            } else if (socket.groupFetchAllParticipating) {
+              try {
+                const participating = await socket.groupFetchAllParticipating();
+                const matched = Object.values(participating).find((g: any) =>
+                  g.subject && g.subject.toLowerCase().includes(groupQuery.toLowerCase())
+                );
+                if (matched) {
+                  targetJid = (matched as any).id;
+                }
+              } catch {}
+            }
+          }
+
+          const res = await broadcastMorningGroupMotivation(socket, targetJid);
+          return {
+            success: true,
+            message: `Delivered morning greeting and niche motivational quotes to ${res.groupsContacted} group(s): ${res.deliveredGroups.join(', ') || 'None'}.`,
+            data: res,
+          };
+        } catch (err: any) {
+          return { success: false, message: `Failed to broadcast morning motivation: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'scrape_channel_quotes',
+      description:
+        'Scrapes fresh motivational quotes from WhatsApp Channel Quotes📖 (https://whatsapp.com/channel/0029Vb7S3VAFCCoXEIdW5n2k) and categorizes them by group niche (tech, wealth/empire, academic, general).',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const socket = this.sock || ctx.sock || activeSocket;
+          if (!socket) {
+            return { success: false, message: 'WhatsApp socket is not connected.' };
+          }
+
+          const res = await scrapeWhatsAppChannelQuotes(socket);
+          const stats = getChannelQuotesStats();
+          return {
+            success: true,
+            message: `Scraped Quotes📖 channel (JID: ${res.channelJid || 'pending'}). Total stored quotes in bank: ${stats.total} (${JSON.stringify(stats.byNiche)}).`,
+            data: { ...res, stats },
+          };
+        } catch (err: any) {
+          return { success: false, message: `Failed to scrape channel quotes: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'list_channel_quotes',
+      description:
+        'Lists motivational quotes stored in the Quotes📖 channel bank categorized by niche (tech_coding, wealth_business, academic_discipline, general_growth) and their usage count.',
+      parameters: {
+        type: 'object',
+        properties: {
+          niche: {
+            type: 'string',
+            enum: ['all', 'tech_coding', 'wealth_business', 'academic_discipline', 'general_growth'],
+            description: 'Optional filter by niche. Defaults to "all".',
+          },
+        },
+      },
+      execute: async (args: { niche?: string }): Promise<ToolResult> => {
+        try {
+          const allQuotes = getAllChannelQuotes(30);
+          const filterNiche = args.niche && args.niche !== 'all' ? args.niche : null;
+          const filtered = filterNiche ? allQuotes.filter((q) => q.niche === filterNiche) : allQuotes;
+          const stats = getChannelQuotesStats();
+
+          if (filtered.length === 0) {
+            return {
+              success: true,
+              message: `No quotes found for niche "${filterNiche || 'all'}". Total in bank: ${stats.total}.`,
+              data: { quotes: [], stats },
+            };
+          }
+
+          const sample = filtered.slice(0, 10).map((q) => {
+            return `• [${q.niche}] "${q.quote_text}" — *${q.author || 'Quotes📖'}* (used: ${q.used_count}x)`;
+          }).join('\n');
+
+          return {
+            success: true,
+            message: `📚 *Quotes📖 Channel Bank (${filtered.length} shown, ${stats.total} total):*\n\n${sample}`,
+            data: { quotes: filtered, stats },
+          };
+        } catch (err: any) {
+          return { success: false, message: `Failed to list channel quotes: ${err.message}` };
         }
       },
     },
