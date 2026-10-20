@@ -139,11 +139,30 @@ export class OutboundSender {
       : bufferOrPath;
 
     return antiBanEngine.scheduleDispatch(chatJid, async () => {
-      return await sock.sendMessage(
-        chatJid,
-        { sticker: buffer },
-        { quoted: safeQuoted }
-      );
+      let currentSock = sock || activeSocketGetter?.();
+      if (!currentSock) {
+        console.warn(`[OutboundSender] No active socket to send sticker to ${chatJid}`);
+        return null;
+      }
+      try {
+        const res = await currentSock.sendMessage(
+          chatJid,
+          { sticker: buffer },
+          safeQuoted ? { quoted: safeQuoted } : undefined
+        );
+        this.recordDispatchedId(res?.key?.id);
+        return res;
+      } catch (err: any) {
+        console.warn(`[OutboundSender] sendSticker with quoted failed (${err.message}), retrying directly...`);
+        try {
+          const res = await currentSock.sendMessage(chatJid, { sticker: buffer });
+          this.recordDispatchedId(res?.key?.id);
+          return res;
+        } catch (retryErr: any) {
+          console.error(`[OutboundSender] Failed to send sticker directly to ${chatJid}:`, retryErr.message);
+          throw retryErr;
+        }
+      }
     });
   }
 

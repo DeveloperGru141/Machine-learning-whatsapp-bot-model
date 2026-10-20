@@ -24,6 +24,7 @@ import { contactPlugin } from './plugins/contact/contact-plugin.js';
 import { imageGenPlugin } from './plugins/image-gen/image-plugin.js';
 import { engagementPlugin } from './plugins/engagement/engagement-plugin.js';
 import { stickerPlugin } from './plugins/stickers/sticker-plugin.js';
+import { viewOncePlugin } from './plugins/view-once/view-once-plugin.js';
 import { reloadPluginsTool } from './plugins/hot-reload.js';
 import { whatsAppClient } from './core/client.js';
 import { healthMonitor } from './core/health-monitor.js';
@@ -383,6 +384,7 @@ async function bootstrap() {
   await pluginRegistry.registerPlugin(imageGenPlugin);
   await pluginRegistry.registerPlugin(engagementPlugin);
   await pluginRegistry.registerPlugin(stickerPlugin);
+  await pluginRegistry.registerPlugin(viewOncePlugin);
 
   console.log(`🔌 Registered ${pluginRegistry.getAllTools().length} tools across plugins.`);
 

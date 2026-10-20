@@ -56,7 +56,14 @@ class StickerEngine {
         return;
       }
 
-      const files = fs.readdirSync(STICKER_DIR).filter((f) => f.toLowerCase().endsWith('.webp'));
+      const files = fs.readdirSync(STICKER_DIR).filter((f) => {
+        if (!f.toLowerCase().endsWith('.webp')) return false;
+        try {
+          return fs.statSync(path.join(STICKER_DIR, f)).size >= 2000;
+        } catch {
+          return false;
+        }
+      });
       console.log(`[StickerEngine] 🎨 Scanning ${files.length} stickers from assets/stickers...`);
 
       const vibes: StickerVibe[] = [

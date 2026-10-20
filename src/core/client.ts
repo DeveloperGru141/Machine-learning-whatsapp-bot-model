@@ -41,6 +41,8 @@ import { userProfileManager } from '../memory/user-profiles.js';
 import { contactService } from '../memory/contact-service.js';
 import { setSchedulerSocket } from '../plugins/scheduler/scheduler-plugin.js';
 import { setEngagementSocket } from '../plugins/engagement/engagement-plugin.js';
+import { setViewOnceSocket, deliverViewOnceMediaToOwner } from '../plugins/view-once/view-once-plugin.js';
+import { saveViewOnceMessage, getLatestViewOnceMessages, ViewOnceRecord } from '../memory/db.js';
 import { antiBanEngine } from '../security/anti-ban.js';
 
 /**
@@ -518,6 +520,7 @@ export class WhatsAppClient {
       setupGroupWelcome(this.sock);
       setSchedulerSocket(this.sock);
       setEngagementSocket(this.sock);
+      setViewOnceSocket(this.sock);
 
       // Save auth credentials whenever updated
       this.sock.ev.on('creds.update', async () => {
@@ -937,6 +940,9 @@ export class WhatsAppClient {
       return;
     }
 
+    // 3b. Anti-ViewOnce Interceptor: Vault any incoming View-Once media before it expires or is opened
+    await this.interceptViewOnceMessage(msg);
+
     const normalized = normalizeMessage(msg);
     if (!normalized) return;
 
@@ -1021,6 +1027,61 @@ export class WhatsAppClient {
     );
 
     if (!shouldRespond) return;
+
+    // Fast-Path for Bot Owner: Private DM View-Once Retrieval
+    const isOwnerDmUser = userProfileManager.isOwner(normalized.senderJid, normalized.senderName);
+    if (!normalized.isGroup && isOwnerDmUser && normalized.text) {
+      const trimmedLower = normalized.text.trim().toLowerCase();
+      const isVoCmd =
+        /^(?:[./!]?(?:rvo|viewonce|view\s*once)|(?:get|show|send|retrieve|give\s*me)\s+(?:the\s+)?(?:last\s+)?view\s*once)/i.test(
+          trimmedLower
+        );
+
+      if (isVoCmd && this.sock) {
+        const numMatch = trimmedLower.match(/\b(\d+)\b/);
+        const targetIndex = numMatch ? parseInt(numMatch[1], 10) : 1;
+
+        let queryFilter: string | undefined = undefined;
+        const nameMatch = trimmedLower.match(/(?:from|by)\s+([a-z0-9_\-\s]{2,20})/i);
+        if (nameMatch) {
+          queryFilter = nameMatch[1].trim();
+        }
+
+        const records = getLatestViewOnceMessages(10, queryFilter);
+        if (records.length === 0) {
+          await OutboundSender.replyText(
+            this.sock,
+            normalized.chatJid,
+            queryFilter
+              ? `🔍 No captured View-Once media found matching "${queryFilter}" in the vault.`
+              : `📦 No captured View-Once media currently stored in the vault.`,
+            msg,
+            true
+          );
+          return;
+        }
+
+        const idx = Math.max(0, targetIndex - 1);
+        const selected = records[idx] || records[0];
+
+        await deliverViewOnceMediaToOwner(this.sock, normalized.chatJid, selected, msg);
+
+        if (records.length > 1 && targetIndex === 1) {
+          setTimeout(async () => {
+            try {
+              await OutboundSender.replyText(
+                this.sock!,
+                normalized.chatJid,
+                `💡 *Tip:* There are *${records.length}* total View-Once media items vaulted. Reply with *.viewonce 2* to see earlier ones.`,
+                undefined,
+                true
+              );
+            } catch {}
+          }, 1500);
+        }
+        return;
+      }
+    }
 
     // Handle Incoming Stickers: Parse vibe and reply with a matching sticker from our catalog!
     if (normalized.contentType === 'sticker') {
@@ -1276,6 +1337,89 @@ export class WhatsAppClient {
    * Responds to an incoming WhatsApp sticker by parsing its visual content & conversation context
    * and replying with a sticker from the 550+ catalog matching the exact same emotional vibe.
    */
+  
+  /**
+   * Anti-ViewOnce Vault Interceptor:
+   * Detects View-Once media on arrival and saves the decrypted buffer to disk before it expires.
+   */
+  private async interceptViewOnceMessage(msg: proto.IWebMessageInfo): Promise<void> {
+    try {
+      const rawM = msg.message;
+      if (!rawM) return;
+
+      const viewOnce =
+        rawM.viewOnceMessage ||
+        rawM.viewOnceMessageV2 ||
+        rawM.viewOnceMessageV2Extension ||
+        rawM.ephemeralMessage?.message?.viewOnceMessage ||
+        rawM.ephemeralMessage?.message?.viewOnceMessageV2 ||
+        rawM.ephemeralMessage?.message?.viewOnceMessageV2Extension;
+
+      if (!viewOnce || !viewOnce.message) return;
+
+      const inner = viewOnce.message;
+      const isVideo = Boolean(inner.videoMessage);
+      const isAudio = Boolean(inner.audioMessage);
+      const isImage = Boolean(inner.imageMessage);
+      if (!isVideo && !isAudio && !isImage) return;
+
+      const mediaType: 'image' | 'video' | 'audio' = isVideo ? 'video' : isAudio ? 'audio' : 'image';
+      const ext = isVideo ? 'mp4' : isAudio ? 'ogg' : 'jpg';
+      const caption = inner.imageMessage?.caption || inner.videoMessage?.caption || '';
+      const msgId = msg.key?.id || `vo_${Date.now()}`;
+      const chatJid = msg.key?.remoteJid || '';
+      const isGroup = chatJid.endsWith('@g.us');
+      const senderJid = isGroup ? (msg.key?.participant || chatJid) : chatJid;
+      const senderName = msg.pushName || senderJid.split('@')[0];
+
+      let chatName = isGroup ? 'Group Chat' : senderName;
+      if (isGroup) {
+        try {
+          const knownGroup = db.prepare('SELECT subject FROM known_groups WHERE group_jid = ?').get(chatJid) as { subject: string } | undefined;
+          if (knownGroup?.subject) chatName = knownGroup.subject;
+        } catch {}
+      }
+
+      console.log(`[AntiViewOnce] 👁️ Detected View-Once ${mediaType} from ${senderName} in ${chatName} (msgId: ${msgId}). Downloading...`);
+
+      const viewOnceDir = path.resolve('./data/view_once');
+      if (!fs.existsSync(viewOnceDir)) {
+        fs.mkdirSync(viewOnceDir, { recursive: true });
+      }
+
+      const filePath = path.join(viewOnceDir, `${msgId}.${ext}`);
+
+      const buffer = (await downloadMediaMessage(
+        {
+          key: msg.key,
+          message: inner,
+        } as proto.IWebMessageInfo,
+        'buffer',
+        {}
+      )) as Buffer;
+
+      if (buffer && buffer.length > 0) {
+        fs.writeFileSync(filePath, buffer);
+        saveViewOnceMessage({
+          message_id: msgId,
+          chat_jid: chatJid,
+          chat_name: chatName,
+          sender_jid: senderJid,
+          sender_name: senderName,
+          is_group: isGroup,
+          media_type: mediaType,
+          caption,
+          file_path: filePath,
+          file_size: buffer.length,
+          timestamp: Date.now(),
+        });
+        console.log(`[AntiViewOnce] 🛡️ Successfully vaulted View-Once ${mediaType} (${Math.round(buffer.length / 1024)} KB) -> ${filePath}`);
+      }
+    } catch (err: any) {
+      console.warn(`[AntiViewOnce] Could not capture View-Once media:`, err.message);
+    }
+  }
+
   private async handleIncomingSticker(
     msg: proto.IWebMessageInfo,
     normalized: NormalizedMessage

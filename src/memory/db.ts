@@ -297,6 +297,27 @@ export function initDatabase() {
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    -- Anti-ViewOnce Media Vault (captured view-once images/videos/audio)
+    CREATE TABLE IF NOT EXISTS view_once_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_id TEXT UNIQUE NOT NULL,
+      chat_jid TEXT NOT NULL,
+      chat_name TEXT,
+      sender_jid TEXT NOT NULL,
+      sender_name TEXT,
+      is_group INTEGER NOT NULL,
+      media_type TEXT NOT NULL, -- 'image' | 'video' | 'audio'
+      caption TEXT,
+      file_path TEXT NOT NULL,
+      file_size INTEGER DEFAULT 0,
+      timestamp INTEGER NOT NULL,
+      retrieved_count INTEGER DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_view_once_chat ON view_once_messages(chat_jid);
+    CREATE INDEX IF NOT EXISTS idx_view_once_sender ON view_once_messages(sender_jid);
+    CREATE INDEX IF NOT EXISTS idx_view_once_time ON view_once_messages(timestamp);
   `);
 
   // Safe migration for existing databases
@@ -1119,6 +1140,113 @@ export function setBotSetting(key: string, value: string): void {
     console.error(`[DB] Error setting bot_setting for key ${key}:`, err?.message || err);
   }
 }
+
+export interface ViewOnceRecord {
+  id: number;
+  message_id: string;
+  chat_jid: string;
+  chat_name?: string | null;
+  sender_jid: string;
+  sender_name?: string | null;
+  is_group: number;
+  media_type: 'image' | 'video' | 'audio';
+  caption?: string | null;
+  file_path: string;
+  file_size: number;
+  timestamp: number;
+  retrieved_count: number;
+}
+
+/**
+ * Saves a captured View-Once media message into the vault.
+ */
+export function saveViewOnceMessage(data: {
+  message_id: string;
+  chat_jid: string;
+  chat_name?: string;
+  sender_jid: string;
+  sender_name?: string;
+  is_group: boolean;
+  media_type: 'image' | 'video' | 'audio';
+  caption?: string;
+  file_path: string;
+  file_size?: number;
+  timestamp: number;
+}): boolean {
+  try {
+    const stmt = db.prepare(`
+      INSERT OR REPLACE INTO view_once_messages (
+        message_id, chat_jid, chat_name, sender_jid, sender_name,
+        is_group, media_type, caption, file_path, file_size, timestamp
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      data.message_id,
+      data.chat_jid,
+      data.chat_name || null,
+      data.sender_jid,
+      data.sender_name || null,
+      data.is_group ? 1 : 0,
+      data.media_type,
+      data.caption || null,
+      data.file_path,
+      data.file_size || 0,
+      data.timestamp
+    );
+    return true;
+  } catch (err: any) {
+    console.error('[DB] Error saving view-once message:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Retrieves the latest captured View-Once messages, optionally filtered by sender or chat name.
+ */
+export function getLatestViewOnceMessages(limit: number = 10, filterQuery?: string): ViewOnceRecord[] {
+  try {
+    if (filterQuery && filterQuery.trim()) {
+      const q = `%${filterQuery.trim().toLowerCase()}%`;
+      return db
+        .prepare(
+          `
+        SELECT * FROM view_once_messages 
+        WHERE LOWER(sender_name) LIKE ? OR LOWER(chat_name) LIKE ? OR LOWER(caption) LIKE ? OR sender_jid LIKE ?
+        ORDER BY timestamp DESC LIMIT ?
+      `
+        )
+        .all(q, q, q, q, limit) as unknown as ViewOnceRecord[];
+    }
+    return db.prepare(`SELECT * FROM view_once_messages ORDER BY timestamp DESC LIMIT ?`).all(limit) as unknown as ViewOnceRecord[];
+  } catch (err: any) {
+    console.error('[DB] Error getting view-once messages:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Retrieves a single View-Once message by its DB id or message_id.
+ */
+export function getViewOnceMessageById(idOrMsgId: number | string): ViewOnceRecord | null {
+  try {
+    if (typeof idOrMsgId === 'number' || /^\d+$/.test(String(idOrMsgId))) {
+      return (db.prepare(`SELECT * FROM view_once_messages WHERE id = ?`).get(Number(idOrMsgId)) as unknown as ViewOnceRecord) || null;
+    }
+    return (db.prepare(`SELECT * FROM view_once_messages WHERE message_id = ?`).get(String(idOrMsgId)) as unknown as ViewOnceRecord) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Increments the retrieved count of a View-Once message record.
+ */
+export function markViewOnceRetrieved(id: number): void {
+  try {
+    db.prepare(`UPDATE view_once_messages SET retrieved_count = retrieved_count + 1 WHERE id = ?`).run(id);
+  } catch {}
+}
+
 
 
 

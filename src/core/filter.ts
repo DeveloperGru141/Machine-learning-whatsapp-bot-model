@@ -1,6 +1,7 @@
 import type { proto } from '@whiskeysockets/baileys';
 import { unwrapMessage } from './normalizer.js';
 import { config } from '../config/env.js';
+import { db } from '../memory/db.js';
 
 export interface TriggerCheckResult {
   shouldRespond: boolean;
@@ -99,7 +100,34 @@ export function shouldRespondToMessage(
 
   // Check 2: Was a message sent by the bot quoted / replied to?
   const quotedParticipant = contextInfo?.participant;
-  const isQuoted = isBotMatch(quotedParticipant);
+  let isQuoted = isBotMatch(quotedParticipant);
+
+  // Check 2b: Was the quoted stanza ID a message dispatched by the bot?
+  if (!isQuoted && contextInfo?.stanzaId) {
+    try {
+      const found = db
+        .prepare(`SELECT 1 FROM chat_logs WHERE message_id = ? AND sender_jid = 'bot' LIMIT 1`)
+        .get(contextInfo.stanzaId);
+      if (found) {
+        isQuoted = true;
+      }
+    } catch {}
+  }
+
+  // Check 2c: In groups, if someone replies with a sticker right after the bot spoke (<90s), match their energy!
+  const isSticker = Boolean(m?.stickerMessage || msg.message?.stickerMessage);
+  if (isSticker && isGroup && !isQuoted) {
+    try {
+      const lastBotMsg = db
+        .prepare(`SELECT timestamp FROM chat_logs WHERE chat_jid = ? AND sender_jid = 'bot' ORDER BY id DESC LIMIT 1`)
+        .get(groupJid) as { timestamp: number } | undefined;
+      if (lastBotMsg && Date.now() - Number(lastBotMsg.timestamp) < 90_000) {
+        console.log(`[Filter] 🎯 Sticker reply detected following recent bot message in group ${groupJid}`);
+        recordGroupInteraction(groupJid);
+        return { shouldRespond: true, cleanedText: '' };
+      }
+    } catch {}
+  }
 
   // Check 3: Was the bot called by name or phone number in text?
   const textLower = (rawText || '').toLowerCase().trim();
