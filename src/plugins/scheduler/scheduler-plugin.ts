@@ -31,6 +31,7 @@ import {
   WHATSAPP_CHANNEL_URL,
   WHATSAPP_CHANNEL_NAME,
 } from './channel-quotes-service.js';
+import { getOrGenerateMemeMedia, getOrGenerateQuoteMedia } from './media-card-generator.js';
 import {
   getAllChannelQuotes,
   getChannelQuotesStats,
@@ -438,11 +439,17 @@ export async function postMorningStatusBundle(
         const text = quote
           ? `🌅 *MORNING MOTIVATION*\n\n> "${quote.quote_text}"\n— *${quote.author || 'Quotes📖'}*`
           : await generateMorningContent('motivational_quotes');
-        const hasImage = Boolean(quote?.image_path && fs.existsSync(quote.image_path));
+        let imagePath: string | null = null;
+        if (quote) {
+          try {
+            imagePath = await getOrGenerateQuoteMedia(quote.id, quote.quote_text, quote.author, quote.niche, quote.image_path);
+          } catch {}
+        }
+        const hasImage = Boolean(imagePath && fs.existsSync(imagePath));
         if (hasImage) {
           await safeSendStatus(
             socket,
-            { image: fs.readFileSync(quote!.image_path!), caption: text },
+            { image: fs.readFileSync(imagePath!), caption: text },
             {},
             statusJidList
           );
@@ -468,15 +475,21 @@ export async function postMorningStatusBundle(
         postedTypes.push('tech_news');
       } else if (cat === 'meme') {
         const meme = getFreshestMemeForPosting();
-        const hasImage = Boolean(meme?.image_path && fs.existsSync(meme.image_path));
-        if (hasImage) {
+        let imagePath: string | null = null;
+        if (meme) {
+          try {
+            imagePath = await getOrGenerateMemeMedia(meme.id, meme.caption, meme.image_path);
+          } catch {}
+        }
+        const hasImage = Boolean(imagePath && fs.existsSync(imagePath));
+        if (hasImage && meme) {
           await safeSendStatus(
             socket,
-            { image: fs.readFileSync(meme!.image_path!), caption: formatMemeBroadcast(meme!) },
+            { image: fs.readFileSync(imagePath!), caption: formatMemeBroadcast(meme) },
             {},
             statusJidList
           );
-          chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${meme!.caption}`);
+          chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${meme.caption}`);
           postedTypes.push('meme');
         } else {
           const webMeme = await scrapeWebMeme();

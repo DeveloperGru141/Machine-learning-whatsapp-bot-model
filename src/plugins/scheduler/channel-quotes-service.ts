@@ -16,6 +16,7 @@ import {
 } from '../../memory/db.js';
 import { chatLogger } from '../../memory/chat-logger.js';
 import { llmClient } from '../../agent/llm-client.js';
+import { getOrGenerateQuoteMedia } from './media-card-generator.js';
 
 export const WHATSAPP_CHANNEL_INVITE_CODE = '0029Vb7S3VAFCCoXEIdW5n2k';
 export const WHATSAPP_CHANNEL_URL = 'https://whatsapp.com/channel/0029Vb7S3VAFCCoXEIdW5n2k';
@@ -179,13 +180,16 @@ export const SEED_CHANNEL_QUOTES: Array<{
  */
 export function seedChannelQuotesIfEmpty(): void {
   try {
+    // 1. Clean up legacy placeholder references in DB
+    try {
+      db.prepare(`UPDATE channel_quotes SET image_path = NULL WHERE image_path LIKE '%quote_tech_coding.jpg%' OR image_path LIKE '%quote_wealth_business.jpg%' OR image_path LIKE '%quote_academic_discipline.jpg%' OR image_path LIKE '%quote_general_growth.jpg%'`).run();
+    } catch {}
+
     const countRow = db.prepare('SELECT COUNT(*) as count FROM channel_quotes').get() as { count: number };
     if (!countRow || countRow.count === 0) {
       console.log(`[ChannelQuotes] 📖 Seeding ${SEED_CHANNEL_QUOTES.length} initial quotes from ${WHATSAPP_CHANNEL_NAME}...`);
       for (const item of SEED_CHANNEL_QUOTES) {
-        const candidateImg = path.resolve(`assets/channel_media/quote_${item.niche}.jpg`);
-        const imgPath = fs.existsSync(candidateImg) ? candidateImg : null;
-        saveChannelQuote(item.quote, item.author, item.niche, WHATSAPP_CHANNEL_INVITE_CODE, undefined, imgPath);
+        saveChannelQuote(item.quote, item.author, item.niche, WHATSAPP_CHANNEL_INVITE_CODE, undefined, null);
       }
     }
   } catch (err: any) {
@@ -508,11 +512,12 @@ export async function broadcastMorningGroupMotivation(
       // 3. Format warm greeting + quote
       const messageText = await formatGroupMorningMotivation(group.subject, niche, quote);
 
-      // 4. Send message to group (with accompanying image if available)
-      const hasImage = Boolean(quote.image_path && fs.existsSync(quote.image_path));
+      // 4. Send message to group (with guaranteed HD accompanying image card)
+      const imagePath = await getOrGenerateQuoteMedia(quote.id, quote.quote_text, quote.author, quote.niche, quote.image_path);
+      const hasImage = Boolean(imagePath && fs.existsSync(imagePath));
       if (hasImage) {
         await socket.sendMessage(group.id, {
-          image: fs.readFileSync(quote.image_path!),
+          image: fs.readFileSync(imagePath),
           caption: messageText,
         });
       } else {

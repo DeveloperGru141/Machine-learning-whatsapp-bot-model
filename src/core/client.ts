@@ -10,6 +10,7 @@ import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied, 
 import { parseQuoteFromText, WHATSAPP_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-quotes-service.js';
 import { WHATSAPP_MEME_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-memes-service.js';
 import { stickerEngine } from '../plugins/stickers/sticker-engine.js';
+import { getOrGenerateMemeMedia, getOrGenerateQuoteMedia } from '../plugins/scheduler/media-card-generator.js';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { Boom } from '@hapi/boom';
@@ -1335,6 +1336,11 @@ export class WhatsAppClient {
       const isMedia = Boolean(msg.message?.imageMessage || msg.message?.videoMessage);
       if (isMedia) {
         try {
+          const mediaKey = msg.message?.imageMessage?.mediaKey || msg.message?.videoMessage?.mediaKey;
+          if (!mediaKey || (mediaKey instanceof Uint8Array && mediaKey.length === 0)) {
+            // Channel media has no encryption key, skip Baileys decrypt
+            throw new Error('Newsletter media has no decryptable mediaKey');
+          }
           const buffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
           if (buffer && buffer.length > 0) {
             const ext = msg.message?.videoMessage ? 'mp4' : 'jpg';
@@ -1360,30 +1366,42 @@ export class WhatsAppClient {
 
       if (isMemeChannel) {
         const caption = text || '😂 Viral Meme from WhatsApp Channel';
+        let finalImgPath = downloadedImagePath;
+        if (!finalImgPath) {
+          try {
+            finalImgPath = await getOrGenerateMemeMedia(msgId, caption, null);
+          } catch {}
+        }
         saveChannelMeme(
           caption,
-          isMedia ? 'image' : 'text',
+          finalImgPath ? 'image' : 'text',
           null,
-          downloadedImagePath,
+          finalImgPath,
           WHATSAPP_MEME_CHANNEL_INVITE_CODE,
           msgId
         );
         console.log(
-          `[WhatsAppClient] 😂 Ingested meme from channel: "${caption.slice(0, 35)}..." [Image: ${downloadedImagePath ? 'YES' : 'NO'}]`
+          `[WhatsAppClient] 😂 Ingested meme from channel: "${caption.slice(0, 35)}..." [Image: ${finalImgPath ? 'YES' : 'NO'}]`
         );
       } else {
         const parsed = parseQuoteFromText(text || 'Keep pushing forward and make today count.');
         if (parsed) {
+          let finalImgPath = downloadedImagePath;
+          if (!finalImgPath) {
+            try {
+              finalImgPath = await getOrGenerateQuoteMedia(msgId, parsed.quote, parsed.author, parsed.niche, null);
+            } catch {}
+          }
           saveChannelQuote(
             parsed.quote,
             parsed.author,
             parsed.niche,
             WHATSAPP_CHANNEL_INVITE_CODE,
             msgId,
-            downloadedImagePath
+            finalImgPath
           );
           console.log(
-            `[WhatsAppClient] 📖 Ingested quote from channel: "${parsed.quote.slice(0, 30)}..." (${parsed.niche}) [Image: ${downloadedImagePath ? 'YES' : 'NO'}]`
+            `[WhatsAppClient] 📖 Ingested quote from channel: "${parsed.quote.slice(0, 30)}..." (${parsed.niche}) [Image: ${finalImgPath ? 'YES' : 'NO'}]`
           );
         }
       }

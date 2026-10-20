@@ -14,6 +14,7 @@ import {
 } from '../../memory/db.js';
 import { chatLogger } from '../../memory/chat-logger.js';
 import { getStatusRecipientJids, safeSendStatus } from './scheduler-plugin.js';
+import { getOrGenerateMemeMedia } from './media-card-generator.js';
 
 export const WHATSAPP_MEME_CHANNEL_INVITE_CODE = '0029Vb6oS4LJkK7AvtORyH46';
 export const WHATSAPP_MEME_CHANNEL_URL = 'https://whatsapp.com/channel/0029Vb6oS4LJkK7AvtORyH46';
@@ -117,13 +118,16 @@ export const SEED_CHANNEL_MEMES: Array<{
  */
 export function seedChannelMemesIfEmpty(): void {
   try {
+    // 1. Clean up legacy placeholder references in DB
+    try {
+      db.prepare(`UPDATE channel_memes SET image_path = NULL WHERE image_path LIKE '%meme_default.jpg%'`).run();
+    } catch {}
+
     const countRow = db.prepare('SELECT COUNT(*) as count FROM channel_memes').get() as { count: number };
     if (!countRow || countRow.count === 0) {
       console.log(`[ChannelMemes] 😂 Seeding ${SEED_CHANNEL_MEMES.length} initial memes from ${WHATSAPP_MEME_CHANNEL_NAME}...`);
       for (const item of SEED_CHANNEL_MEMES) {
-        const candidateImg = path.resolve('assets/channel_media/meme_default.jpg');
-        const imgPath = fs.existsSync(candidateImg) ? candidateImg : null;
-        saveChannelMeme(item.caption, 'image', item.media_url, imgPath, WHATSAPP_MEME_CHANNEL_INVITE_CODE);
+        saveChannelMeme(item.caption, 'text', item.media_url, null, WHATSAPP_MEME_CHANNEL_INVITE_CODE);
       }
     }
   } catch (err: any) {
@@ -283,13 +287,14 @@ export async function postChannelMemeWithCooldown(
   const outboundText = formatMemeBroadcast(meme);
 
   try {
-    const hasImage = Boolean(meme.image_path && fs.existsSync(meme.image_path));
+    const imagePath = await getOrGenerateMemeMedia(meme.id, meme.caption, meme.image_path);
+    const hasImage = Boolean(imagePath && fs.existsSync(imagePath));
     if (isStatus) {
       const statusJidList = getStatusRecipientJids(socket);
       if (hasImage) {
         await safeSendStatus(
           socket,
-          { image: fs.readFileSync(meme.image_path!), caption: outboundText },
+          { image: fs.readFileSync(imagePath), caption: outboundText },
           {},
           statusJidList
         );
@@ -305,7 +310,7 @@ export async function postChannelMemeWithCooldown(
       console.log(`[ChannelMemes] 📸 Posted meme #${meme.id} (${hasImage ? 'IMAGE' : 'TEXT'}) to WhatsApp Status (broadcast to ${statusJidList.length} contacts).`);
     } else {
       if (hasImage) {
-        await socket.sendMessage(targetChat, { image: fs.readFileSync(meme.image_path!), caption: outboundText });
+        await socket.sendMessage(targetChat, { image: fs.readFileSync(imagePath), caption: outboundText });
       } else {
         await socket.sendMessage(targetChat, { text: outboundText });
       }
