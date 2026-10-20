@@ -1,6 +1,9 @@
 import fs from 'fs';
 import path from 'path';
+import type { proto } from '@whiskeysockets/baileys';
+import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { db } from '../../memory/db.js';
+import { classifyStickerVibe } from '../../core/vision.js';
 
 export type StickerVibe =
   | 'humor'
@@ -195,6 +198,74 @@ class StickerEngine {
     }
 
     return false;
+  }
+
+  /**
+   * Parses an incoming WhatsApp sticker (visual content analysis + chat pattern context)
+   * and selects a matching sticker from the catalog with the exact same emotional vibe.
+   */
+  public async getStickerForIncomingSticker(
+    msg: proto.IWebMessageInfo,
+    chatJid: string
+  ): Promise<StickerMatch | null> {
+    this.initialize();
+    if (this.indexedStickers.length === 0) return null;
+
+    // 1. Gather recent conversation context from chat_logs
+    let contextText = '';
+    try {
+      const recentRows = db
+        .prepare(`
+          SELECT message_text FROM chat_logs 
+          WHERE chat_jid = ? AND message_text IS NOT NULL AND message_text != ''
+          ORDER BY id DESC LIMIT 4
+        `)
+        .all(chatJid) as Array<{ message_text: string }>;
+      contextText = recentRows.map((r) => r.message_text).join(' ');
+    } catch {}
+
+    // 2. Check if sticker quotes a message
+    const quotedText =
+      (msg.message?.stickerMessage?.contextInfo?.quotedMessage as any)?.conversation ||
+      (msg.message?.stickerMessage?.contextInfo?.quotedMessage as any)?.extendedTextMessage?.text ||
+      '';
+    if (quotedText) {
+      contextText = `${quotedText} ${contextText}`;
+    }
+
+    // 3. Multimodal vision parsing of the sticker image
+    let detectedVibe: StickerVibe | null = null;
+    try {
+      const buffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
+      if (buffer && buffer.length > 0) {
+        const visionResult = await classifyStickerVibe(buffer, contextText);
+        if (visionResult) {
+          detectedVibe = visionResult as StickerVibe;
+          console.log(`[StickerEngine] 🎯 Classified incoming sticker vibe via Vision: "${detectedVibe}"`);
+        }
+      }
+    } catch (err: any) {
+      console.warn('[StickerEngine] Vision classification note:', err.message);
+    }
+
+    // 4. Fallback to conversation context analysis if vision was inconclusive
+    if (!detectedVibe) {
+      const textVibe = this.detectVibeFromText(contextText);
+      detectedVibe = textVibe.vibe !== 'general' ? textVibe.vibe : null;
+      if (detectedVibe) {
+        console.log(`[StickerEngine] 💬 Detected sticker vibe from conversation context: "${detectedVibe}"`);
+      }
+    }
+
+    // 5. Default fallback to high-energy friendly reaction (humor, cool, or agreement)
+    if (!detectedVibe) {
+      const friendlyVibes: StickerVibe[] = ['humor', 'agreement', 'cool', 'teasing'];
+      detectedVibe = friendlyVibes[Math.floor(Math.random() * friendlyVibes.length)];
+      console.log(`[StickerEngine] 🎲 Selected friendly fallback vibe: "${detectedVibe}"`);
+    }
+
+    // 6. Select matching sticker from our 550+ sticker catalog
+    return this.getMatchingSticker(contextText, detectedVibe);
   }
 }
 

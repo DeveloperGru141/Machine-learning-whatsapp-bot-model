@@ -16,7 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
 import { config, normalizePhoneNumber } from '../config/env.js';
-import { normalizeMessage } from './normalizer.js';
+import { normalizeMessage, NormalizedMessage } from './normalizer.js';
 import { shouldRespondToMessage, recordGroupInteraction } from './filter.js';
 import { OutboundSender, setActiveSocketGetter } from './sender.js';
 import { chatLogger } from '../memory/chat-logger.js';
@@ -73,6 +73,7 @@ export class WhatsAppClient {
     string,
     Array<(info: { status: 'SENT_TO_SERVER' | 'DELIVERED_TO_DEVICE' | 'READ'; statusCode: number; updatedAt: number }) => void>
   > = new Map();
+  private lastStickerReplyTime: Map<string, number> = new Map();
 
   public recordDeliveryStatus(msgId: string, recipientJid: string, statusNum: number): void {
     if (!msgId || statusNum < 2) return;
@@ -1020,11 +1021,6 @@ export class WhatsAppClient {
       }
     }
 
-    // Strict Policy: Do not reply to stickers since sticker visual content is not parsed
-    if (normalized.contentType === 'sticker') {
-      return;
-    }
-
     // 2. Trigger Evaluation (DM vs Group @mention/quote)
     const botJid = this.sock?.user?.id || '';
     const botLid = this.sock?.user?.lid || '';
@@ -1036,6 +1032,12 @@ export class WhatsAppClient {
     );
 
     if (!shouldRespond) return;
+
+    // Handle Incoming Stickers: Parse vibe and reply with a matching sticker from our catalog!
+    if (normalized.contentType === 'sticker') {
+      await this.handleIncomingSticker(msg, normalized);
+      return;
+    }
 
     // Inbound Reply Routing: If this is a DM reply from someone who was messaged on behalf of another user/group,
     // automatically route their reply back to whoever told the bot to message them, NEVER to owner Ademola!
@@ -1279,6 +1281,42 @@ export class WhatsAppClient {
         }
       },
     });
+  }
+
+  /**
+   * Responds to an incoming WhatsApp sticker by parsing its visual content & conversation context
+   * and replying with a sticker from the 550+ catalog matching the exact same emotional vibe.
+   */
+  private async handleIncomingSticker(
+    msg: proto.IWebMessageInfo,
+    normalized: NormalizedMessage
+  ): Promise<void> {
+    if (!this.sock) return;
+
+    // Rate-limit sticker replies: max 1 reply per 5 seconds per chat to prevent sticker ping-pong loops
+    const lastReply = this.lastStickerReplyTime.get(normalized.chatJid) || 0;
+    if (Date.now() - lastReply < 5_000) {
+      return;
+    }
+    this.lastStickerReplyTime.set(normalized.chatJid, Date.now());
+
+    try {
+      console.log(
+        `[StickerEngine] 📥 Incoming sticker from ${normalized.senderName} (${normalized.chatJid}) - parsing visual vibe...`
+      );
+
+      const match = await stickerEngine.getStickerForIncomingSticker(msg, normalized.chatJid);
+      if (match && fs.existsSync(match.absolutePath)) {
+        // Anti-ban realistic human reading/reaction presence delay
+        await antiBanEngine.simulateReadingDelay(15, normalized.isGroup);
+
+        await OutboundSender.sendSticker(this.sock, normalized.chatJid, match.absolutePath, msg);
+        chatLogger.logOutboundMessage(normalized.chatJid, `[Sticker Reply: ${match.filename}] (${match.vibe})`);
+        console.log(`[StickerEngine] 🎨 Replied to sticker with matching vibe "${match.vibe}" sticker: ${match.filename}`);
+      }
+    } catch (err: any) {
+      console.error('[StickerEngine] Error replying to incoming sticker:', err.message);
+    }
   }
 
   /**
