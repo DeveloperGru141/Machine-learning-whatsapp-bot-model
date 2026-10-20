@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import type { WASocket } from '@whiskeysockets/baileys';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import {
@@ -309,7 +311,7 @@ export function getStatusRecipientJids(socket?: WASocket | null): string[] {
   return Array.from(jidSet);
 }
 
-export type StatusCategory = 'all' | 'bible_verse' | 'motivational_quote' | 'tech_news' | 'meme';
+export type StatusCategory = 'all' | 'motion_intro' | 'bible_verse' | 'motivational_quote' | 'tech_news' | 'meme';
 
 /**
  * Posts the morning status bundle (Bible verse, motivational quote, scraped tech news, and scraped meme)
@@ -323,9 +325,9 @@ export async function postMorningStatusBundle(
   const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.LIVETEST_RUNNER);
   const slidePauseMs = isTest ? 20 : 12_000;
 
-  const categoriesToPost: Array<'bible_verse' | 'motivational_quote' | 'tech_news' | 'meme'> =
+  const categoriesToPost: Array<'motion_intro' | 'bible_verse' | 'motivational_quote' | 'tech_news' | 'meme'> =
     category === 'all'
-      ? ['bible_verse', 'motivational_quote', 'tech_news', 'meme']
+      ? ['motion_intro', 'bible_verse', 'motivational_quote', 'tech_news', 'meme']
       : [category];
 
   const postedTypes: string[] = [];
@@ -333,7 +335,23 @@ export async function postMorningStatusBundle(
   for (let i = 0; i < categoriesToPost.length; i++) {
     const cat = categoriesToPost[i];
     try {
-      if (cat === 'bible_verse') {
+      if (cat === 'motion_intro') {
+        const videoPath = path.resolve('./assets/status_motion_design.mp4');
+        if (fs.existsSync(videoPath)) {
+          const videoBuffer = fs.readFileSync(videoPath);
+          await socket.sendMessage(
+            'status@broadcast',
+            {
+              video: videoBuffer,
+              caption: 'Forgelabs Assistant online & active! 🫡🔥 Good morning my people, wetin we dey cook today? ✨',
+              mimetype: 'video/mp4',
+            },
+            { statusJidList } as any
+          );
+          chatLogger.logOutboundMessage('status@broadcast', '[Status: Motion Design] Forgelabs Assistant Intro Video');
+          postedTypes.push('motion_intro');
+        }
+      } else if (cat === 'bible_verse') {
         const text = await generateMorningContent('bible_verses');
         await socket.sendMessage(
           'status@broadcast',
@@ -881,9 +899,9 @@ export class SchedulerPlugin implements IPlugin {
         properties: {
           category: {
             type: 'string',
-            enum: ['all', 'meme', 'tech_news', 'bible_verse', 'motivational_quote'],
+            enum: ['all', 'motion_intro', 'meme', 'tech_news', 'bible_verse', 'motivational_quote'],
             description:
-              'Which status update to post: "all" (full morning status bundle), "meme" (web-scraped meme), "tech_news" (live tech & AI digest), "bible_verse", or "motivational_quote". Defaults to "all".',
+              'Which status update to post: "all" (full morning status bundle), "motion_intro" (animated Forgelabs Assistant motion design video), "meme" (web-scraped meme), "tech_news" (live tech & AI digest), "bible_verse", or "motivational_quote". Defaults to "all".',
           },
         },
       },
