@@ -101,22 +101,58 @@ export function extractInlineToolCalls(rawContent: string): {
     });
   };
 
-  // 1. Match <tool_call>...</tool_call> (and unclosed <tool_call>... at end of message)
-  const toolCallTagRegex = /<tool_call>\s*([\s\S]*?)(?:<\/tool_call>|$)/gi;
-  working = working.replace(toolCallTagRegex, (_fullMatch, inner: string) => {
+  // 0. Unwrap any <function_calls>...</function_calls> wrappers
+  working = working.replace(/<\/?function_calls>/gi, '').trim();
+
+  // 1. Match <tool_call ...>...</tool_call> (handles name attribute and XML/JSON arguments)
+  const toolCallTagRegex = /<tool_call(?:\s+(?:name|tool|function)=["']?([a-zA-Z0-9_]+)["']?)?[^>]*>([\s\S]*?)(?:<\/tool_call>|$)/gi;
+  working = working.replace(toolCallTagRegex, (_fullMatch, attrName?: string, inner?: string) => {
     const trimmedInner = (inner || '').trim();
-    if (!trimmedInner) return '';
+    if (!trimmedInner && !attrName) return '';
+
+    // A. Check if inner content is valid JSON
+    let parsedJson = false;
     try {
       const parsed = JSON.parse(trimmedInner);
+      if (attrName && parsed && typeof parsed === 'object' && !parsed.name) {
+        parsed.name = attrName;
+      }
       normalizeParsedJsonTool(parsed);
+      parsedJson = true;
     } catch {
       const firstBrace = trimmedInner.indexOf('{');
       const lastBrace = trimmedInner.lastIndexOf('}');
       if (firstBrace >= 0 && lastBrace > firstBrace) {
         try {
           const parsed = JSON.parse(trimmedInner.slice(firstBrace, lastBrace + 1));
+          if (attrName && parsed && typeof parsed === 'object' && !parsed.name) {
+            parsed.name = attrName;
+          }
           normalizeParsedJsonTool(parsed);
+          parsedJson = true;
         } catch {}
+      }
+    }
+
+    // B. If not JSON, parse XML tags like <args><message>...</message></args> or <param>value</param>
+    if (!parsedJson) {
+      const strippedArgs = trimmedInner.replace(/<\/?args>/gi, '').trim();
+      const xmlArgs: Record<string, any> = {};
+      const tagRegex = /<([a-zA-Z0-9_]+)>([\s\S]*?)<\/\1>/gi;
+      let match;
+      while ((match = tagRegex.exec(strippedArgs)) !== null) {
+        xmlArgs[match[1]] = match[2].trim();
+      }
+
+      const fnName = attrName || xmlArgs.name || xmlArgs.tool || xmlArgs.tool_name || xmlArgs.function;
+      if (fnName) {
+        delete xmlArgs.name;
+        delete xmlArgs.tool;
+        delete xmlArgs.tool_name;
+        delete xmlArgs.function;
+        normalizeParsedJsonTool({ name: fnName, arguments: xmlArgs });
+      } else if (trimmedInner && attrName) {
+        normalizeParsedJsonTool({ name: attrName, arguments: { message: trimmedInner } });
       }
     }
     return '';
@@ -646,9 +682,13 @@ export function sanitizeAssistantResponse(text: string): string {
   let cleaned = text
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<\/think>/gi, '')
-    .replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/gi, '')
+    .replace(/<\/?function_calls>/gi, '')
+    .replace(/<tool_call[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi, '')
     .replace(/<\/tool_call>/gi, '')
+    .replace(/<args>[\s\S]*?(?:<\/args>|$)/gi, '')
+    .replace(/<\/?args>/gi, '')
     .replace(/<function=[^>]+>[\s\S]*?(?:<\/function>|$)/gi, '')
+    .replace(/<\/function>/gi, '')
     .trim();
 
   // Defense-in-depth: Never let raw tool call JSON objects or fences reach WhatsApp chat

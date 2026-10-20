@@ -448,7 +448,7 @@ export class ContactService {
       return rows.map((r) => {
         let fallbackText = '[User sent a message]';
         if (r.content_type === 'audio') {
-          fallbackText = '[User sent a voice note — reply to them with a warm, natural Nigerian Pidgin voice note]';
+          fallbackText = '[User sent a voice note — reply to them with a warm, natural English voice note]';
         } else if (r.content_type === 'image') {
           fallbackText = '[User sent an image — acknowledge it warmly]';
         } else if (r.content_type === 'sticker') {

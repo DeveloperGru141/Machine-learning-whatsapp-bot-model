@@ -168,7 +168,68 @@ export function formatPidginPhonetics(rawText: string): string {
 }
 
 /**
- * Synthesizes natural human-like Nigerian & Pidgin voice notes with emotion, authentic phonetic
+ * Formats voice note scripts into clear, fluent, articulate English.
+ * Strips markdown, emojis, URLs, expands acronyms for natural speech, and ensures zero Pidgin.
+ */
+export function formatEnglishVoiceScript(rawText: string): string {
+  let text = (rawText || '').trim();
+  if (!text) return '';
+
+  // 1. Strip markdown formatting and URLs
+  text = text
+    .replace(/[*_~`#>-]/g, ' ')
+    .replace(/https?:\/\/\S+/g, 'the link')
+    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}\p{Emoji_Modifier}\u{FE0F}\u{200D}]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // 2. Translate any lingering Pidgin words into polished English
+  text = text
+    .replace(/\bwetin dey sup bayii\b|\bwetin dey sup\b|\bwetin dey\b/gi, 'what is going on')
+    .replace(/\bno wahala at all\b|\bno wahala\b/gi, 'no problem at all')
+    .replace(/\bhow far na\b|\bhow far\b/gi, 'hello, how are you')
+    .replace(/\babeg\b/gi, 'please')
+    .replace(/\bsharp sharp\b/gi, 'quickly')
+    .replace(/\bomooo?\b/gi, 'well')
+    .replace(/\bbayii\b/gi, 'now')
+    .replace(/\bshaa\b/gi, 'anyway')
+    .replace(/\boyaa?\s*naw?\b|\boyaa?\b/gi, 'alright')
+    .replace(/\bu fit\b|\byou fit\b/gi, 'you can')
+    .replace(/\byou dey grab\??\b/gi, 'do you understand?')
+    .replace(/\byarn me\b/gi, 'tell me')
+    .replace(/\bi dey kampe\b/gi, 'I am doing well')
+    .replace(/\be choke\b/gi, 'it is impressive')
+    .replace(/\bno cap\b/gi, 'truly')
+    .replace(/\bna wa o*\b|\bna wa\b/gi, 'that is surprising');
+
+  // 3. Expand acronyms and abbreviations for smooth English pronunciation
+  text = text
+    .replace(/\bAI\b/g, 'A.I.')
+    .replace(/\bML\b/g, 'M.L.')
+    .replace(/\bPDF\b/g, 'P.D.F.')
+    .replace(/\bDM\b/g, 'direct message')
+    .replace(/\bVN\b/g, 'voice note')
+    .replace(/\bURL\b/g, 'link')
+    .replace(/\bAPI\b/g, 'A.P.I.')
+    .replace(/\bFAQ\b/g, 'F.A.Q.')
+    .replace(/\bCEO\b/g, 'C.E.O.')
+    .replace(/\betc\b/gi, 'etcetera')
+    .replace(/\be\.g\.\b/gi, 'for example')
+    .replace(/\bi\.e\.\b/gi, 'that is')
+    .replace(/\bapprox\.\b/gi, 'approximately');
+
+  // 4. Clean up punctuation and spacing for natural speaking rhythm
+  text = text
+    .replace(/,{2,}/g, ',')
+    .replace(/\s+([,.;!?])/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return text;
+}
+
+/**
+ * Synthesizes natural human-like English voice notes with emotion, authentic phonetic
  * pronunciation, and warm microphone presence using ElevenLabs Neural TTS.
  * Fallback to EdgeTTS and Google TTS if ElevenLabs is unavailable.
  * Transcodes to native OGG Opus (48kHz mono VoIP) so WhatsApp plays it as a real PTT voice note.
@@ -177,7 +238,7 @@ export async function synthesizeVoiceNote(
   text: string,
   voice?: string
 ): Promise<Buffer | null> {
-  const spokenText = formatPidginPhonetics(text);
+  const spokenText = formatEnglishVoiceScript(text);
   if (!spokenText) return null;
 
   const tempDir = config.paths.temp;
@@ -286,7 +347,7 @@ export async function synthesizeVoiceNote(
 
 export async function oldSynthesizeVoiceNote(
   text: string,
-  voice: string = config.bot.voice || 'en-NG-AbeoNeural'
+  voice: string = config.bot.voice || 'en-US-BrianMultilingualNeural'
 ): Promise<Buffer | null> {
   try {
     const tempDir = config.paths.temp;
@@ -294,7 +355,7 @@ export async function oldSynthesizeVoiceNote(
       fs.mkdirSync(tempDir, { recursive: true });
     }
 
-    const spokenText = formatPidginPhonetics(text);
+    const spokenText = formatEnglishVoiceScript(text);
     if (!spokenText) return null;
 
     const hash = crypto.randomBytes(6).toString('hex');

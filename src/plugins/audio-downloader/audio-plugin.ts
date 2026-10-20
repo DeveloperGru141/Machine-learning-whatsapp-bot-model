@@ -13,13 +13,13 @@ export class AudioDownloaderPlugin implements IPlugin {
     {
       name: 'send_voice_note',
       description:
-        'Synthesizes and sends a warm, natural, human-like voice note (audio message) in authentic Nigerian English/Pidgin directly to the WhatsApp chat using ElevenLabs Neural TTS. Use whenever someone asks for a voice note, asks you to speak, say something with voice, send a vn, or when a voice note reply is appropriate.',
+        'Synthesizes and sends a warm, natural, human-like voice note (audio message) in clear, fluent, articulate English directly to the WhatsApp chat using Neural TTS. Deliver voice note messages strictly in clear, professional, natural English (NO Pidgin, no slang). Use whenever someone asks for a voice note, asks you to speak, say something with voice, send a vn, or when a voice note reply is appropriate.',
       parameters: {
         type: 'object',
         properties: {
           message: {
             type: 'string',
-            description: 'The natural spoken message in English/Nigerian Pidgin to synthesize and send as a WhatsApp voice note.',
+            description: 'The natural spoken message in clear, fluent English (NO Pidgin) to synthesize and send as a WhatsApp voice note.',
           },
         },
         required: ['message'],
