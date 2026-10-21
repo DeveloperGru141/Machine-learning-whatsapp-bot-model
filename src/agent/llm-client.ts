@@ -119,8 +119,8 @@ export class LLMClient {
       const payload: any = {
         model,
         messages: params.messages,
-        temperature: params.temperature ?? 0.5,
-        max_tokens: Math.min(250, params.max_tokens ?? 250),
+        temperature: params.temperature ?? 0.7,
+        max_tokens: Math.max(128, Math.min(800, params.max_tokens ?? 600)),
       };
 
       if (params.tools && params.tools.length > 0) {

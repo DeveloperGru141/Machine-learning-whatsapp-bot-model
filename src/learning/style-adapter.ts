@@ -1,4 +1,5 @@
 import { db } from '../memory/db.js';
+import { vectorStore } from './vector-store.js';
 
 export interface StyleAdapterContext {
   styleGuidance: string;
@@ -29,6 +30,18 @@ export class StyleAdapter {
     if (/\b(btc|bitcoin|eth|sol|price|crypto|stock|market)\b/i.test(lower)) {
       return 'crypto';
     }
+    if (/\b(shadow slave|sunny|sunless|nephis|nightmare spell|guiltythree|solo leveling|jin-woo|klein moretti|omniscient reader|gojo|anime|manga|web novel|manhwa|light novel)\b/i.test(lower)) {
+      return 'novel';
+    }
+    if (/\b(code|coding|bug|error|typescript|javascript|python|react|flutter|api|sql|database|git|github|async|promise|function|recursion|algorithm|backend|frontend|linux|docker|server|deploy|compiler|syntax)\b/i.test(lower)) {
+      return 'tech';
+    }
+    if (/\b(what is|explain|how does|why does|how to|meaning of|tell me about|difference between|how do i|can you explain|why is|what are|breakdown)\b/i.test(lower)) {
+      return 'tech';
+    }
+    if (/\b(thank|thanks|appreciate|good job|smart bro|well done|nice one)\b/i.test(lower)) {
+      return 'appreciation';
+    }
     if (/\b(gay|werey|mumu|ode|craze|fool|mad|idiot|stupid|whine|tease|ashewo|olodo|oloshi|scam)\b/i.test(lower)) {
       return 'banter';
     }
@@ -41,7 +54,7 @@ export class StyleAdapter {
     if (/\b(check in|checking in|checking up|check up|dropped|follow up|following up|saying hi|say hi|haven't heard|how have you been|how you dey|long time|quiet here|how did that go|update on)\b/i.test(lower)) {
       return 'followup';
     }
-    return 'slang';
+    return 'tech';
   }
 
   public getStyleContext(chatJid: string, incomingText?: string): StyleAdapterContext {
@@ -75,11 +88,43 @@ export class StyleAdapter {
       styleGuidance = `Chat Cadence: Natural WhatsApp peer flow. Crisp, witty, zero customer-service tropes. Learned Emoji Pattern: [${learnedEmojis}]. Include at least one fitting contextual emoji where natural (1-2 emojis max).`;
     }
 
-    // 2. Fetch targeted few-shot exemplars: Match user intent first, then backfill general exemplars
+    // 2. Fetch targeted few-shot exemplars: First by semantic vector similarity, then by intent vibe, then general backfill
     const targetVibe = this.detectIntentVibe(incomingText);
     const exemplars: Array<{ context_text: string; response_text: string; response_type: string }> = [];
 
-    if (targetVibe) {
+    // Semantic Vector Matching: Pull closest dialogue pairs from training pipeline
+    if (incomingText && incomingText.trim().length >= 4) {
+      try {
+        const queryVec = vectorStore.embed(incomingText);
+        const candidates = db.prepare(`
+          SELECT context_text, response_text, response_type
+          FROM dialogue_exemplars
+          WHERE response_type != 'sticker' AND response_text IS NOT NULL AND response_text != ''
+          ORDER BY quality_score DESC
+          LIMIT 120
+        `).all() as Array<{ context_text: string; response_text: string; response_type: string }>;
+
+        const scored = candidates.map((c) => {
+          const v = vectorStore.embed(c.context_text);
+          let dot = 0;
+          for (let i = 0; i < 256; i++) dot += queryVec[i] * v[i];
+          return { ...c, score: dot };
+        });
+
+        scored.sort((a, b) => b.score - a.score);
+        for (const item of scored) {
+          if (item.score >= 0.20 && exemplars.length < 3) {
+            exemplars.push({
+              context_text: item.context_text,
+              response_text: item.response_text,
+              response_type: item.response_type,
+            });
+          }
+        }
+      } catch {}
+    }
+
+    if (targetVibe && exemplars.length < 3) {
       const targeted = db.prepare(`
         SELECT context_text, response_text, response_type
         FROM dialogue_exemplars
@@ -89,7 +134,11 @@ export class StyleAdapter {
         LIMIT 3
       `).all(targetVibe) as Array<{ context_text: string; response_text: string; response_type: string }>;
 
-      exemplars.push(...targeted);
+      for (const t of targeted) {
+        if (!exemplars.some((e) => e.context_text === t.context_text) && exemplars.length < 3) {
+          exemplars.push(t);
+        }
+      }
 
       if (targetVibe === 'banter' && targeted.length === 0) {
         exemplars.push(

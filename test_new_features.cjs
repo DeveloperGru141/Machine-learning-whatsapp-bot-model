@@ -138,5 +138,27 @@ const mockCtxAdmin = {
   assert.strictEqual(llmClient.getModel(), 'gemini-flash-latest', 'Model should be gemini-flash-latest');
   console.log('✅ Test 6 Passed: LLM provider and model configured correctly.\n');
 
-  console.log('🎉 ALL 6 VERIFICATION TESTS PASSED SUCCESSFULLY! 🚀');
+  // Test 7: Training Pipeline Distillation & Anti-Generic Guardrails
+  console.log('▶ Test 7: Verify Training Pipeline Distillation & Anti-Generic Guardrails...');
+  const { styleAdapter } = require('./dist/learning/style-adapter.js');
+  const techCtx = styleAdapter.getStyleContext('test@s.whatsapp.net', 'How do I fix a bug in my typescript code?');
+  assert(techCtx.fewShotExemplars.length > 0, 'Must retrieve few-shot exemplars');
+  const hasTechExemplar = techCtx.fewShotExemplars.some(e => e.context.toLowerCase().includes('recursion') || e.context.toLowerCase().includes('async') || e.context.toLowerCase().includes('api'));
+  assert(hasTechExemplar, 'Technical queries must match distilled technical/programming exemplars');
+
+  // Sanitizer must strip generic preambles and generic closings
+  const genericInput1 = 'Great question! An API is simply a bridge that lets two apps communicate. Hope this helps!';
+  const sanitized1 = sanitizeAssistantResponse(genericInput1);
+  assert(!sanitized1.toLowerCase().includes('great question'), 'Must strip Great question preamble');
+  assert(!sanitized1.toLowerCase().includes('hope this helps'), 'Must strip Hope this helps closing');
+  assert.strictEqual(sanitized1, 'An API is simply a bridge that lets two apps communicate.');
+
+  const genericInput2 = 'Certainly! Here is an overview of how it works: You connect to the database directly.';
+  const sanitized2 = sanitizeAssistantResponse(genericInput2);
+  assert(!sanitized2.toLowerCase().includes('certainly'), 'Must strip Certainly preamble');
+  assert(!sanitized2.toLowerCase().includes('overview of'), 'Must strip overview of preamble');
+  assert.strictEqual(sanitized2, 'You connect to the database directly.');
+  console.log('✅ Test 7 Passed: Training pipeline exemplars and anti-generic response distillation verified.\n');
+
+  console.log('🎉 ALL 7 VERIFICATION TESTS PASSED SUCCESSFULLY! 🚀');
 })();

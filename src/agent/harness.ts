@@ -390,8 +390,8 @@ export class AgentHarness {
         // Synthesize final natural WhatsApp response from the gathered tool results without re-triggering tool calls.
         const synthesisSystem = `${messages[0]?.content || ''}
 
-# Answering With Live Tool Data:
-Combine the live tool data in the user's last message with your own knowledge and answer directly and confidently in 1-3 sentences, in the same voice as the exemplars above. Do NOT output <tool_call> tags or raw JSON. If send_message_to_contact succeeded, explicitly confirm who you messaged and its WhatsApp delivery status (✓ / ✓✓).`;
+# Answering With Live Tool Data (Strict Training Pipeline Distillation):
+Combine the live tool data in the user's last message with your own knowledge and answer directly, sharply, and confidently in 1-3 conversational sentences. Emulate the exact distilled voice and cadence of the dialogue exemplars above. Do NOT output generic corporate summaries, encyclopedic fluff, <tool_call> tags, or raw JSON. If send_message_to_contact succeeded, explicitly confirm who you messaged and its WhatsApp delivery status (✓ / ✓✓).`;
         const historyContext = messages.slice(1, -1);
         try {
           const synthesisRes = await this.callLLM({
@@ -616,9 +616,12 @@ Combine the live tool data in the user's last message with your own knowledge an
         console.error('[AgentHarness] Fallback also failed:', fbErr.message);
         try {
           if (config.groq.apiKey) {
-            const emergencyPrompt = `You are a helpful assistant. Reply directly to this message in 1-2 friendly sentences: ${userMessage}`;
+            const emergencySystem = `${messages[0]?.content || ''}\n\nDeliver a direct, authentic WhatsApp reply from your knowledge without tools. Talk naturally like a real person, NO generic assistant clichés, NO robotic hedges.`;
             const quickRes = await llmClient.callGroqInternal({
-              messages: [{ role: 'user', content: emergencyPrompt }],
+              messages: [
+                { role: 'system', content: emergencySystem },
+                { role: 'user', content: `${context.senderName}: ${userMessage}` },
+              ],
               model: 'qwen/qwen3.8-27b',
             });
             const text = quickRes?.choices?.[0]?.message?.content;
@@ -765,14 +768,14 @@ export function sanitizeAssistantResponse(text: string): string {
 
   // Strip robotic preamble clichés (peel chained preambles like "Sure thing! As an AI, ...")
   const preambleRegex =
-    /^(?:as an ai(?:\s+language\s+model)?|as a language model|certainly|sure thing|sure|of course|alright|no problem|i'd be happy to(?:\s+assist|\s+help)?|i would be happy to(?:\s+assist|\s+help)?|i'm here to assist(?:\s+you)?|i am here to assist(?:\s+you)?|i'm here to help|i am here to help|happy to help|glad to help|i am happy to help|i'm happy to help)[\s,.:;!-]+/i;
+    /^(?:as an ai(?:\s+language\s+model)?|as a language model|certainly|sure thing|sure|of course|alright|no problem|i'd be happy to(?:\s+assist|\s+help)?|i would be happy to(?:\s+assist|\s+help)?|i'm here to assist(?:\s+you)?|i am here to assist(?:\s+you)?|i'm here to help|i am here to help|happy to help|glad to help|i am happy to help|i'm happy to help|great question|that's a great question|good question|that is a good question|(?:here is|here's)(?:\s+an?|\s+the)?\s+(?:breakdown|overview|explanation|information|quick look|what you need to know)(?:\s+(?:of|on|about|how|for)[^:,\n]+)?|i can help with that|i can certainly help|let's break it down|let's dive in)[\s,.:;!-]+/i;
   while (preambleRegex.test(cleaned)) {
     cleaned = cleaned.replace(preambleRegex, '').trim();
   }
 
   // Strip trailing robotic closing clichés & assistant offers (preserving previous sentence punctuation)
   cleaned = cleaned
-    .replace(/(?:\s+)(?:(?:how|what)\s+can\s+i\s+(?:help|assist)\s+(?:you\s+)?(?:with|today)?\??|is there anything else i can assist (?:you with\??|with\??)|is there anything else i can do(?: for you)?\??|feel free to (?:ask|reach out)[^.!?]*[.!?]?|i hope this helps\.?)$/i, '')
+    .replace(/(?:\s+)(?:(?:how|what)\s+can\s+i\s+(?:help|assist)\s+(?:you\s+)?(?:with|today)?\??|is there anything else i can assist (?:you with\??|with\??)|is there anything else i can do(?: for you)?\??|feel free to (?:ask|reach out)[^.!?]*[.!?]?|i hope this helps[.!?]?|hope this helps[.!?]?|hope that clarifies[.!?]?|hope you find this helpful[.!?]?|hope this is helpful[.!?]?|let me know if this helps[.!?]?|hope you find this useful[.!?]?)$/i, '')
     .replace(/(?:\s+)(?:if you (?:ever )?hit a snag[^.!?]*[.!?]?|if you need a quick tool run[^.!?]*[.!?]?|anything specific you wanna dive into[^.!?]*\??|don't hesitate to (?:ask|reach out)[^.!?]*[.!?]?)$/i, '')
     .replace(/(?:\s+)(?:(?:just\s+)?let\s+me\s+know[^.!?]*[.!?]?|anything (?:i|we) fit do for you\??|anything else you need sorted\??|anything you need sorted\??|maybe i can help\.?|i'm here(?:—|--|-|\s+)maybe i can help\.?|wetin you want make i do for you\??)$/i, '')
     .replace(/^(?:how can i help you today\??|what can i help you with\??|how can i assist you\??)$/i, '')
