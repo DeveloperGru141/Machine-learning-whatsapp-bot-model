@@ -424,11 +424,16 @@ export class WhatsAppClient {
               ? zlib.gunzipSync(rawBuf).toString('utf8')
               : rawBuf.toString('utf8');
           const filesMap = JSON.parse(bundleJson) as Record<string, string>;
-          for (const [fileName, fileContent] of Object.entries(filesMap)) {
-            const safeName = path.basename(fileName);
-            fs.writeFileSync(path.join(config.paths.sessions, safeName), fileContent, 'utf8');
+          // Guard: Only hydrate if creds.json is non-empty and valid JSON!
+          if (filesMap['creds.json'] && filesMap['creds.json'].trim().length > 10) {
+            for (const [fileName, fileContent] of Object.entries(filesMap)) {
+              const safeName = path.basename(fileName);
+              fs.writeFileSync(path.join(config.paths.sessions, safeName), fileContent, 'utf8');
+            }
+            console.log(`[WhatsAppClient] 🔑 Hydrated ${Object.keys(filesMap).length} session files from SESSION_BUNDLE_BASE64.`);
+          } else {
+            console.warn('[WhatsAppClient] SESSION_BUNDLE_BASE64 has empty or corrupt creds.json; skipping hydration to await fresh pairing.');
           }
-          console.log(`[WhatsAppClient] 🔑 Hydrated ${Object.keys(filesMap).length} session files from SESSION_BUNDLE_BASE64.`);
         } catch (err: any) {
           console.warn('[WhatsAppClient] Failed to hydrate SESSION_BUNDLE_BASE64:', err.message);
         }
@@ -437,31 +442,42 @@ export class WhatsAppClient {
       // Detect if PAIRING_PHONE_NUMBER changed vs existing session creds.json, or if previous pairing was incomplete
       if (fs.existsSync(credsFile)) {
         try {
-          const rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
-          const isFullyPaired = Boolean(rawCreds?.registered || rawCreds?.account || (rawCreds?.me?.id && rawCreds?.me?.lid));
-          const existingPhone = (rawCreds?.me?.id || '').split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
-          const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '07058967815');
+          const content = fs.readFileSync(credsFile, 'utf8').trim();
+          if (!content) {
+            fs.rmSync(config.paths.sessions, { recursive: true, force: true });
+            fs.mkdirSync(config.paths.sessions, { recursive: true });
+            this.pairingRequested = false;
+          } else {
+            const rawCreds = JSON.parse(content);
+            const isFullyPaired = Boolean(rawCreds?.registered || rawCreds?.account || (rawCreds?.me?.id && rawCreds?.me?.lid));
+            const existingPhone = (rawCreds?.me?.id || '').split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
+            const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '07058967815');
 
-          if (!isFullyPaired) {
-            // Incomplete pairing attempt left a partial creds.me without account/registered; wipe so Baileys sends RegistrationNode
-            fs.rmSync(config.paths.sessions, { recursive: true, force: true });
-            fs.mkdirSync(config.paths.sessions, { recursive: true });
-            this.pairingRequested = false;
-          } else if (existingPhone && targetPhone && existingPhone !== targetPhone) {
-            console.log(
-              `[WhatsAppClient] 🔄 Default bot number changed (+${existingPhone} -> +${targetPhone}). Archiving previous session and preparing fresh pairing for +${targetPhone}...`
-            );
-            const backupDir = path.resolve(`./sessions_prev_${existingPhone}`);
-            try {
-              if (fs.existsSync(backupDir)) fs.rmSync(backupDir, { recursive: true, force: true });
-              fs.cpSync(config.paths.sessions, backupDir, { recursive: true });
-            } catch {}
-            fs.rmSync(config.paths.sessions, { recursive: true, force: true });
-            fs.mkdirSync(config.paths.sessions, { recursive: true });
-            this.pairingRequested = false;
-            this.latestPairingCode = null;
+            if (!isFullyPaired) {
+              // Incomplete pairing attempt left a partial creds.me without account/registered; wipe so Baileys sends RegistrationNode
+              fs.rmSync(config.paths.sessions, { recursive: true, force: true });
+              fs.mkdirSync(config.paths.sessions, { recursive: true });
+              this.pairingRequested = false;
+            } else if (existingPhone && targetPhone && existingPhone !== targetPhone) {
+              console.log(
+                `[WhatsAppClient] 🔄 Default bot number changed (+${existingPhone} -> +${targetPhone}). Archiving previous session and preparing fresh pairing for +${targetPhone}...`
+              );
+              const backupDir = path.resolve(`./sessions_prev_${existingPhone}`);
+              try {
+                if (fs.existsSync(backupDir)) fs.rmSync(backupDir, { recursive: true, force: true });
+                fs.cpSync(config.paths.sessions, backupDir, { recursive: true });
+              } catch {}
+              fs.rmSync(config.paths.sessions, { recursive: true, force: true });
+              fs.mkdirSync(config.paths.sessions, { recursive: true });
+              this.pairingRequested = false;
+              this.latestPairingCode = null;
+            }
           }
-        } catch {}
+        } catch {
+          fs.rmSync(config.paths.sessions, { recursive: true, force: true });
+          fs.mkdirSync(config.paths.sessions, { recursive: true });
+          this.pairingRequested = false;
+        }
       }
 
       // Detach any previous listeners and cleanly close prior socket instance to prevent conflict
