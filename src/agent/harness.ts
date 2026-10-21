@@ -304,7 +304,7 @@ export class AgentHarness {
     }
 
     // Token-budgeted context assembly (system prompt, user profiles, older summaries, recent history)
-    const { messages, tokenBudgetUsed } = contextManager.buildManagedContext(
+    const { messages, tokenBudgetUsed } = await contextManager.buildManagedContext(
       context.chatJid,
       context.senderJid,
       context.isGroup,

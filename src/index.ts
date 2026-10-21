@@ -30,6 +30,7 @@ import { whatsAppClient } from './core/client.js';
 import { healthMonitor } from './core/health-monitor.js';
 import { llmClient } from './agent/llm-client.js';
 import { antiBanEngine } from './security/anti-ban.js';
+import { httpSecurityManager } from './security/http-security.js';
 
 
 // In-memory capture of live server logs (last 500 lines) for Render /logs endpoint
@@ -133,10 +134,28 @@ let healthServer: http.Server | null = null;
 function startHealthServer() {
   const port = Number(process.env.PORT) || 3000;
   healthServer = http.createServer(async (req, res) => {
+    httpSecurityManager.applySecurityHeaders(res);
+
+    // Rate Limiting Protection (DoS & brute-force defense)
+    if (!httpSecurityManager.checkRateLimit(req)) {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Too Many Requests: Rate limit exceeded. Try again in 60s.' }));
+      return;
+    }
+
     if (req.url && (req.url.startsWith('/qr') || req.url.startsWith('/pair'))) {
+      const registered = whatsAppClient.isRegistered();
+      // If not registered and ADMIN_API_KEY is configured, require authentication to view pairing code
+      if (!registered && process.env.ADMIN_API_KEY) {
+        const auth = httpSecurityManager.verifyAdminAuth(req);
+        if (!auth.isAuthenticated) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Unauthorized: Admin authentication token required to view pairing code' }));
+          return;
+        }
+      }
       const qr = whatsAppClient.getLatestQr();
       const pairingCode = whatsAppClient.getLatestPairingCode();
-      const registered = whatsAppClient.isRegistered();
 
       if (req.url.includes('json=1')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -228,12 +247,36 @@ function startHealthServer() {
 
     
     if (req.url && (req.url.startsWith('/logs') || req.url.startsWith('/render-logs') || req.url.startsWith('/console'))) {
+      const auth = httpSecurityManager.verifyAdminAuth(req);
+      if (!auth.isAuthenticated) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized: Admin authentication token required to inspect operational logs' }));
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end(liveConsoleLogs.join('\n') || '[Server] No logs recorded yet.');
       return;
     }
-    if (req.url === '/' || req.url === '/health' || req.url === '/status') {
+
+    if (req.url === '/' || req.url?.startsWith('/health') || req.url?.startsWith('/status')) {
       const report = healthMonitor.getHealthReport();
+      const auth = httpSecurityManager.verifyAdminAuth(req);
+
+      // Public health probe (for Render uptime checks and load balancer probes)
+      if (!auth.isAuthenticated) {
+        const publicPayload = JSON.stringify({
+          status: 'ok',
+          bot: config.bot.name,
+          whatsappConnected: whatsAppClient.isSocketOpen() || report.isConnected,
+          uptimeSeconds: report.uptime,
+          timestamp: new Date().toISOString(),
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(publicPayload);
+        return;
+      }
+
+      // Full diagnostic probe for authenticated admin
       const payload = JSON.stringify({
         status: 'ok',
         bot: config.bot.name,
@@ -254,9 +297,16 @@ function startHealthServer() {
       res.end(payload);
       return;
     }
-    if (req.url === '/debug' || req.url === '/recent-logs') {
+
+    if (req.url?.startsWith('/debug') || req.url?.startsWith('/recent-logs')) {
+      const auth = httpSecurityManager.verifyAdminAuth(req);
+      if (!auth.isAuthenticated) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized: Admin authentication token required to inspect chat logs' }));
+        return;
+      }
       try {
-        const rows = db.prepare(`SELECT * FROM chat_logs ORDER BY id DESC LIMIT 25`).all();
+        const rows = db.prepare(`SELECT id, chat_jid, sender_name, is_group, content_type, message_text, is_noise, timestamp FROM chat_logs ORDER BY id DESC LIMIT 25`).all();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ count: rows.length, logs: rows }, null, 2));
       } catch (err: any) {
@@ -266,7 +316,14 @@ function startHealthServer() {
       return;
     }
 
-    if (req.url === '/session-bundle') {
+    if (req.url?.startsWith('/session-bundle')) {
+      const auth = httpSecurityManager.verifyAdminAuth(req);
+      if (!auth.isAuthenticated) {
+        // Return 404 Not Found to prevent leaking the existence of the session backup endpoint
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not Found' }));
+        return;
+      }
       try {
         const credsFile = path.join(config.paths.sessions, 'creds.json');
         if (!fs.existsSync(credsFile)) {

@@ -1,4 +1,5 @@
 import { db } from '../memory/db.js';
+import { sensitiveDataFilter } from '../security/sensitive-data-filter.js';
 
 export class ChatCleaner {
   // 1. OTP, 2FA, and Verification Code patterns
@@ -47,6 +48,11 @@ export class ChatCleaner {
 
     // Repetitive character mash (e.g. "aaaaaaa", "kkkkkkkk", "........")
     if (/^(.)\1{5,}$/i.test(clean)) {
+      return true;
+    }
+
+    // Exclude any messages containing sensitive data, credentials, banking info, or secrets
+    if (sensitiveDataFilter.shouldExcludeFromTraining(clean)) {
       return true;
     }
 

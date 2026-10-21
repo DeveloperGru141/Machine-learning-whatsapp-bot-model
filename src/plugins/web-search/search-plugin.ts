@@ -1,4 +1,5 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
+import { ragEngine } from '../../core/rag-engine.js';
 
 export interface FootballMatch {
   name: string;
@@ -300,6 +301,19 @@ export class WebSearchPlugin implements IPlugin {
           console.log(`[WebSearch] Performing web lookup: "${rawQuery}"`);
 
           const lower = rawQuery.toLowerCase();
+
+          // 0. Autonomous Local RAG Interceptor: If this is an internal query matching local user facts, contacts, or group rules, return local data immediately
+          try {
+            const ragCheck = await ragEngine.retrieveContext(rawQuery, ctx.chatJid, ctx.senderJid, 3);
+            if (ragCheck.hasMatches && ragCheck.documents.some((d) => d.relevanceScore >= 0.5)) {
+              console.log(`[WebSearch] 🎯 Local RAG match found for "${rawQuery}". Suppressing external web search.`);
+              return {
+                success: true,
+                message: `[Internal Verified Database Match - No Web Search Needed]:\n${ragCheck.formattedContext}\n\n[State the answer clearly and directly from this internal verified data without searching the web.]`,
+                data: ragCheck.documents,
+              };
+            }
+          } catch {}
 
           // Auto-detect football score queries: delegate to football score engine
           if (

@@ -1,6 +1,7 @@
 import { db } from './db.js';
 import { config } from '../config/env.js';
 import { chatCleaner } from '../learning/chat-cleaner.js';
+import { sensitiveDataFilter } from '../security/sensitive-data-filter.js';
 
 export interface LogMessageInput {
   chatJid: string;
@@ -33,8 +34,14 @@ export class ChatLogger {
 
   public logMessage(input: LogMessageInput): void {
     try {
-      const sanitizedText = input.messageText ? chatCleaner.sanitizeText(input.messageText) : null;
-      const isNoise = chatCleaner.isNoise(sanitizedText, input.contentType) ? 1 : 0;
+      let sanitizedText: string | null = null;
+      let hasSensitive = false;
+      if (input.messageText) {
+        const scrubbed = sensitiveDataFilter.scrubSensitiveText(input.messageText);
+        sanitizedText = chatCleaner.sanitizeText(scrubbed.scrubbedText);
+        hasSensitive = scrubbed.isSensitive;
+      }
+      const isNoise = (hasSensitive || chatCleaner.isNoise(sanitizedText, input.contentType)) ? 1 : 0;
 
       this.insertLogStmt.run(
         input.chatJid,
@@ -60,13 +67,14 @@ export class ChatLogger {
 
   public logOutboundMessage(chatJid: string, text: string): void {
     try {
+      const scrubbed = sensitiveDataFilter.scrubSensitiveText(text).scrubbedText;
       this.insertLogStmt.run(
         chatJid,
         'bot',
         config.bot.name,
         chatJid.endsWith('@g.us') ? 1 : 0,
         'text',
-        text,
+        scrubbed,
         null,
         0,
         Date.now(),

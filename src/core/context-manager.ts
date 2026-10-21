@@ -4,6 +4,7 @@ import { llmClient } from '../agent/llm-client.js';
 import { buildSystemPrompt } from '../agent/prompt.js';
 import { userProfileManager } from '../memory/user-profiles.js';
 import { contactService } from '../memory/contact-service.js';
+import { ragEngine } from './rag-engine.js';
 
 export interface ManagedContextResult {
   messages: any[];
@@ -62,12 +63,12 @@ export class ContextManager {
    * 4. Recent raw chat history (sliding window keeping at least the latest 8 messages)
    * 5. Current user prompt
    */
-  public buildManagedContext(
+  public async buildManagedContext(
     chatJid: string,
     userJid: string,
     isGroup: boolean,
     currentPrompt: string
-  ): ManagedContextResult {
+  ): Promise<ManagedContextResult> {
     // 1. Check if background summarization is needed (> 50 messages since last summary)
     this.checkAndTriggerAutoSummary(chatJid);
 
@@ -76,6 +77,16 @@ export class ContextManager {
     const profileSummary = userProfileManager.getProfileSummaryForPrompt(userJid);
     if (profileSummary) {
       systemPromptText += `\n\n# User Profile Context (Cross-Chat Persistent Memory):\n${profileSummary}\n`;
+    }
+
+    // 2b. Autonomous Local Database RAG Context Retrieval (User Facts, Group Facts, Contacts, Past Decisions)
+    try {
+      const ragResult = await ragEngine.retrieveContext(currentPrompt, chatJid, userJid, 4);
+      if (ragResult.hasMatches && ragResult.formattedContext) {
+        systemPromptText += `\n\n${ragResult.formattedContext}\n`;
+      }
+    } catch (ragErr: any) {
+      console.warn('[ContextManager] RAG retrieval error:', ragErr?.message || ragErr);
     }
 
     const systemPromptMessage = { role: 'system', content: systemPromptText };

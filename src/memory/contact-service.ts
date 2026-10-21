@@ -333,6 +333,39 @@ export class ContactService {
   }
 
   /**
+   * Searches for multiple contacts matching a query string across names, notes, phone, and tags.
+   */
+  public searchContacts(query: string, limit: number = 5): ContactRecord[] {
+    if (!query || query.trim().length === 0) return [];
+    const clean = query.trim();
+
+    const single = this.getContact(clean);
+    const results: ContactRecord[] = [];
+    if (single && single.id === -1) {
+      results.push(single);
+    }
+
+    try {
+      const rows = db.prepare(`
+        SELECT * FROM contacts 
+        WHERE (custom_name LIKE ? OR display_name LIKE ? OR notes LIKE ? OR tags LIKE ? OR phone_number LIKE ?)
+          AND display_name != 'Crypto Boss😊'
+        ORDER BY updated_at DESC
+        LIMIT ?
+      `).all(`%${clean}%`, `%${clean}%`, `%${clean}%`, `%${clean}%`, `%${clean}%`, limit) as unknown as ContactRecord[];
+
+      for (const r of rows) {
+        if (!results.some((existing) => existing.phone_number === r.phone_number || existing.jid === r.jid)) {
+          results.push(r);
+        }
+      }
+      return results.slice(0, limit);
+    } catch {
+      return results;
+    }
+  }
+
+  /**
    * Returns all saved contacts up to limit.
    */
   public getAllContacts(limit: number = 2000): ContactRecord[] {

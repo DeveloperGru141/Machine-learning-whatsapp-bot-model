@@ -3,6 +3,7 @@ import path from 'path';
 import { db } from '../memory/db.js';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../plugins/types.js';
 import { config } from '../config/env.js';
+import { sensitiveDataFilter } from '../security/sensitive-data-filter.js';
 
 export class DatasetExporterPlugin implements IPlugin {
   name = 'DatasetExporter';
@@ -60,21 +61,37 @@ export class DatasetExporterPlugin implements IPlugin {
 
           const lines: string[] = [];
 
-          // Format direct pairs
+          // Format direct pairs (filtering out any sensitive information)
           for (const p of directPairs) {
+            if (
+              sensitiveDataFilter.shouldExcludeFromTraining(p.user_message) ||
+              sensitiveDataFilter.shouldExcludeFromTraining(p.assistant_response)
+            ) {
+              continue;
+            }
+            const cleanUser = sensitiveDataFilter.scrubSensitiveText(p.user_message).scrubbedText;
+            const cleanAsst = sensitiveDataFilter.scrubSensitiveText(p.assistant_response).scrubbedText;
             lines.push(
               JSON.stringify({
                 messages: [
                   { role: 'system', content: p.system_prompt },
-                  { role: 'user', content: p.user_message },
-                  { role: 'assistant', content: p.assistant_response },
+                  { role: 'user', content: cleanUser },
+                  { role: 'assistant', content: cleanAsst },
                 ],
               })
             );
           }
 
-          // Format mined exemplars
+          // Format mined exemplars (filtering out any sensitive information)
           for (const e of exemplars) {
+            if (
+              sensitiveDataFilter.shouldExcludeFromTraining(e.context_text) ||
+              sensitiveDataFilter.shouldExcludeFromTraining(e.response_text)
+            ) {
+              continue;
+            }
+            const cleanCtx = sensitiveDataFilter.scrubSensitiveText(e.context_text).scrubbedText;
+            const cleanResp = sensitiveDataFilter.scrubSensitiveText(e.response_text).scrubbedText;
             lines.push(
               JSON.stringify({
                 messages: [
@@ -82,8 +99,8 @@ export class DatasetExporterPlugin implements IPlugin {
                     role: 'system',
                     content: `You are ${config.bot.name}, a sharp, witty, and culturally savvy real WhatsApp user living inside WhatsApp chats. Your creator is ${config.bot.creator}. Talk naturally like a real person, NO robotic AI cliches, NO emoji spam (max 0-1 emoji).`,
                   },
-                  { role: 'user', content: e.context_text },
-                  { role: 'assistant', content: e.response_text },
+                  { role: 'user', content: cleanCtx },
+                  { role: 'assistant', content: cleanResp },
                 ],
               })
             );
