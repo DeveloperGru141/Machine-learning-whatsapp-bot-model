@@ -25,6 +25,7 @@ import { config, normalizePhoneNumber } from '../../config/env.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
 import {
   broadcastMorningGroupMotivation,
+  broadcastEveningGroupRoundup,
   scrapeWhatsAppChannelQuotes,
   seedChannelQuotesIfEmpty,
   WHATSAPP_CHANNEL_INVITE_CODE,
@@ -556,6 +557,8 @@ export class SchedulerPlugin implements IPlugin {
     this.ensureMorningStatusSchedule();
     // Automatically ensure daily morning group motivational greetings at 07:00 AM across all participating groups
     this.ensureMorningGroupMotivationSchedule();
+    // Automatically ensure daily evening group roundup & night reflection at 21:00 WAT across all participating groups
+    this.ensureEveningGroupRoundupSchedule();
     // Seed memes from WhatsApp channel Memes (0029Vb6oS4LJkK7AvtORyH46)
     seedChannelMemesIfEmpty();
     // Automatically ensure 2-hour meme posting schedule (with strict 2hr cooldown)
@@ -707,6 +710,49 @@ export class SchedulerPlugin implements IPlugin {
   }
 
   /**
+   * Automatically schedules the daily 09:00 PM (21:00 WAT) evening roundup and night reflection quote
+   * across all participating WhatsApp groups.
+   */
+  public ensureEveningGroupRoundupSchedule(): void {
+    try {
+      const broadcastJid = 'all_groups@broadcast';
+      const fireAt = getNextFireAtForTimeOfDay('21:00');
+
+      const existing = db
+        .prepare("SELECT id, time_of_day, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'evening_group_roundup' AND status = 'pending'")
+        .get(broadcastJid);
+
+      if (existing) {
+        db.prepare(`
+          UPDATE scheduled_tasks
+          SET time_of_day = '21:00',
+              fire_at = ?,
+              message = 'Daily 9:00 PM Group Evening Roundup & Night Reflection',
+              custom_prompt = 'Delivers an evening roundup and calming night reflection motivational quote across all groups'
+          WHERE id = ?
+        `).run(fireAt, existing.id);
+        console.log(`[Scheduler] 🌙 Synchronized daily evening group roundup schedule to next 21:00 WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
+      } else {
+        insertScheduledTask(
+          broadcastJid,
+          '2348108574293@s.whatsapp.net',
+          'Daily 9:00 PM Group Evening Roundup & Night Reflection',
+          fireAt,
+          'daily',
+          'evening_group_roundup',
+          '21:00',
+          'Delivers an evening roundup and calming night reflection motivational quote across all groups',
+          'All Participating Groups'
+        );
+        console.log(`[Scheduler] 🌙 Registered daily evening group roundup broadcaster at 21:00 WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
+      }
+    } catch (err: any) {
+      console.warn('[Scheduler] Could not ensure evening group roundup schedule:', err.message);
+    }
+  }
+
+
+  /**
    * Automatically schedules a recurring 2-hour meme post from WhatsApp Channel Memes (0029Vb6oS4LJkK7AvtORyH46)
    * with strict 2-hour cooldown enforcement between postings.
    */
@@ -826,6 +872,21 @@ export class SchedulerPlugin implements IPlugin {
             }
             continue;
           }
+          // Daily 21:00 WAT Evening Group Roundup & Night Reflection
+          if (task.topic === 'evening_group_roundup') {
+            const nextFireAt = advanceToNextDay(task.fire_at);
+            rescheduleRecurringTask(task.id, nextFireAt);
+            try {
+              const res = await broadcastEveningGroupRoundup(socket);
+              console.log(
+                `[Scheduler] 🔄 Daily evening group roundup #${task.id} delivered to ${res.groupsContacted} groups and rescheduled for next 21:00 WAT (${new Date(nextFireAt).toLocaleString()}).`
+              );
+            } catch (eveningErr: any) {
+              console.error('[Scheduler] Error broadcasting evening group roundup:', eveningErr.message);
+            }
+            continue;
+          }
+
 
           // 4. Daily 07:00 AM Owner Health Report
           if (task.topic === 'owner_health_report') {
@@ -890,7 +951,37 @@ export class SchedulerPlugin implements IPlugin {
   }
 
   tools: BotTool[] = [
-    {
+        {
+      name: 'broadcast_group_evening_roundup',
+      description:
+        'Delivers the evening roundup and calming night reflection motivational quote across participating WhatsApp groups or to a specific group.',
+      parameters: {
+        type: 'object',
+        properties: {
+          target_group_jid: {
+            type: 'string',
+            description: 'Optional group JID to broadcast to. If omitted, delivers to all participating groups.',
+          },
+        },
+      },
+      execute: async (args: { target_group_jid?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const sock = (schedulerPlugin as any).activeSocket;
+          if (!sock) {
+            return { success: false, message: 'WhatsApp socket is not connected.' };
+          }
+          const res = await broadcastEveningGroupRoundup(sock, args.target_group_jid);
+          return {
+            success: true,
+            message: `🌙 Evening group roundup delivered to ${res.groupsContacted} group(s): ${res.deliveredGroups.join(', ') || 'None'}.`,
+            data: res,
+          };
+        } catch (err: any) {
+          return { success: false, message: `Failed to deliver evening group roundup: ${err.message}` };
+        }
+      },
+    },
+{
       name: 'set_reminder',
       description: 'Schedules a one-time reminder or alarm to be sent to this chat at a specific time (e.g. "9pm", "21:00") or after a specified number of minutes.',
       parameters: {

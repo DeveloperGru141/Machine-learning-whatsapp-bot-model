@@ -393,46 +393,60 @@ export class AgentHarness {
 # Answering With Live Tool Data:
 Combine the live tool data in the user's last message with your own knowledge and answer directly and confidently in 1-3 sentences, in the same voice as the exemplars above. Do NOT output <tool_call> tags or raw JSON. If send_message_to_contact succeeded, explicitly confirm who you messaged and its WhatsApp delivery status (✓ / ✓✓).`;
         const historyContext = messages.slice(1, -1);
-        const synthesisRes = await this.callLLM({
-          messages: [
-            { role: 'system', content: synthesisSystem },
-            ...historyContext,
-            {
-              role: 'user',
-              content: `${context.senderName}: ${userMessage}\n\n[Live Tool Data]:\n${toolOutputs.join('\n\n')}`,
-            },
-          ],
-          tools: undefined,
-          tool_choice: undefined,
-        });
+        try {
+          const synthesisRes = await this.callLLM({
+            messages: [
+              { role: 'system', content: synthesisSystem },
+              ...historyContext,
+              {
+                role: 'user',
+                content: `${context.senderName}: ${userMessage}\n\n[Live Tool Data]:\n${toolOutputs.join('\n\n')}`,
+              },
+            ],
+            tools: undefined,
+            tool_choice: undefined,
+          });
 
-        const synthMsg = synthesisRes.choices[0]?.message;
-        let rawSynth = synthMsg?.content || '';
+          const synthMsg = synthesisRes.choices[0]?.message;
+          let rawSynth = synthMsg?.content || '';
 
-        // If synthesis step emitted a follow-up inline tool call (e.g. save_contact followed by send_message_to_contact), execute it!
-        const followUpInline = extractInlineToolCalls(rawSynth);
-        if (followUpInline.toolCalls.length > 0) {
-          await runToolCallList(followUpInline.toolCalls);
-          rawSynth = followUpInline.cleanedContent;
-        }
+          // If synthesis step emitted a follow-up inline tool call (e.g. save_contact followed by send_message_to_contact), execute it!
+          const followUpInline = extractInlineToolCalls(rawSynth);
+          if (followUpInline.toolCalls.length > 0) {
+            await runToolCallList(followUpInline.toolCalls);
+            rawSynth = followUpInline.cleanedContent;
+          }
 
-        const replyText = sanitizeAssistantResponse(rawSynth);
-        if (replyText && replyText.trim()) {
-          console.log(`[AgentHarness] 💬 Bot replied (post-tool) to ${context.senderName}: "${replyText.slice(0, 100)}..."`);
-          await context.replyText(replyText);
-          analyticsEngine.trackEvent('message_sent', { length: replyText.length }, context.chatJid, context.senderJid);
-          this.recordFineTuningPair(
-            messages[0]?.content || '',
-            userMessage,
-            replyText,
-            Array.from(executedToolNames)
-          );
-        } else if (toolOutputs.length > 0) {
-          const fallbackConfirm = sanitizeAssistantResponse(
-            toolOutputs[toolOutputs.length - 1].replace(/^\[[^\]]+\]:\s*/, '')
-          );
-          if (fallbackConfirm) {
-            await context.replyText(fallbackConfirm);
+          const replyText = sanitizeAssistantResponse(rawSynth);
+          if (replyText && replyText.trim()) {
+            console.log(`[AgentHarness] 💬 Bot replied (post-tool) to ${context.senderName}: "${replyText.slice(0, 100)}..."`);
+            await context.replyText(replyText);
+            analyticsEngine.trackEvent('message_sent', { length: replyText.length }, context.chatJid, context.senderJid);
+            this.recordFineTuningPair(
+              messages[0]?.content || '',
+              userMessage,
+              replyText,
+              Array.from(executedToolNames)
+            );
+          } else if (toolOutputs.length > 0) {
+            const fallbackConfirm = sanitizeAssistantResponse(
+              toolOutputs[toolOutputs.length - 1].replace(/^\[[^\]]+\]:\s*/, '')
+            );
+            if (fallbackConfirm) {
+              await context.replyText(fallbackConfirm);
+            }
+          }
+        } catch (synthErr: any) {
+          console.warn('[AgentHarness] Post-tool synthesis error:', synthErr.message);
+          if (toolOutputs.length > 0) {
+            const directToolOutput = sanitizeAssistantResponse(
+              toolOutputs[toolOutputs.length - 1].replace(/^\[[^\]]+\]:\s*/, '')
+            );
+            if (directToolOutput) {
+              await context.replyText(directToolOutput);
+            }
+          } else {
+            throw synthErr;
           }
         }
       } else {
@@ -532,11 +546,10 @@ Combine the live tool data in the user's last message with your own knowledge an
         err.message?.includes('Closed') ||
         err.message?.includes('Terminated') ||
         err.message?.includes('1006') ||
-        err.message?.includes('ECONNRESET') ||
-        err.message?.includes('timed out');
+        err.message?.includes('ECONNRESET');
 
       if (isSocketError) {
-        console.warn('[AgentHarness] Aborting reasoning fallback: socket is disconnected or task timed out.');
+        console.warn('[AgentHarness] Aborting reasoning fallback: socket is disconnected.');
         return;
       }
 

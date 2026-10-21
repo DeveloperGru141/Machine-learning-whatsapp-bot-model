@@ -62,11 +62,12 @@ export class AntiBanEngine {
 
     const cleanLen = Math.max(1, Math.min(incomingTextLength || 20, 150));
     // Groups: Realistic human reading pause so group replies feel like an active human member
-    const baseMs = isGroup ? 1200 : 700;
-    const perCharMs = isGroup ? 6 : 4;
+    // DMs: Snappy, agile response (300ms - 800ms) so private chats feel immediate and attentive
+    const baseMs = isGroup ? 1200 : 300;
+    const perCharMs = isGroup ? 6 : 2;
     const rawDelay = baseMs + cleanLen * perCharMs;
-    const jitter = Math.floor(Math.random() * (isGroup ? 300 : 200));
-    const maxCap = isGroup ? 2500 : 1800;
+    const jitter = Math.floor(Math.random() * (isGroup ? 300 : 100));
+    const maxCap = isGroup ? 2500 : 800;
     return Math.min(maxCap, rawDelay + jitter);
   }
 
@@ -85,17 +86,18 @@ export class AntiBanEngine {
     const userLen = Math.max(0, Math.min(incomingTextLength || 20, 100));
 
     // Groups: Realistic human typing presence (1.8s - 3.8s)
-    const baseMs = isGroup ? 1500 : 1000;
-    const replyTypingMs = replyLen * (isGroup ? 10 : 8);
-    const userComprehensionMs = userLen * (isGroup ? 3 : 2);
+    // DMs: Fast typing presence (500ms - 1.4s) for high conversational velocity
+    const baseMs = isGroup ? 1500 : 450;
+    const replyTypingMs = replyLen * (isGroup ? 10 : 4);
+    const userComprehensionMs = userLen * (isGroup ? 3 : 1);
     const rawTotal = baseMs + replyTypingMs + userComprehensionMs;
 
     // Add +/- 10% natural human rhythm variance
     const varianceFactor = 0.9 + Math.random() * 0.2;
     const computed = Math.floor(rawTotal * varianceFactor);
 
-    const minFloor = isGroup ? 1800 : 1200;
-    const maxCeiling = isGroup ? 3800 : 2800;
+    const minFloor = isGroup ? 1800 : 500;
+    const maxCeiling = isGroup ? 3800 : 1400;
     return Math.max(minFloor, Math.min(maxCeiling, computed));
   }
 

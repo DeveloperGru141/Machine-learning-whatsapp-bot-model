@@ -1,5 +1,6 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { transcodeToOggOpus, synthesizeVoiceNote } from '../../core/tts.js';
+import { analyzeVoiceNote } from '../../core/transcription.js';
 import { getBotSetting, setBotSetting } from '../../memory/db.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
 import { config } from '../../config/env.js';
@@ -202,6 +203,46 @@ export class AudioDownloaderPlugin implements IPlugin {
             sampleDateStr,
           },
         };
+      },
+    },
+    {
+      name: 'transcribe_voice_note',
+      description:
+        'Transcribes and summarizes an audio file or voice note using Groq Whisper large-v3 with Nigerian English & Pidgin optimization.',
+      parameters: {
+        type: 'object',
+        properties: {
+          audio_url: {
+            type: 'string',
+            description: 'Optional direct URL to the audio file to transcribe.',
+          },
+        },
+      },
+      execute: async (args: { audio_url?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          if (args.audio_url) {
+            const res = await fetch(args.audio_url, { signal: AbortSignal.timeout(20000) });
+            if (!res.ok) {
+              return { success: false, message: `Failed to download audio from ${args.audio_url}` };
+            }
+            const arrayBuf = await res.arrayBuffer();
+            const analysis = await analyzeVoiceNote(Buffer.from(arrayBuf));
+            if (!analysis) {
+              return { success: false, message: 'Could not transcribe the provided audio.' };
+            }
+            return {
+              success: true,
+              message: `🎙️ *Voice Note Transcribed:*\n"${analysis.transcript}"\n\n💡 *Summary:* ${analysis.summary}`,
+              data: analysis,
+            };
+          }
+          return {
+            success: true,
+            message: 'To transcribe a voice note, send the voice note directly to the chat or supply a link.',
+          };
+        } catch (err: any) {
+          return { success: false, message: `Transcription failed: ${err.message}` };
+        }
       },
     },
   ];

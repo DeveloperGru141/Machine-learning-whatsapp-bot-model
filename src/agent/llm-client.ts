@@ -96,13 +96,8 @@ export class LLMClient {
 
   public async callGeminiInternal(params: LLMChatParams): Promise<LLMChatResponse> {
     if (Date.now() < this.geminiQuotaExhaustedUntil) {
-      // If only a few seconds remain on rate-limit cooldown, wait it out briefly
-      const remainingMs = this.geminiQuotaExhaustedUntil - Date.now();
-      if (remainingMs > 0 && remainingMs <= 10_000) {
-        await new Promise((r) => setTimeout(r, remainingMs + 200));
-      } else if (remainingMs > 10_000) {
-        throw new Error(`Gemini rate limit cooldown active until ${new Date(this.geminiQuotaExhaustedUntil).toLocaleTimeString()}`);
-      }
+      // Zero sleep: immediately hand off to Groq/Cerebras so DM replies stay snappy
+      throw new Error(`Gemini rate limit cooldown active until ${new Date(this.geminiQuotaExhaustedUntil).toLocaleTimeString()}`);
     }
 
     const candidateGeminiModels = [
@@ -145,12 +140,12 @@ export class LLMClient {
           String(err?.message || err).includes('RESOURCE_EXHAUSTED');
 
         if (isQuota) {
-          // Cooldown for 15 seconds (minute-based RPM quota), never 1 hour!
+          // Instant failover: mark cooldown and throw immediately so Groq/Cerebras takes over with 0 delay!
           this.geminiQuotaExhaustedUntil = Date.now() + 15 * 1000;
-          console.warn(`[LLMClient] ⚠️ Gemini model ${model} rate-limited (429). Cooldown 15s. Trying next candidate...`);
-          await new Promise((r) => setTimeout(r, 1200));
+          console.warn(`[LLMClient] ⚠️ Gemini model ${model} rate-limited (429). Instantly failing over to Groq/Cerebras...`);
+          throw new Error('Gemini rate-limited (429)');
         } else {
-          console.warn(`[LLMClient] ⚠️ Gemini model ${model} encountered ${err?.status || err?.message || err}. Trying next model...`);
+          console.warn(`[LLMClient] ⚠️ Gemini model ${model} encountered ${err?.status || err?.message || err}. Trying next candidate...`);
         }
       }
     }

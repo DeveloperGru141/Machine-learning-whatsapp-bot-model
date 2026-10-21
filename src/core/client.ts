@@ -27,7 +27,8 @@ import { ExecutionContext } from '../plugins/types.js';
 import { patternMiner } from '../learning/pattern-miner.js';
 import { batchLearner } from '../learning/batch-learner.js';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
-import { transcribeAudioBuffer } from './transcription.js';
+import { transcribeAudioBuffer, analyzeVoiceNote } from './transcription.js';
+import { inspectUrlSafety } from '../plugins/link-summarizer/link-plugin.js';
 import { analyzeImageBuffer } from './vision.js';
 import { requestQueue } from './queue.js';
 import { groupAdminPlugin } from '../plugins/group-admin/admin-plugin.js';
@@ -1001,6 +1002,70 @@ export class WhatsAppClient {
       if (wasLinkDeleted) return;
     }
 
+    // Autonomous Suspicious Link Sentinel & Scam Inspector
+    if (normalized.text && this.sock && !msg.key?.fromMe) {
+      const urlMatches = normalized.text.match(/\bhttps?:\/\/[^\s<>"'()]+\b/gi);
+      if (urlMatches && urlMatches.length > 0) {
+        for (const url of urlMatches) {
+          const report = await inspectUrlSafety(url);
+          if (report.isSuspicious) {
+            console.log(`[LinkSentinel] 🚨 High-risk link detected from ${normalized.senderName}: ${url} (${report.verdict})`);
+            const senderDigits = normalized.senderJid.split('@')[0].split(':')[0];
+
+            if (normalized.isGroup) {
+              let botIsAdmin = false;
+              try {
+                const meta = await this.sock.groupMetadata(normalized.chatJid);
+                const botNum = this.sock.user?.id ? this.sock.user.id.split(':')[0].split('@')[0] : '';
+                const botLid = this.sock.user?.lid ? this.sock.user.lid.split(':')[0].split('@')[0] : '';
+                const me = meta?.participants?.find((p: any) => {
+                  const pNum = p.id ? p.id.split(':')[0].split('@')[0] : '';
+                  const pLid = p.lid ? p.lid.split(':')[0].split('@')[0] : '';
+                  return pNum === botNum || (botLid && pLid === botLid);
+                });
+                botIsAdmin = Boolean(me && (me.admin === 'admin' || me.admin === 'superadmin'));
+              } catch {}
+
+              if (botIsAdmin) {
+                try {
+                  await this.sock.sendMessage(normalized.chatJid, { delete: msg.key });
+                } catch {}
+
+                const adminWarn = `🛡️ *ADMIN SECURITY WARNING* 🚨\nAttention @${senderDigits}:\nThe link you posted was scanned by security sentinel and flagged as a high-risk threat:\n• *Verdict*: ${report.verdict.toUpperCase()}\n• *Reason*: ${report.reason}\n\nPosting deceptive links, phishing portals, or fraudulent schemes violates group rules. Further violations will result in removal.`;
+                await OutboundSender.replyText(
+                  this.sock,
+                  normalized.chatJid,
+                  adminWarn,
+                  undefined,
+                  false,
+                  false,
+                  [normalized.senderJid]
+                );
+                return;
+              } else {
+                const pidginWarn = `🚨 *SCAM ALERT! MAKE UNA SHINE YOUR EYES O!* ⚠️\nOmo @${senderDigits}, which kind link you drop so? That link dey smell fishy die! 🐟\n• *Wetin dey happen*: ${report.reason}\n\nAbeg everybody for this group, make nobody click that link or put any pin/BVN/password o! Na format dem dey use clear people money. No fall for this kind scam! 🛑`;
+                await OutboundSender.replyText(
+                  this.sock,
+                  normalized.chatJid,
+                  pidginWarn,
+                  undefined,
+                  false,
+                  false,
+                  [normalized.senderJid]
+                );
+                return;
+              }
+            } else {
+              const dmWarn = `⚠️ *Security Sentinel Warning:*\nThe link you sent appears to be dangerous/fraudulent:\n• *Verdict*: ${report.verdict.toUpperCase()}\n• *Reason*: ${report.reason}\n\nPlease do not click it, enter any personal credentials, or transfer money to this platform.`;
+              await OutboundSender.replyText(this.sock, normalized.chatJid, dmWarn);
+              return;
+            }
+          }
+        }
+      }
+    }
+
+
     // Passive Anti-Spam Moderation for Groups only (prevent accidental DM blockage)
     if (normalized.isGroup && this.sock) {
       const spamStatus = await antiSpamFilter.checkMessage(
@@ -1197,9 +1262,16 @@ export class WhatsAppClient {
           }
         }
 
-        const transcript = await transcribeAudioBuffer(audioBuffer);
+        const analysis = await analyzeVoiceNote(audioBuffer);
+        const transcript = analysis?.transcript || null;
+        const summary = analysis?.summary || '';
+
         if (transcript) {
-          promptText = `[User sent a voice message]: "${transcript}"\n(Respond clearly and naturally with a text reply in authentic Nigerian WhatsApp flow)`;
+          if (!normalized.isGroup && this.sock) {
+            const vnCard = `🎙️ *Voice Note Transcribed:*\n"${transcript}"\n\n💡 *Summary:*\n${summary}`;
+            await OutboundSender.replyText(this.sock, normalized.chatJid, vnCard, msg);
+          }
+          promptText = `[User sent a voice message]: "${transcript}"\n[Voice Note Summary]: "${summary}"\n(Reply naturally and clearly to their voice note in authentic Nigerian WhatsApp flow)`;
         } else {
           promptText = `[User sent a voice message — reply with a natural text response]`;
         }

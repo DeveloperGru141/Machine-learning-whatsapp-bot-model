@@ -202,6 +202,13 @@ export async function renderQuoteCard(
       accent2: '#c084fc',
       title: 'DAILY ELEVATION',
     },
+    evening_reflection: {
+      bg1: '#070b19',
+      bg2: '#0f172a',
+      accent1: '#38bdf8',
+      accent2: '#818cf8',
+      title: 'NIGHT REFLECTION',
+    },
   };
 
   const theme = themeMap[niche] || themeMap.general_growth;

@@ -545,3 +545,206 @@ export async function broadcastMorningGroupMotivation(
   );
   return { groupsContacted: deliveredGroups.length, deliveredGroups };
 }
+
+/**
+ * Curated evening and night reflection quotes that set a calming, restorative, restful mood and tone.
+ */
+export const SEED_NIGHT_REFLECTION_QUOTES: Array<{
+  quote: string;
+  author: string;
+}> = [
+  {
+    quote: 'Rest when you are weary. Refresh and renew yourself, your body, your mind, your spirit. Then get back to work.',
+    author: 'Ralph Marston',
+  },
+  {
+    quote: 'The day is over, yesterday is done, and tomorrow is a fresh beginning. Close your eyes and sleep in peace.',
+    author: 'Quotes📖 Community',
+  },
+  {
+    quote: 'Never go to sleep without a request to your subconscious. Reflect on your wins, forgive the losses, and prepare to rise stronger.',
+    author: 'Napoleon Hill',
+  },
+  {
+    quote: 'Rest is not idleness. To pause and restore your energy is the highest form of self-discipline.',
+    author: 'Deep Rest Principle',
+  },
+  {
+    quote: 'You have done enough today. Let the hustle rest, recharge your soul, and let tomorrow bring its own grace.',
+    author: 'Mindset Sanctuary',
+  },
+  {
+    quote: 'Great things take time. Honor the progress you made today, no matter how small, and rest well.',
+    author: 'Quotes📖 Community',
+  },
+  {
+    quote: 'Sleep is the golden chain that ties health and our bodies together. Protect your peace tonight.',
+    author: 'Thomas Dekker',
+  },
+  {
+    quote: 'End each day with a grateful thought. No matter how tough things were, tomorrow is a fresh opportunity to make it better.',
+    author: 'Quotes📖 Wisdom',
+  },
+];
+
+let nightQuoteIndex = 0;
+
+export function getFreshestNightQuote(): { quote_text: string; author: string } {
+  const quote = SEED_NIGHT_REFLECTION_QUOTES[nightQuoteIndex % SEED_NIGHT_REFLECTION_QUOTES.length];
+  nightQuoteIndex++;
+  return {
+    quote_text: quote.quote,
+    author: quote.author,
+  };
+}
+
+export function formatGroupEveningRoundup(
+  groupSubject: string,
+  nightQuote: { quote_text: string; author: string }
+): string {
+  const dateFormatted = new Date().toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+  });
+
+  return (
+    `🌙 *EVENING ROUNDUP & NIGHT REFLECTION* ✨\n` +
+    `📅 ${dateFormatted}\n` +
+    `👥 *${groupSubject}*\n\n` +
+    `Good evening everyone! As today winds down, take a moment to pause, breathe, and honor the effort, learning, and progress you invested today.\n\n` +
+    `🌌 *Night Words of Reflection (from Quotes📖):*\n` +
+    `> "${nightQuote.quote_text}"\n` +
+    `— *${nightQuote.author || 'Quotes📖'}*\n\n` +
+    `💡 *Evening Takeaway:*\n` +
+    `Leave today's pressures with the setting sun. Celebrate every small step forward, let go of what you couldn't control, and allow your body and mind to completely recharge.\n\n` +
+    `Wishing everyone a calm, peaceful, and restorative night ahead! 🛌💤\n\n` +
+    `— *Forgelabs Assistant* 🫡`
+  );
+}
+
+/**
+ * Broadcasts the Daily 09:00 PM (21:00 WAT) Evening Roundup & Night Reflection across participating WhatsApp groups.
+ */
+export async function broadcastEveningGroupRoundup(
+  socket: WASocket,
+  targetGroupJid?: string
+): Promise<{ groupsContacted: number; deliveredGroups: string[] }> {
+  // Resolve target groups
+  let targetGroups: Array<{ id: string; subject: string }> = [];
+
+  if (targetGroupJid) {
+    let groupSubject = 'WhatsApp Group';
+    const known = getAllKnownGroups().find((g) => g.group_jid === targetGroupJid);
+    if (known) {
+      groupSubject = known.subject;
+    }
+    targetGroups.push({ id: targetGroupJid, subject: groupSubject });
+  } else {
+    const groupMap = new Map<string, string>();
+
+    const dbGroups = getAllKnownGroups(50);
+    for (const g of dbGroups) {
+      if (g.group_jid && g.subject) {
+        groupMap.set(g.group_jid, g.subject);
+      }
+    }
+
+    if (socket?.groupFetchAllParticipating) {
+      try {
+        const liveGroups = await socket.groupFetchAllParticipating();
+        for (const [jid, metadata] of Object.entries(liveGroups)) {
+          if (jid && metadata?.subject) {
+            groupMap.set(jid, metadata.subject);
+            upsertKnownGroup(jid, metadata.subject, metadata.participants?.length || 0);
+          }
+        }
+      } catch (err: any) {
+        console.warn('[ChannelQuotes] Evening groupFetchAllParticipating warning:', err.message);
+      }
+    }
+
+    targetGroups = Array.from(groupMap.entries()).map(([id, subject]) => ({ id, subject }));
+  }
+
+  if (targetGroups.length === 0) {
+    console.log('[ChannelQuotes] ⚠️ No participating groups found for evening roundup.');
+    return { groupsContacted: 0, deliveredGroups: [] };
+  }
+
+  console.log(`[ChannelQuotes] 🌙 Starting evening roundup broadcast to ${targetGroups.length} group(s)...`);
+
+  const deliveredGroups: string[] = [];
+  const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.LIVETEST_RUNNER);
+  const interGroupPauseMs = isTest ? 20 : 6_000;
+
+  for (let i = 0; i < targetGroups.length; i++) {
+    const group = targetGroups[i];
+    try {
+      const startOfTodayWat = getStartOfTodayWat();
+      const recentSend = db.prepare(`
+        SELECT COUNT(*) as count FROM chat_logs 
+        WHERE chat_jid = ? 
+          AND sender_jid = 'bot'
+          AND (message_text LIKE '%EVENING ROUNDUP%' OR message_text LIKE '%NIGHT REFLECTION%')
+          AND timestamp >= ?
+      `).get(group.id, startOfTodayWat) as { count: number } | undefined;
+
+      const recentAutonomous = db.prepare(`
+        SELECT COUNT(*) as count FROM autonomous_actions
+        WHERE action_type = 'evening_group_roundup'
+          AND target_chat = ?
+          AND timestamp >= ?
+      `).get(group.id, startOfTodayWat) as { count: number } | undefined;
+
+      if ((recentSend && recentSend.count > 0) || (recentAutonomous && recentAutonomous.count > 0)) {
+        console.log(`[ChannelQuotes] ⏭️ Skipping group "${group.subject}" (${group.id}) - evening roundup already sent today.`);
+        continue;
+      }
+
+      // Pick night reflection quote
+      const nightQuote = getFreshestNightQuote();
+
+      // Format warm evening roundup & sanitize
+      const rawMessageText = formatGroupEveningRoundup(group.subject, nightQuote);
+      const messageText = OutboundSender.sanitizeOutboundText(rawMessageText);
+
+      // Generate or reuse high-definition evening reflection card
+      const imagePath = await getOrGenerateQuoteMedia(
+        `evening_${group.id.slice(0, 10)}_${Date.now()}`,
+        nightQuote.quote_text,
+        nightQuote.author,
+        'evening_reflection',
+        null
+      );
+
+      const hasImage = Boolean(imagePath && fs.existsSync(imagePath));
+      if (hasImage) {
+        await socket.sendMessage(group.id, {
+          image: fs.readFileSync(imagePath),
+          caption: messageText,
+        });
+      } else {
+        await socket.sendMessage(group.id, { text: messageText });
+      }
+
+      chatLogger.logOutboundMessage(group.id, messageText);
+      deliveredGroups.push(group.subject);
+
+      console.log(`[ChannelQuotes] 🌙 Delivered evening roundup to "${group.subject}": "${nightQuote.quote_text.slice(0, 30)}..."`);
+      logAutonomousAction('evening_group_roundup', group.id, group.subject, `Delivered evening roundup & night reflection`);
+
+      if (i < targetGroups.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, interGroupPauseMs));
+      }
+    } catch (err: any) {
+      console.error(`[ChannelQuotes] ❌ Failed evening roundup to group "${group.subject}":`, err.message);
+    }
+  }
+
+  console.log(
+    `[ChannelQuotes] 🏁 Evening group roundup finished. Delivered to ${deliveredGroups.length}/${targetGroups.length} groups.`
+  );
+  return { groupsContacted: deliveredGroups.length, deliveredGroups };
+}
+
