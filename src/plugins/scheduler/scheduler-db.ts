@@ -170,15 +170,22 @@ export function advanceToNextDay(
 }
 
 /**
+ * Returns UTC timestamp for start of today (00:00:00) in Nigeria / WAT.
+ */
+export function getStartOfTodayWat(timeZone: string = process.env.BOT_TIMEZONE || 'Africa/Lagos'): number {
+  const now = new Date();
+  const nowParts = getTimeZoneParts(now, timeZone);
+  return getTargetUtcTimestamp(nowParts.year, nowParts.month, nowParts.day, 0, 0, timeZone);
+}
+
+/**
  * Checks if a specific daily task has already successfully fired/posted today in Nigeria / Africa/Lagos.
  */
 export function hasFiredToday(
   topic: string,
   timeZone: string = process.env.BOT_TIMEZONE || 'Africa/Lagos'
 ): boolean {
-  const now = new Date();
-  const nowParts = getTimeZoneParts(now, timeZone);
-  const startOfDayUtc = getTargetUtcTimestamp(nowParts.year, nowParts.month, nowParts.day, 0, 0, timeZone);
+  const startOfDayUtc = getStartOfTodayWat(timeZone);
 
   try {
     if (topic === 'morning_status_post') {
@@ -193,7 +200,7 @@ export function hasFiredToday(
     if (topic === 'morning_group_motivation') {
       const row = db
         .prepare(
-          `SELECT COUNT(*) as count FROM chat_logs WHERE (message_text LIKE '%Morning Charge%' OR message_text LIKE '%🌅 Good Morning%') AND timestamp >= ?`
+          `SELECT COUNT(*) as count FROM chat_logs WHERE sender_jid = 'bot' AND (message_text LIKE '%Morning Charge%' OR message_text LIKE '%GOOD MORNING%' OR message_text LIKE '%Words of the Day%') AND timestamp >= ?`
         )
         .get(startOfDayUtc) as { count: number } | undefined;
       return (row?.count || 0) > 0;

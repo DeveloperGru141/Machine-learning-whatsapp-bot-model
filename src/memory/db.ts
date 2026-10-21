@@ -608,7 +608,7 @@ export function upsertKnownGroup(groupJid: string, subject: string, memberCount:
   }
 }
 
-export function getAllKnownGroups(limit = 15): KnownGroup[] {
+export function getAllKnownGroups(limit = 50): KnownGroup[] {
   try {
     return db.prepare(`
       SELECT group_jid, subject, member_count, is_admin, updated_at

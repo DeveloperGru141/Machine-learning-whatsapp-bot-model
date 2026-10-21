@@ -46,19 +46,61 @@ export class OutboundSender {
   }
 
   /**
-   * Linked IDs (@lid) and messages with @lid remoteJid/participant do NOT support stanza quoting
-   * in WhatsApp multi-device. Passing quoted causes WhatsApp server to terminate the connection (428 Connection Terminated).
+   * Linked IDs (@lid) and messages with @lid remoteJid do NOT support stanza quoting
+   * in WhatsApp multi-device 1-on-1 direct chats. In group chats (@g.us), multi-device handles
+   * participant quoting natively.
    */
   private static sanitizeQuoted(chatJid: string, quoted?: proto.IWebMessageInfo): proto.IWebMessageInfo | undefined {
     if (!quoted) return undefined;
     if (
       chatJid.endsWith('@lid') ||
-      quoted.key?.remoteJid?.endsWith('@lid') ||
-      quoted.key?.participant?.endsWith('@lid')
+      quoted.key?.remoteJid?.endsWith('@lid')
     ) {
       return undefined;
     }
     return quoted;
+  }
+
+  /**
+   * Central Outbound Guardrail: Sanitizes all outbound text and media captions against:
+   * 1. WhatsApp internal IDs (WID/wa.id/JID/LID/groups/newsletters)
+   * 2. Raw 14-16 digit numbers or @lid mentions
+   * 3. Leaked sticker text, filenames (STK-...), and bracket markdown [Sticker...]
+   * 4. Auto-attributed creator phone numbers
+   */
+  public static sanitizeOutboundText(text: string): string {
+    if (!text) return '';
+    let cleaned = text;
+
+    // 1. Scrub internal WhatsApp JIDs and domains
+    cleaned = cleaned
+      .replace(/\b[a-zA-Z0-9._%+-]+@(?:s\.whatsapp\.net|lid|g\.us|broadcast|newsletter)\b/gi, '')
+      .replace(/(?:https?:\/\/)?(?:wa\.me|wa\.id)\/[+\d]+/gi, '')
+      .replace(/\(?\b(?:wa\.id|wa_id|wid|jid|lid)[:=\s]*\+?\d+\)?/gi, '')
+      .replace(/\b(?:wa\.id|wa_id|wid)\b/gi, '');
+
+    // 2. Scrub raw WhatsApp LIDs (14-16 digits)
+    cleaned = cleaned
+      .replace(/@\d{14,16}\b/g, 'my guy')
+      .replace(/\b\d{14,16}\b/g, '')
+      .replace(/\b\d{7,13}@(?:s\.whatsapp\.net|lid)\b/gi, '');
+
+    // 3. Scrub leaked internal sticker text / filenames / markdown
+    cleaned = cleaned
+      .replace(/\[(?:Sticker Reply|Auto-Sticker|Sticker)[^\]]*\](?:\s*\([^)]*\))?/gi, '')
+      .replace(/\[?STK-\d{8}-WA\d+\.webp\]?/gi, '')
+      .replace(/!\[[^\]]*\]\([^)]+\)/gi, '')
+      .replace(/\[[^\]]*\.webp\]/gi, '');
+
+    // 4. Scrub auto-attributed creator phone numbers
+    cleaned = cleaned
+      .replace(/\s*\(\+?2348108574293\)/g, '')
+      .replace(/\s*\(08108574293\)/g, '')
+      .replace(/\s*—\s*Sent on behalf of Ademola(?:\s*\(08108574293\))?\s*(?:via Forgelabs)?/gi, '');
+
+    // 5. Clean empty parentheses and normalize spacing
+    cleaned = cleaned.replace(/\(\s*\)/g, '').replace(/[ \t]+/g, ' ').trim();
+    return cleaned;
   }
 
   public static async replyText(
@@ -72,30 +114,36 @@ export class OutboundSender {
   ): Promise<any> {
     if (!this.checkSafety(chatJid, quoted, isOwnerCommand, isProactiveCheckIn)) return null;
 
+    const cleanText = this.sanitizeOutboundText(text);
+    if (!cleanText || !cleanText.trim()) {
+      console.warn(`[OutboundSender] 🛡️ Suppressed empty or fully redacted message to ${chatJid}`);
+      return null;
+    }
+
     const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
 
     return antiBanEngine.scheduleDispatch(chatJid, async () => {
       let currentSock = sock || activeSocketGetter?.();
       try {
-        const payload: any = { text };
+        const payload: any = { text: cleanText };
         if (mentions && mentions.length > 0) {
           payload.mentions = mentions;
         }
         const result = await currentSock.sendMessage(chatJid, payload, { quoted: safeQuoted });
         this.recordDispatchedId(result?.key?.id);
-        chatLogger.logOutboundMessage(chatJid, text);
+        chatLogger.logOutboundMessage(chatJid, cleanText);
         return result;
       } catch (err: any) {
         if (safeQuoted) {
           console.warn(`[OutboundSender] Reply with quoted failed (${err.message}), retrying direct text...`);
           try {
-            const payload: any = { text };
+            const payload: any = { text: cleanText };
             if (mentions && mentions.length > 0) {
               payload.mentions = mentions;
             }
             const result = await currentSock.sendMessage(chatJid, payload);
             this.recordDispatchedId(result?.key?.id);
-            chatLogger.logOutboundMessage(chatJid, text);
+            chatLogger.logOutboundMessage(chatJid, cleanText);
             return result;
           } catch (innerErr: any) {
             err = innerErr;
@@ -115,8 +163,8 @@ export class OutboundSender {
           const freshSock = activeSocketGetter();
           if (freshSock && (freshSock as any).ws?.isOpen) {
             console.log(`[OutboundSender] 🔄 Retrying outbound to ${chatJid} via fresh reconnected socket...`);
-            const retryResult = await freshSock.sendMessage(chatJid, { text });
-            chatLogger.logOutboundMessage(chatJid, text);
+            const retryResult = await freshSock.sendMessage(chatJid, { text: cleanText });
+            chatLogger.logOutboundMessage(chatJid, cleanText);
             return retryResult;
           }
         }
@@ -129,7 +177,8 @@ export class OutboundSender {
     sock: WASocket,
     chatJid: string,
     bufferOrPath: Buffer | string,
-    quoted?: proto.IWebMessageInfo
+    quoted?: proto.IWebMessageInfo,
+    mentions?: string[]
   ): Promise<any> {
     if (!this.checkSafety(chatJid, quoted)) return null;
 
@@ -144,18 +193,22 @@ export class OutboundSender {
         console.warn(`[OutboundSender] No active socket to send sticker to ${chatJid}`);
         return null;
       }
+      const payload: any = { sticker: buffer };
+      if (mentions && mentions.length > 0) {
+        payload.mentions = mentions;
+      }
       try {
         const res = await currentSock.sendMessage(
           chatJid,
-          { sticker: buffer },
+          payload,
           safeQuoted ? { quoted: safeQuoted } : undefined
         );
         this.recordDispatchedId(res?.key?.id);
         return res;
       } catch (err: any) {
-        console.warn(`[OutboundSender] sendSticker with quoted failed (${err.message}), retrying directly...`);
+        console.warn(`[OutboundSender] sendSticker with quoted failed (${err.message}), retrying directly with mentions...`);
         try {
-          const res = await currentSock.sendMessage(chatJid, { sticker: buffer });
+          const res = await currentSock.sendMessage(chatJid, payload);
           this.recordDispatchedId(res?.key?.id);
           return res;
         } catch (retryErr: any) {
@@ -179,12 +232,13 @@ export class OutboundSender {
     const content = Buffer.isBuffer(bufferOrUrl)
       ? bufferOrUrl
       : { url: bufferOrUrl };
+    const cleanCaption = caption ? this.sanitizeOutboundText(caption) : undefined;
 
     return antiBanEngine.scheduleDispatch(chatJid, async () => {
       try {
         const res = await sock.sendMessage(
           chatJid,
-          { image: content, caption },
+          { image: content, caption: cleanCaption },
           { quoted: safeQuoted }
         );
         this.recordDispatchedId(res?.key?.id);
@@ -192,7 +246,7 @@ export class OutboundSender {
       } catch (err: any) {
         if (safeQuoted) {
           console.warn(`[OutboundSender] sendImage with quoted failed (${err.message}), retrying directly...`);
-          const res = await sock.sendMessage(chatJid, { image: content, caption });
+          const res = await sock.sendMessage(chatJid, { image: content, caption: cleanCaption });
           this.recordDispatchedId(res?.key?.id);
           return res;
         }
@@ -269,6 +323,7 @@ export class OutboundSender {
     const content = Buffer.isBuffer(bufferOrUrl)
       ? bufferOrUrl
       : { url: bufferOrUrl };
+    const cleanCaption = caption ? this.sanitizeOutboundText(caption) : undefined;
 
     return antiBanEngine.scheduleDispatch(chatJid, async () => {
       try {
@@ -276,7 +331,7 @@ export class OutboundSender {
           chatJid,
           {
             video: content,
-            caption,
+            caption: cleanCaption,
             mimetype: 'video/mp4',
           },
           { quoted: safeQuoted }
@@ -286,7 +341,7 @@ export class OutboundSender {
           console.warn(`[OutboundSender] sendVideo with quoted failed (${err.message}), retrying directly...`);
           return await sock.sendMessage(chatJid, {
             video: content,
-            caption,
+            caption: cleanCaption,
             mimetype: 'video/mp4',
           });
         }

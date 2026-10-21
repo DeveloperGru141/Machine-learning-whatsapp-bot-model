@@ -170,7 +170,24 @@ export class ContextManager {
               row.sender_jid.startsWith('271614570692796') ||
               (config.bot.pairingPhoneNumber && row.sender_jid.startsWith(config.bot.pairingPhoneNumber))));
         const role = isBot ? 'assistant' : 'user';
-        let body = row.message_text ? row.message_text.trim() : `[${row.content_type}]`;
+        let body = row.message_text ? row.message_text.trim() : '';
+
+        // If it's a sticker or bracketed sticker text, format cleanly so LLM never sees internal filenames or markdown
+        if (
+          row.content_type === 'sticker' ||
+          /\[(?:Sticker|Auto-Sticker|STK-)[^\]]*\]/i.test(body) ||
+          /STK-\d{8}-WA\d+\.webp/i.test(body)
+        ) {
+          body = '[Sent a sticker]';
+        } else if (!body) {
+          body = `[${row.content_type}]`;
+        }
+
+        // Defense-in-depth: Strip any residual raw WIDs/LIDs from history before feeding to LLM
+        body = body
+          .replace(/\b[a-zA-Z0-9._%+-]+@(?:s\.whatsapp\.net|lid|g\.us)\b/gi, '')
+          .replace(/@\d{14,16}\b/g, 'my guy')
+          .replace(/\b\d{14,16}\b/g, '');
 
         // If it's a bot message, don't prefix with sender name, just output the message body
         // If it's a user message, resolve friendly name (e.g. Hardez instead of decorative unicode)

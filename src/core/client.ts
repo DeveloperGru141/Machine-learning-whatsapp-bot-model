@@ -1281,8 +1281,14 @@ export class WhatsAppClient {
         }
         return res;
       },
-      sendSticker: async (bufferOrPath: Buffer | string) =>
-        OutboundSender.sendSticker(sock, normalized.chatJid, bufferOrPath, msg),
+      sendSticker: async (bufferOrPath: Buffer | string, mentions?: string[]) =>
+        OutboundSender.sendSticker(
+          sock,
+          normalized.chatJid,
+          bufferOrPath,
+          msg,
+          mentions || (normalized.isGroup && normalized.senderJid ? [normalized.senderJid] : undefined)
+        ),
       sendImage: (bufferOrUrl: Buffer | string, caption?: string) =>
         OutboundSender.sendImage(sock, normalized.chatJid, bufferOrUrl, caption, msg),
       sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) =>
@@ -1314,8 +1320,9 @@ export class WhatsAppClient {
             if (match && fs.existsSync(match.absolutePath)) {
               setTimeout(async () => {
                 try {
-                  await OutboundSender.sendSticker(sock, normalized.chatJid, match.absolutePath, msg);
-                  chatLogger.logOutboundMessage(normalized.chatJid, `[Auto-Sticker: ${match.filename}] (${match.vibe})`);
+                  const mentions = normalized.isGroup && normalized.senderJid ? [normalized.senderJid] : undefined;
+                  await OutboundSender.sendSticker(sock, normalized.chatJid, match.absolutePath, msg, mentions);
+                  chatLogger.logOutboundSticker(normalized.chatJid, match.filename, match.vibe);
                 } catch {}
               }, 1200);
             }
@@ -1443,9 +1450,10 @@ export class WhatsAppClient {
         // Anti-ban realistic human reading/reaction presence delay
         await antiBanEngine.simulateReadingDelay(15, normalized.isGroup);
 
-        await OutboundSender.sendSticker(this.sock, normalized.chatJid, match.absolutePath, msg);
-        chatLogger.logOutboundMessage(normalized.chatJid, `[Sticker Reply: ${match.filename}] (${match.vibe})`);
-        console.log(`[StickerEngine] 🎨 Replied to sticker with matching vibe "${match.vibe}" sticker: ${match.filename}`);
+        const mentions = normalized.isGroup && normalized.senderJid ? [normalized.senderJid] : undefined;
+        await OutboundSender.sendSticker(this.sock, normalized.chatJid, match.absolutePath, msg, mentions);
+        chatLogger.logOutboundSticker(normalized.chatJid, match.filename, match.vibe);
+        console.log(`[StickerEngine] 🎨 Replied to sticker with matching vibe "${match.vibe}" sticker: ${match.filename} (tagged: ${normalized.senderName})`);
       }
     } catch (err: any) {
       console.error('[StickerEngine] Error replying to incoming sticker:', err.message);

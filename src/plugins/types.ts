@@ -8,7 +8,7 @@ export interface ExecutionContext {
   isGroup: boolean;
   rawMessage?: proto.IWebMessageInfo;
   replyText: (text: string) => Promise<any>;
-  sendSticker?: (bufferOrPath: Buffer | string) => Promise<any>;
+  sendSticker?: (bufferOrPath: Buffer | string, mentions?: string[]) => Promise<any>;
   sendImage: (bufferOrUrl: Buffer | string, caption?: string) => Promise<any>;
   sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) => Promise<any>;
   sendVideo: (bufferOrUrl: Buffer | string, caption?: string) => Promise<any>;

@@ -77,6 +77,25 @@ export class ChatLogger {
     }
   }
 
+  public logOutboundSticker(chatJid: string, filename: string, vibe?: string): void {
+    try {
+      this.insertLogStmt.run(
+        chatJid,
+        'bot',
+        config.bot.name,
+        chatJid.endsWith('@g.us') ? 1 : 0,
+        'sticker',
+        null, // Keep message_text null so LLM context never sees internal bracket text or markdown
+        filename,
+        0,
+        Date.now(),
+        null
+      );
+    } catch (err) {
+      console.error('Failed to log outbound sticker:', err);
+    }
+  }
+
   public getLastMessage(chatJid: string, senderJid?: string): { message_id: string; sender_jid: string; message_text: string } | null {
     try {
       if (senderJid) {

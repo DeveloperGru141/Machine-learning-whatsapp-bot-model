@@ -17,6 +17,8 @@ import {
 import { chatLogger } from '../../memory/chat-logger.js';
 import { llmClient } from '../../agent/llm-client.js';
 import { getOrGenerateQuoteMedia } from './media-card-generator.js';
+import { getStartOfTodayWat } from './scheduler-db.js';
+import { OutboundSender } from '../../core/sender.js';
 
 export const WHATSAPP_CHANNEL_INVITE_CODE = '0029Vb7S3VAFCCoXEIdW5n2k';
 export const WHATSAPP_CHANNEL_URL = 'https://whatsapp.com/channel/0029Vb7S3VAFCCoXEIdW5n2k';
@@ -433,7 +435,7 @@ export async function broadcastMorningGroupMotivation(
     const groupMap = new Map<string, string>();
 
     // 1. Local database known groups
-    const dbGroups = getAllKnownGroups(30);
+    const dbGroups = getAllKnownGroups(50);
     for (const g of dbGroups) {
       if (g.group_jid && g.subject) {
         groupMap.set(g.group_jid, g.subject);
@@ -458,20 +460,6 @@ export async function broadcastMorningGroupMotivation(
     targetGroups = Array.from(groupMap.entries()).map(([id, subject]) => ({ id, subject }));
   }
 
-  // Deduplicate groups by normalized subject so groups with multiple community links are only messaged once
-  const seenSubjects = new Set<string>();
-  const uniqueGroups: Array<{ id: string; subject: string }> = [];
-  for (const g of targetGroups) {
-    const clean = g.subject.trim().toLowerCase();
-    if (seenSubjects.has(clean)) {
-      console.log(`[ChannelQuotes] ⏭️ Skipping duplicate group with identical subject: "${g.subject}" (${g.id})`);
-      continue;
-    }
-    seenSubjects.add(clean);
-    uniqueGroups.push(g);
-  }
-  targetGroups = uniqueGroups;
-
   if (targetGroups.length === 0) {
     console.log('[ChannelQuotes] ⚠️ No participating groups found to broadcast morning motivation.');
     return { groupsContacted: 0, deliveredGroups: [] };
@@ -486,16 +474,25 @@ export async function broadcastMorningGroupMotivation(
   for (let i = 0; i < targetGroups.length; i++) {
     const group = targetGroups[i];
     try {
-      // Per-group 18-hour anti-spam guard: Never send more than 1 morning greeting per day to any group
+      // Per-group daily anti-spam guard: Never send more than 1 morning greeting per calendar day to any group
+      const startOfTodayWat = getStartOfTodayWat();
       const recentSend = db.prepare(`
         SELECT COUNT(*) as count FROM chat_logs 
         WHERE chat_jid = ? 
+          AND sender_jid = 'bot'
           AND (message_text LIKE '%GOOD MORNING%' OR message_text LIKE '%Words of the Day%' OR message_text LIKE '%Today''s Charge%')
-          AND timestamp > ?
-      `).get(group.id, Date.now() - 18 * 60 * 60 * 1000) as { count: number } | undefined;
+          AND timestamp >= ?
+      `).get(group.id, startOfTodayWat) as { count: number } | undefined;
 
-      if (recentSend && recentSend.count > 0) {
-        console.log(`[ChannelQuotes] ⏭️ Skipping group "${group.subject}" - morning motivation already sent within last 18 hours.`);
+      const recentAutonomous = db.prepare(`
+        SELECT COUNT(*) as count FROM autonomous_actions
+        WHERE action_type = 'morning_group_motivation'
+          AND target_chat = ?
+          AND timestamp >= ?
+      `).get(group.id, startOfTodayWat) as { count: number } | undefined;
+
+      if ((recentSend && recentSend.count > 0) || (recentAutonomous && recentAutonomous.count > 0)) {
+        console.log(`[ChannelQuotes] ⏭️ Skipping group "${group.subject}" (${group.id}) - morning motivation already sent today.`);
         continue;
       }
 
@@ -509,8 +506,9 @@ export async function broadcastMorningGroupMotivation(
         continue;
       }
 
-      // 3. Format warm greeting + quote
-      const messageText = await formatGroupMorningMotivation(group.subject, niche, quote);
+      // 3. Format warm greeting + quote & sanitize against any leaks
+      const rawMessageText = await formatGroupMorningMotivation(group.subject, niche, quote);
+      const messageText = OutboundSender.sanitizeOutboundText(rawMessageText);
 
       // 4. Send message to group (with guaranteed HD accompanying image card)
       const imagePath = await getOrGenerateQuoteMedia(quote.id, quote.quote_text, quote.author, quote.niche, quote.image_path);

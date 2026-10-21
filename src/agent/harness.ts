@@ -772,10 +772,17 @@ export function sanitizeAssistantResponse(text: string): string {
     .replace(/(?:https?:\/\/)?(?:wa\.me|wa\.id)\/[+\d]+/gi, '')
     .replace(/\(?\b(?:wa\.id|wa_id|wid|jid|lid)[:=\s]*\+?\d+\)?/gi, '')
     .replace(/\b(?:wa\.id|wa_id|wid)\b/gi, '')
-    .replace(/\b[a-zA-Z0-9._%+-]+@(?:s\.whatsapp\.net|lid|g\.us|broadcast)\b/gi, '')
-    .replace(/@10\d{12,14}\b/g, 'my guy')
-    .replace(/\b10\d{12,14}\b/g, '')
-    .replace(/@\d{14,16}\b/g, '');
+    .replace(/\b[a-zA-Z0-9._%+-]+@(?:s\.whatsapp\.net|lid|g\.us|broadcast|newsletter)\b/gi, '')
+    .replace(/@\d{14,16}\b/g, 'my guy')
+    .replace(/\b\d{14,16}\b/g, '')
+    .replace(/\b\d{7,13}@(?:s\.whatsapp\.net|lid)\b/gi, '');
+
+  // Strip leaked sticker text, internal filenames, and markdown image syntax
+  cleaned = cleaned
+    .replace(/\[(?:Sticker Reply|Auto-Sticker|Sticker)[^\]]*\](?:\s*\([^)]*\))?/gi, '')
+    .replace(/\[?STK-\d{8}-WA\d+\.webp\]?/gi, '')
+    .replace(/!\[[^\]]*\]\([^)]+\)/gi, '')
+    .replace(/\[[^\]]*\.webp\]/gi, '');
 
   // Privacy Guardrail: Never append creator Ademola's phone number or attribute creator on outbound messages
   cleaned = cleaned

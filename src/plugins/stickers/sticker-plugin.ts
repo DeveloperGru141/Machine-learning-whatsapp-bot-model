@@ -54,18 +54,19 @@ export class StickerPlugin implements IPlugin {
             return { success: false, message: 'Could not find a matching sticker for this mood.' };
           }
 
+          const mentions = ctx.isGroup && ctx.senderJid ? [ctx.senderJid] : undefined;
           if (ctx.sendSticker) {
-            await ctx.sendSticker(match.absolutePath);
+            await ctx.sendSticker(match.absolutePath, mentions);
           } else if (ctx.sock) {
-            await OutboundSender.sendSticker(ctx.sock, ctx.chatJid, match.absolutePath, ctx.rawMessage);
+            await OutboundSender.sendSticker(ctx.sock, ctx.chatJid, match.absolutePath, ctx.rawMessage, mentions);
           }
 
-          chatLogger.logOutboundMessage(ctx.chatJid, `[Sticker: ${match.filename}] (${match.vibe})`);
+          chatLogger.logOutboundSticker(ctx.chatJid, match.filename, match.vibe);
 
           return {
             success: true,
-            message: `Sent sticker [${match.filename}] matching the vibe "${match.vibe}"!`,
-            data: { filename: match.filename, vibe: match.vibe },
+            message: `Sent a sticker matching the "${match.vibe}" vibe!`,
+            data: { vibe: match.vibe },
           };
         } catch (err: any) {
           return { success: false, message: `Failed to send sticker: ${err.message}` };

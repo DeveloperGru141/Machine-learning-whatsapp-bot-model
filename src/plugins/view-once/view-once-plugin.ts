@@ -36,10 +36,12 @@ export async function deliverViewOnceMediaToOwner(
 
   const fileBuffer = fs.readFileSync(record.file_path);
   const timeStr = new Date(record.timestamp).toLocaleString('en-US', { timeZone: 'Africa/Lagos' });
+  const senderDisplay = record.sender_name || 'Contact';
+  const chatDisplay = record.chat_name || (record.is_group ? 'Group Chat' : 'Direct Message');
   const caption =
     `👁️ *VIEW-ONCE MEDIA RECOVERED*\n` +
-    `👤 *From:* ${record.sender_name || 'Unknown'} (${record.sender_jid.split('@')[0]})\n` +
-    `📍 *Origin:* ${record.chat_name || (record.is_group ? 'Group Chat' : 'Direct Message')}\n` +
+    `👤 *From:* ${senderDisplay}\n` +
+    `📍 *Origin:* ${chatDisplay}\n` +
     `📅 *Captured At:* ${timeStr} WAT\n` +
     `📦 *Media:* ${record.media_type.toUpperCase()} (${Math.round(record.file_size / 1024)} KB)\n` +
     (record.caption ? `💬 *Original Caption:* ${record.caption}\n` : '') +
@@ -144,8 +146,8 @@ const retrieveViewOnceTool: BotTool = {
         data: {
           delivered: true,
           messageId: selected.message_id,
-          sender: selected.sender_name || selected.sender_jid,
-          chat: selected.chat_name || selected.chat_jid,
+          sender: selected.sender_name || 'Contact',
+          chat: selected.chat_name || (selected.is_group ? 'Group Chat' : 'Direct Message'),
           mediaType: selected.media_type,
           timestamp: new Date(selected.timestamp).toISOString(),
           totalAvailable: records.length,
@@ -211,8 +213,8 @@ const listViewOnceTool: BotTool = {
     const list = records.map((r, idx) => ({
       index: idx + 1,
       id: r.id,
-      sender: `${r.sender_name || 'Unknown'} (${r.sender_jid.split('@')[0]})`,
-      chat: r.chat_name || (r.is_group ? 'Group' : 'DM'),
+      sender: r.sender_name || 'Contact',
+      chat: r.chat_name || (r.is_group ? 'Group Chat' : 'Direct Message'),
       mediaType: r.media_type,
       sizeKB: Math.round(r.file_size / 1024),
       time: new Date(r.timestamp).toLocaleString('en-US', { timeZone: 'Africa/Lagos' }),

@@ -27,9 +27,11 @@ export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boo
     : activeContact?.custom_name ||
       contactService.extractFriendlyFirstName(activeContact?.display_name) ||
       'Friend';
-  const senderPhone = isOwner
+  const rawPhone = isOwner
     ? '08108574293 / +2348108574293'
     : activeContact?.phone_number || contactService.extractPhoneNumber(userJid);
+  const isLidNumber = rawPhone ? rawPhone.replace(/[^0-9]/g, '').length > 13 : false;
+  const senderPhone = isLidNumber ? '' : rawPhone;
 
   // Compact key contacts (STRICT PRIVACY: ONLY inject into prompt if the user speaking is OWNER ADEMOLA!)
   let savedContactsList = '';
@@ -100,7 +102,14 @@ export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boo
           const contact = contactService.getContact(log.chat_jid);
           chatLabel = isUserOwner ? 'DM with Ademola (Creator & Owner)' : `DM with ${contact?.custom_name || contactService.extractFriendlyFirstName(contact?.display_name) || 'Contact'}`;
         }
-        const snippet = log.message_text.replace(/\n+/g, ' ').slice(0, 90);
+        let snippet = log.message_text.replace(/\n+/g, ' ').slice(0, 90);
+        if (/\[(?:Sticker|Auto-Sticker|STK-)[^\]]*\]/i.test(snippet) || /STK-\d{8}-WA\d+\.webp/i.test(snippet)) {
+          snippet = '[Sent a sticker]';
+        }
+        snippet = snippet
+          .replace(/\b[a-zA-Z0-9._%+-]+@(?:s\.whatsapp\.net|lid|g\.us)\b/gi, '')
+          .replace(/@\d{14,16}\b/g, 'my guy')
+          .replace(/\b\d{14,16}\b/g, '');
         entries.push(`- ${chatLabel} (${timeStr}): "${snippet}"`);
         if (entries.length >= 5) break;
       }
@@ -115,7 +124,7 @@ export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boo
   let earlierChatFlowSection = '';
   try {
     const earlierRows = db.prepare(`
-      SELECT sender_name, sender_jid, message_text, timestamp
+      SELECT sender_name, sender_jid, content_type, message_text, timestamp
       FROM chat_logs
       WHERE chat_jid = ? AND message_text IS NOT NULL
         AND message_text NOT LIKE 'network slow small%'
@@ -124,6 +133,7 @@ export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boo
     `).all(chatJid) as Array<{
       sender_name: string | null;
       sender_jid: string;
+      content_type: string;
       message_text: string;
       timestamp: number;
     }>;
@@ -146,7 +156,14 @@ export function buildSystemPrompt(userJid: string, chatJid: string, isGroup: boo
               r.sender_name ||
               'Member';
         }
-        const snippet = r.message_text.replace(/\n+/g, ' ').slice(0, 140);
+        let snippet = r.message_text.replace(/\n+/g, ' ').slice(0, 140);
+        if (r.content_type === 'sticker' || /\[(?:Sticker|Auto-Sticker|STK-)[^\]]*\]/i.test(snippet) || /STK-\d{8}-WA\d+\.webp/i.test(snippet)) {
+          snippet = '[Sent a sticker]';
+        }
+        snippet = snippet
+          .replace(/\b[a-zA-Z0-9._%+-]+@(?:s\.whatsapp\.net|lid|g\.us)\b/gi, '')
+          .replace(/@\d{14,16}\b/g, 'my guy')
+          .replace(/\b\d{14,16}\b/g, '');
         lines.push(`- [${speaker}] (${timeAgo}): "${snippet}"`);
       }
 
