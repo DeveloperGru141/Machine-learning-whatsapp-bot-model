@@ -6,7 +6,7 @@ dotenv.config({ override: true });
 
 const envSchema = z.object({
   LLM_PROVIDER: z.enum(['gemini', 'openrouter', 'groq']).default('gemini'),
-  GEMINI_MODEL: z.string().default('gemini-3.5-flash-lite'),
+  GEMINI_MODEL: z.string().default('gemini-flash-latest'),
   OPENROUTER_API_KEY: z.string().optional(),
   OPENROUTER_MODEL: z.string().default('deepseek/deepseek-chat'),
   OPENROUTER_TEMPERATURE: z.coerce.number().default(0.7),
@@ -108,7 +108,13 @@ export const config = {
   },
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',
-    model: process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
+    model: (() => {
+      const configured = (process.env.GEMINI_MODEL || 'gemini-flash-latest').trim();
+      if (configured.includes('3.5') || configured.includes('3.1') || configured.includes('2.5-flash-lite')) {
+        return 'gemini-flash-latest';
+      }
+      return configured;
+    })(),
   },
   huggingface: {
     apiKey: process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || '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',

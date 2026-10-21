@@ -135,7 +135,7 @@ const mockCtxAdmin = {
   // Test 6: LLM Client configuration
   console.log('▶ Test 6: Verify LLM Client Resilience Config...');
   assert.strictEqual(llmClient.getProvider(), 'gemini', 'LLM Provider should resolve to gemini');
-  assert.strictEqual(llmClient.getModel(), 'gemini-3.5-flash-lite', 'Model should be gemini-3.5-flash-lite');
+  assert.strictEqual(llmClient.getModel(), 'gemini-flash-latest', 'Model should be gemini-flash-latest');
   console.log('✅ Test 6 Passed: LLM provider and model configured correctly.\n');
 
   console.log('🎉 ALL 6 VERIFICATION TESTS PASSED SUCCESSFULLY! 🚀');

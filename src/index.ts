@@ -136,7 +136,54 @@ function startHealthServer() {
   healthServer = http.createServer(async (req, res) => {
     httpSecurityManager.applySecurityHeaders(res);
 
-    // Rate Limiting Protection (DoS & brute-force defense)
+    // 1. Instant Public Uptime & Health Check (NEVER rate-limited, NEVER blocked)
+    // Ensures Render health checks and uptime pingers always get immediate 200 OK
+    if (req.url === '/' || req.url?.startsWith('/health') || req.url?.startsWith('/status') || req.url === '/favicon.ico') {
+      if (req.url === '/favicon.ico') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      const report = healthMonitor.getHealthReport();
+      const auth = httpSecurityManager.verifyAdminAuth(req);
+
+      // Public health probe (for Render uptime checks and load balancer probes)
+      if (!auth.isAuthenticated) {
+        const publicPayload = JSON.stringify({
+          status: 'ok',
+          bot: config.bot.name,
+          whatsappConnected: whatsAppClient.isSocketOpen() || report.isConnected,
+          uptimeSeconds: report.uptime,
+          timestamp: new Date().toISOString(),
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(publicPayload);
+        return;
+      }
+
+      // Full diagnostic probe for authenticated admin
+      const payload = JSON.stringify({
+        status: 'ok',
+        bot: config.bot.name,
+        creator: config.bot.creator,
+        pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2347058967815'}`,
+        whatsappRegistered: whatsAppClient.isRegistered(),
+        whatsappConnected: whatsAppClient.isSocketOpen() || report.isConnected,
+        qr: whatsAppClient.getLatestQr(),
+        pairingCode: whatsAppClient.getLatestPairingCode(),
+        activeModel: llmClient.getModel(),
+        uptimeSeconds: report.uptime,
+        messagesHandled: report.messagesHandled,
+        errors: report.errors,
+        memoryMB: Math.round(report.memoryUsage.rss / 1024 / 1024),
+        timestamp: new Date().toISOString(),
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(payload);
+      return;
+    }
+
+    // 2. Rate Limiting Protection (DoS & brute-force defense on non-health endpoints)
     if (!httpSecurityManager.checkRateLimit(req)) {
       res.writeHead(429, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Too Many Requests: Rate limit exceeded. Try again in 60s.' }));
@@ -255,46 +302,6 @@ function startHealthServer() {
       }
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end(liveConsoleLogs.join('\n') || '[Server] No logs recorded yet.');
-      return;
-    }
-
-    if (req.url === '/' || req.url?.startsWith('/health') || req.url?.startsWith('/status')) {
-      const report = healthMonitor.getHealthReport();
-      const auth = httpSecurityManager.verifyAdminAuth(req);
-
-      // Public health probe (for Render uptime checks and load balancer probes)
-      if (!auth.isAuthenticated) {
-        const publicPayload = JSON.stringify({
-          status: 'ok',
-          bot: config.bot.name,
-          whatsappConnected: whatsAppClient.isSocketOpen() || report.isConnected,
-          uptimeSeconds: report.uptime,
-          timestamp: new Date().toISOString(),
-        });
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(publicPayload);
-        return;
-      }
-
-      // Full diagnostic probe for authenticated admin
-      const payload = JSON.stringify({
-        status: 'ok',
-        bot: config.bot.name,
-        creator: config.bot.creator,
-        pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2347058967815'}`,
-        whatsappRegistered: whatsAppClient.isRegistered(),
-        whatsappConnected: whatsAppClient.isSocketOpen() || report.isConnected,
-        qr: whatsAppClient.getLatestQr(),
-        pairingCode: whatsAppClient.getLatestPairingCode(),
-        activeModel: llmClient.getModel(),
-        uptimeSeconds: report.uptime,
-        messagesHandled: report.messagesHandled,
-        errors: report.errors,
-        memoryMB: Math.round(report.memoryUsage.rss / 1024 / 1024),
-        timestamp: new Date().toISOString(),
-      });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(payload);
       return;
     }
 

@@ -273,7 +273,7 @@ export class AgentHarness {
    * to ensure a single, consistent persona that strictly adheres to the learned exemplars and rules.
    */
   private async callLLM(params: any): Promise<any> {
-    const model = llmClient.getModel();
+    const model = params.model || llmClient.getModel();
     let lastErr: any;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
@@ -284,7 +284,7 @@ export class AgentHarness {
           `[AgentHarness] ⚠️ Model ${model} attempt ${attempt} failed: ${String(err?.message || err).slice(0, 160)}`
         );
         if (attempt < 2) {
-          await new Promise((r) => setTimeout(r, 1200));
+          await new Promise((r) => setTimeout(r, 600));
         }
       }
     }
@@ -557,16 +557,33 @@ Combine the live tool data in the user's last message with your own knowledge an
       try {
         console.log('[AgentHarness] Attempting fail-safe direct knowledge answer...');
         const fallbackSystem = `${messages[0]?.content || ''}\n\nTools are unavailable for this turn. Deliver a direct, crisp reply from your own knowledge without any <tool_call> tags.`;
-        const fallbackRes = await this.callLLM({
-          messages: [
-            { role: 'system', content: fallbackSystem },
-            { role: 'user', content: `${context.senderName}: ${userMessage}` },
-          ],
-          tools: undefined,
-          tool_choice: undefined,
-        });
+        
+        let fallbackRes: any;
+        try {
+          fallbackRes = await this.callLLM({
+            messages: [
+              { role: 'system', content: fallbackSystem },
+              { role: 'user', content: `${context.senderName}: ${userMessage}` },
+            ],
+            tools: undefined,
+            tool_choice: undefined,
+          });
+        } catch (callErr) {
+          if (config.groq.apiKey) {
+            console.log('[AgentHarness] Primary fallback failed, trying direct Groq fallback...');
+            fallbackRes = await llmClient.callGroqInternal({
+              messages: [
+                { role: 'system', content: fallbackSystem },
+                { role: 'user', content: `${context.senderName}: ${userMessage}` },
+              ],
+              model: 'qwen/qwen3.8-27b',
+            });
+          } else {
+            throw callErr;
+          }
+        }
 
-        const rawFallbackText = fallbackRes.choices[0]?.message?.content;
+        const rawFallbackText = fallbackRes?.choices?.[0]?.message?.content;
         if (rawFallbackText) {
           const extracted = extractInlineToolCalls(rawFallbackText);
           if (extracted.toolCalls.length > 0) {
@@ -598,6 +615,21 @@ Combine the live tool data in the user's last message with your own knowledge an
       } catch (fbErr: any) {
         console.error('[AgentHarness] Fallback also failed:', fbErr.message);
         try {
+          if (config.groq.apiKey) {
+            const emergencyPrompt = `You are a helpful assistant. Reply directly to this message in 1-2 friendly sentences: ${userMessage}`;
+            const quickRes = await llmClient.callGroqInternal({
+              messages: [{ role: 'user', content: emergencyPrompt }],
+              model: 'qwen/qwen3.8-27b',
+            });
+            const text = quickRes?.choices?.[0]?.message?.content;
+            if (text) {
+              const clean = sanitizeAssistantResponse(text);
+              if (clean) {
+                await context.replyText(clean);
+                return;
+              }
+            }
+          }
           const emergencyRecovery = "Network dey do one kind small abeg, but I dey here. Wetin you talk again?";
           await context.replyText(emergencyRecovery);
         } catch {}

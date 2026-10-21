@@ -83,7 +83,11 @@ export class LLMClient {
   public getModel(): string {
     const provider = this.getProvider();
     if (provider === 'gemini') {
-      return config.gemini.model;
+      const model = config.gemini.model;
+      if (!model || model.includes('3.5') || model.includes('3.1') || model.includes('2.5-flash-lite')) {
+        return 'gemini-flash-latest';
+      }
+      return model;
     }
     if (provider === 'openrouter') {
       return config.openrouter.model;
@@ -91,7 +95,11 @@ export class LLMClient {
     if (Date.now() < this.qwenQuotaExhaustedUntil) {
       return 'openai/gpt-oss-120b';
     }
-    return config.groq.model;
+    const groqModel = config.groq.model;
+    if (groqModel.includes('llama-3.3') || groqModel.includes('llama-3.1')) {
+      return 'qwen/qwen3.8-27b';
+    }
+    return groqModel;
   }
 
   public async callGeminiInternal(params: LLMChatParams): Promise<LLMChatResponse> {
@@ -101,10 +109,11 @@ export class LLMClient {
     }
 
     const candidateGeminiModels = [
-      params.model || config.gemini.model,
-      'gemini-3.5-flash-lite',
-      'gemini-3.1-flash-lite',
-    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
+      params.model || this.getModel(),
+      'gemini-flash-latest',
+      'gemini-3.8-flash',
+      'gemini-flash-lite-latest',
+    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx && !m.includes('3.5') && !m.includes('3.1') && !m.includes('2.5-flash-lite'));
 
     for (const model of candidateGeminiModels) {
       const payload: any = {
@@ -179,16 +188,15 @@ export class LLMClient {
         return await this.callGeminiInternal({ ...params, model: primaryModel });
       } catch (err: any) {
         if (config.groq.apiKey) {
-          console.log(`[LLMClient] 🔄 Falling back to Groq model: ${this.getModel()}`);
+          console.log(`[LLMClient] 🔄 Falling back to Groq model: qwen/qwen3.8-27b`);
           try {
-            return await this.callGroqInternal({ ...params, model: this.getModel() });
+            return await this.callGroqInternal({ ...params, model: 'qwen/qwen3.8-27b' });
           } catch (groqErr: any) {
             console.warn(`[LLMClient] Groq fallback failed (${groqErr?.message || groqErr})`);
           }
         }
-        // Final resilient attempt on gemini-3.5-flash-lite after short pause
-        await new Promise((r) => setTimeout(r, 1000));
-        return await this.callGeminiInternal({ ...params, model: 'gemini-3.5-flash-lite' });
+        // Final resilient attempt on gemini-flash-latest
+        return await this.callGeminiInternal({ ...params, model: 'gemini-flash-latest' });
       }
     } else if (provider === 'openrouter') {
       try {
@@ -228,12 +236,10 @@ export class LLMClient {
     const candidateModels = [
       configuredModel,
       'qwen/qwen3.8-27b',
-      'llama-3.3-70b-versatile',
       'openai/gpt-oss-120b',
-      'llama-3.1-8b-instant',
       'openai/gpt-oss-20b',
       'allam-2-7b',
-    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
+    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx && !m.includes('llama-3.3') && !m.includes('llama-3.1'));
 
     const buildPayload = (modelName: string) => {
       const payload: any = {

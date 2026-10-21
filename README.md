@@ -70,7 +70,7 @@ flowchart TD
 
 ### 2. Multi-Provider Intelligence & Resilience Layer
 Forgelabs Assistant uses an adaptive model hierarchy managed by `LLMClient` and `AgentHarness`:
-- **Primary Engine**: **Google Gemini** (`gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`) via OpenAI-compatible endpoints, providing ultra-fast inference and 1,500 requests-per-day free tier capacity.
+- **Primary Engine**: **Google Gemini** (`gemini-flash-latest`, `gemini-3.8-flash`) via OpenAI-compatible endpoints, providing ultra-fast inference and 1,500 requests-per-day free tier capacity.
 - **Autonomous Multi-Key Failover**:
   - If Gemini encounters minute quota rate-limiting (HTTP 429), the bot automatically fails over within milliseconds to a round-robin pool of **Groq** keys.
   - Models supported: `qwen/qwen3.8-27b`, `llama-3.3-70b-versatile`, `openai/gpt-oss-120b`, `llama-3.1-8b-instant`, and `allam-2-7b`.
@@ -239,7 +239,7 @@ whatsapp-modular-bot/
    # Primary LLM: Google Gemini
    LLM_PROVIDER="gemini"
    GEMINI_API_KEY="AIzaSy..."
-   GEMINI_MODEL="gemini-3.5-flash-lite"
+   GEMINI_MODEL="gemini-flash-latest"
 
    # Failover LLMs: Groq (supports comma-separated keys)
    GROQ_API_KEY="gsk_key1,gsk_key2"

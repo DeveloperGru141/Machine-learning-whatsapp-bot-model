@@ -13,7 +13,7 @@ export async function analyzeImageBuffer(
   // 1. Primary Engine: Gemini 3.5 Flash-Lite Vision (1,500 RPD quota) if GEMINI_API_KEY is available
   const geminiKey = config.gemini.apiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (geminiKey) {
-    const geminiVisionModels = ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-2.5-flash'];
+    const geminiVisionModels = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-flash-lite-latest'];
     for (const gemModel of geminiVisionModels) {
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${gemModel}:generateContent?key=${geminiKey}`;
@@ -121,7 +121,7 @@ Return ONLY the single category name in lowercase (e.g. "humor", "agreement", "s
 
   const geminiKey = config.gemini.apiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (geminiKey) {
-    const geminiVisionModels = ['gemini-3.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-2.5-flash'];
+    const geminiVisionModels = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-flash-lite-latest'];
     for (const gemModel of geminiVisionModels) {
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${gemModel}:generateContent?key=${geminiKey}`;
