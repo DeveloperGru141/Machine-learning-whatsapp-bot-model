@@ -65,10 +65,22 @@ export class HttpSecurityManager {
   }
 
   /**
-   * Records a failed authentication attempt and blocks IP if threshold exceeded
+   * Records a failed authentication attempt and blocks IP if threshold exceeded.
+   * Exempts local loopback and internal cloud cluster/proxy IP ranges (10.x, 172.16-31.x, 192.168.x).
    */
   public recordAuthFailure(req: IncomingMessage): void {
     const ip = this.getClientIp(req);
+    // Never block local loopback, internal cluster IPs, or Render proxy routers
+    if (
+      ip === '127.0.0.1' ||
+      ip === '::1' ||
+      ip.startsWith('10.') ||
+      ip.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip)
+    ) {
+      return;
+    }
+
     const now = Date.now();
     const current = this.failedAttempts.get(ip) || { count: 0, blockedUntil: 0 };
     current.count++;
@@ -85,8 +97,10 @@ export class HttpSecurityManager {
   /**
    * Verifies if the request contains valid admin credentials via Bearer token,
    * x-admin-key header, or URL parameter (?token= or ?key=).
+   * @param recordFailure Whether to count missing/invalid credentials toward IP blocking (default true).
+   *                      Set to false for public probes (like /health) to prevent blocking uptime pingers.
    */
-  public verifyAdminAuth(req: IncomingMessage): AuthCheckResult {
+  public verifyAdminAuth(req: IncomingMessage, recordFailure: boolean = true): AuthCheckResult {
     const adminKey = this.getAdminKey();
     if (!adminKey) {
       return { isAuthenticated: false, reason: 'No admin key configured on server' };
@@ -118,7 +132,9 @@ export class HttpSecurityManager {
       } catch {}
     }
 
-    this.recordAuthFailure(req);
+    if (recordFailure) {
+      this.recordAuthFailure(req);
+    }
     return { isAuthenticated: false, reason: 'Invalid or missing authentication credentials' };
   }
 

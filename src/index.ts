@@ -145,7 +145,7 @@ function startHealthServer() {
         return;
       }
       const report = healthMonitor.getHealthReport();
-      const auth = httpSecurityManager.verifyAdminAuth(req);
+      const auth = httpSecurityManager.verifyAdminAuth(req, false);
 
       // Public health probe (for Render uptime checks and load balancer probes)
       if (!auth.isAuthenticated) {
@@ -153,6 +153,7 @@ function startHealthServer() {
           status: 'ok',
           bot: config.bot.name,
           whatsappConnected: whatsAppClient.isSocketOpen() || report.isConnected,
+          whatsappRegistered: whatsAppClient.isRegistered(),
           uptimeSeconds: report.uptime,
           timestamp: new Date().toISOString(),
         });
@@ -183,32 +184,42 @@ function startHealthServer() {
       return;
     }
 
-    // 2. Rate Limiting Protection (DoS & brute-force defense on non-health endpoints)
-    if (!httpSecurityManager.checkRateLimit(req)) {
-      res.writeHead(429, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Too Many Requests: Rate limit exceeded. Try again in 60s.' }));
-      return;
-    }
-
+    // 2. WhatsApp Pairing & QR Endpoints (Never blocked by rate-limiting)
     if (req.url && (req.url.startsWith('/qr') || req.url.startsWith('/pair'))) {
       const registered = whatsAppClient.isRegistered();
-      // If not registered and ADMIN_API_KEY is configured, require authentication to view pairing code
-      if (!registered && process.env.ADMIN_API_KEY) {
-        const auth = httpSecurityManager.verifyAdminAuth(req);
-        if (!auth.isAuthenticated) {
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Unauthorized: Admin authentication token required to view pairing code' }));
-          return;
-        }
+
+      // On-demand refresh endpoint: /pair?refresh=1 or /qr?refresh=1
+      if (req.url.includes('refresh=1') || req.url.includes('new=1')) {
+        const freshCode = await whatsAppClient.requestFreshPairingCode(true);
+        const freshQr = whatsAppClient.getLatestQr();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            status: whatsAppClient.isRegistered() ? 'already_connected' : 'pairing_code_refreshed',
+            whatsappRegistered: whatsAppClient.isRegistered(),
+            pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2347058967815'}`,
+            pairingCode: freshCode,
+            qr: freshQr,
+          })
+        );
+        return;
       }
-      const qr = whatsAppClient.getLatestQr();
-      const pairingCode = whatsAppClient.getLatestPairingCode();
+
+      let qr = whatsAppClient.getLatestQr();
+      let pairingCode = whatsAppClient.getLatestPairingCode();
+
+      // Auto-generate fresh valid code on page load if none or expired
+      if (!registered && !pairingCode) {
+        pairingCode = await whatsAppClient.requestFreshPairingCode(false);
+        qr = whatsAppClient.getLatestQr();
+      }
 
       if (req.url.includes('json=1')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
             status: registered ? 'already_connected' : 'awaiting_qr_scan',
+            whatsappRegistered: registered,
             pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2347058967815'}`,
             pairingCode,
             qr,
@@ -230,7 +241,10 @@ function startHealthServer() {
     p { font-size: 14px; color: #8696a0; margin: 6px 0 18px; line-height: 1.5; }
     .qr-box { background: #ffffff; padding: 16px; border-radius: 12px; display: inline-block; min-width: 280px; min-height: 280px; }
     .qr-box img { width: 280px; height: 280px; display: block; }
-    .code-box { margin-top: 16px; padding: 12px 18px; background: #1f2c34; border: 1px solid #00a884; border-radius: 10px; font-size: 22px; font-weight: 800; letter-spacing: 3px; color: #00a884; }
+    .code-box { margin-top: 16px; padding: 12px 18px; background: #1f2c34; border: 1px solid #00a884; border-radius: 10px; font-size: 22px; font-weight: 800; letter-spacing: 3px; color: #00a884; display: flex; align-items: center; justify-content: center; gap: 10px; }
+    .btn { padding: 8px 14px; background: #202c33; color: #00a884; border: 1px solid #00a884; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+    .btn:hover { background: #00a884; color: #111b21; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .badge { display: inline-block; padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; margin-top: 18px; background: #1f2c34; color: #00a884; }
     .steps { text-align: left; font-size: 13px; color: #d1d7db; margin-top: 20px; background: #1f2c34; padding: 14px 18px; border-radius: 10px; line-height: 1.7; }
   </style>
@@ -248,10 +262,14 @@ function startHealthServer() {
           : '<div style="color:#111b21;padding:110px 20px;font-weight:600;">Generating fresh QR code...</div>'
       }
     </div>
-    <div id="code-container" class="code-box" style="${registered || !pairingCode ? 'display:none;' : ''}">
-      CODE: <span id="pair-code-text">${pairingCode || 'ADEM1234'}</span>
+    <div id="code-container" class="code-box" style="${registered ? 'display:none;' : ''}">
+      <span>CODE: <b id="pair-code-text">${pairingCode || 'Loading...'}</b></span>
+      <button id="copy-btn" class="btn" onclick="copyPairCode()">📋 Copy</button>
     </div>
-    <div><span id="status-badge" class="badge">${registered ? '🟢 Connected' : '⏳ Waiting for Link (Auto-refreshes live)'}</span></div>
+    <div id="action-bar" style="margin-top:12px;${registered ? 'display:none;' : ''}">
+      <button id="refresh-btn" class="btn" onclick="requestNewCode()">🔄 Request Fresh Pairing Code</button>
+    </div>
+    <div><span id="status-badge" class="badge">${registered ? '🟢 Connected & Active' : '⏳ Waiting for Link (Auto-refreshes live)'}</span></div>
     <div class="steps">
       1. Open <b>WhatsApp</b> on your phone (<b>07058967815</b>)<br/>
       2. Tap <b>Settings (or ⋮) &rarr; Linked Devices &rarr; Link a Device</b><br/>
@@ -260,22 +278,54 @@ function startHealthServer() {
   </div>
   <script>
     let lastQr = ${JSON.stringify(qr || '')};
+
+    function copyPairCode() {
+      const code = document.getElementById('pair-code-text').textContent.trim();
+      navigator.clipboard.writeText(code).then(() => {
+        const btn = document.getElementById('copy-btn');
+        btn.textContent = '✅ Copied!';
+        setTimeout(() => { btn.textContent = '📋 Copy'; }, 2000);
+      });
+    }
+
+    async function requestNewCode() {
+      const refreshBtn = document.getElementById('refresh-btn');
+      refreshBtn.disabled = true;
+      refreshBtn.textContent = '⏳ Requesting code...';
+      try {
+        const res = await fetch('/pair?refresh=1');
+        const data = await res.json();
+        if (data.pairingCode) {
+          document.getElementById('pair-code-text').textContent = data.pairingCode;
+        }
+        if (data.qr) {
+          lastQr = data.qr;
+          document.getElementById('qr-container').innerHTML = '<img id="qr-img" src="https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=10&data=' + encodeURIComponent(data.qr) + '" alt="WhatsApp QR Code" />';
+        }
+      } catch (err) {} finally {
+        refreshBtn.disabled = false;
+        refreshBtn.textContent = '🔄 Request Fresh Pairing Code';
+      }
+    }
+
     setInterval(async () => {
       try {
-        const res = await fetch('/health');
+        const res = await fetch('/qr?json=1');
         const data = await res.json();
         const container = document.getElementById('qr-container');
         const badge = document.getElementById('status-badge');
         const codeBox = document.getElementById('code-container');
         const codeText = document.getElementById('pair-code-text');
+        const actionBar = document.getElementById('action-bar');
+
         if (data.whatsappRegistered) {
           container.innerHTML = '<div style="color:#00a884;padding:90px 20px;font-weight:700;font-size:18px;">✅ WhatsApp Connected & Active!</div>';
-          badge.textContent = '🟢 Connected & Registered';
+          badge.textContent = '🟢 Connected & Active';
           if (codeBox) codeBox.style.display = 'none';
+          if (actionBar) actionBar.style.display = 'none';
           return;
         }
-        if (data.pairingCode && codeBox && codeText) {
-          codeBox.style.display = 'block';
+        if (data.pairingCode && codeText && (!codeText.textContent || codeText.textContent === 'Loading...')) {
           codeText.textContent = data.pairingCode;
         }
         if (data.qr && data.qr !== lastQr) {
@@ -289,6 +339,13 @@ function startHealthServer() {
 </html>`;
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(html);
+      return;
+    }
+
+    // 3. Rate Limiting Protection (DoS & brute-force defense on admin/operational endpoints)
+    if (!httpSecurityManager.checkRateLimit(req)) {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Too Many Requests: Rate limit exceeded. Try again in 60s.' }));
       return;
     }
 

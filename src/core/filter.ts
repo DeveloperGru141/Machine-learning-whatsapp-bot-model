@@ -35,12 +35,20 @@ export function shouldRespondToMessage(
   rawText: string,
   botLid?: string
 ): TriggerCheckResult {
-  // Never respond to our own outbound messages
-  if (msg.key.fromMe) {
+  const isGroup = msg.key.remoteJid?.endsWith('@g.us') || false;
+
+  // Never respond to our own outbound messages UNLESS it is "Message Yourself" (owner testing the bot on the bot's phone)
+  const cleanRemote = (msg.key.remoteJid || '').split('@')[0].split(':')[0];
+  const botOwnDigits = (botJid || '').split('@')[0].split(':')[0] || '2347058967815';
+  const isMessageToSelf =
+    Boolean(msg.key.fromMe) &&
+    !isGroup &&
+    (cleanRemote === botOwnDigits || cleanRemote === '2347058967815' || cleanRemote === config.bot.pairingPhoneNumber);
+
+  if (msg.key.fromMe && !isMessageToSelf) {
     return { shouldRespond: false, cleanedText: rawText };
   }
 
-  const isGroup = msg.key.remoteJid?.endsWith('@g.us') || false;
   const groupJid = msg.key.remoteJid || '';
 
   // Direct Messages (DMs): Always respond

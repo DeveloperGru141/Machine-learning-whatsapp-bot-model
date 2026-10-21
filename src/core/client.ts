@@ -203,6 +203,10 @@ export class WhatsAppClient {
   }
 
   public getLatestPairingCode(): string | null {
+    // Pairing codes expire after ~150 seconds on WhatsApp servers
+    if (this.latestPairingCodeAt && Date.now() - this.latestPairingCodeAt > 150_000) {
+      return null;
+    }
     return this.latestPairingCode;
   }
 
@@ -217,7 +221,7 @@ export class WhatsAppClient {
 
   /**
    * Returns the current valid pairing code for the active socket, or performs a clean
-   * session reset if forceReset is true (or if no code has been generated yet).
+   * session reset if forceReset is true (or if code is expired / none generated yet).
    * Never calls requestPairingCode twice on the same authState to avoid corrupting noise keys.
    */
   public async requestFreshPairingCode(forceReset: boolean = false): Promise<string | null> {
@@ -225,40 +229,43 @@ export class WhatsAppClient {
       return null;
     }
 
-    // If we already have a fresh code on the current uncorrupted socket (<150s old) and not forcing reset, return it directly!
-    if (!forceReset && this.latestPairingCode && Date.now() - this.latestPairingCodeAt < 150_000) {
+    const isCodeExpired =
+      !this.latestPairingCode ||
+      !this.latestPairingCodeAt ||
+      Date.now() - this.latestPairingCodeAt >= 150_000;
+
+    // If we already have a fresh code on the current socket (<150s old) and not forcing reset, return it directly!
+    if (!forceReset && !isCodeExpired && this.latestPairingCode) {
       return this.latestPairingCode;
     }
 
-    // If forcing a refresh (or no code yet after waiting), perform a clean session wipe & fresh socket start
-    if (forceReset) {
-      console.log('[WhatsAppClient] 🔄 Force-refreshing pairing session with clean noise credentials...');
-      this.sessionBundleInvalidated = true;
-      try {
-        if (this.sock) {
-          this.sock.ev.removeAllListeners('connection.update');
-          this.sock.ev.removeAllListeners('creds.update');
-          this.sock.ev.removeAllListeners('messages.upsert');
-          this.sock.ev.removeAllListeners('messages.update');
-          this.sock.ev.removeAllListeners('message-receipt.update');
-          try {
-            this.sock.end(undefined);
-          } catch {}
-          this.sock = null;
-        }
-        if (fs.existsSync(config.paths.sessions)) {
-          fs.rmSync(config.paths.sessions, { recursive: true, force: true });
-        }
-      } catch {}
-      this.pairingRequested = false;
-      this.latestPairingCode = null;
-      this.latestPairingCodeAt = 0;
-      this.isConnecting = false;
-      await this.start();
-    }
+    // Clean session wipe & fresh socket start
+    console.log('[WhatsAppClient] 🔄 Generating clean pairing session and fresh pairing code...');
+    this.sessionBundleInvalidated = true;
+    try {
+      if (this.sock) {
+        this.sock.ev.removeAllListeners('connection.update');
+        this.sock.ev.removeAllListeners('creds.update');
+        this.sock.ev.removeAllListeners('messages.upsert');
+        this.sock.ev.removeAllListeners('messages.update');
+        this.sock.ev.removeAllListeners('message-receipt.update');
+        try {
+          this.sock.end(undefined);
+        } catch {}
+        this.sock = null;
+      }
+      if (fs.existsSync(config.paths.sessions)) {
+        fs.rmSync(config.paths.sessions, { recursive: true, force: true });
+      }
+    } catch {}
+    this.pairingRequested = false;
+    this.latestPairingCode = null;
+    this.latestPairingCodeAt = 0;
+    this.isConnecting = false;
+    await this.start();
 
-    // Wait up to 12 seconds for the fresh socket's QR handshake to generate the single clean pairing code
-    for (let i = 0; i < 24; i++) {
+    // Wait up to 15 seconds for the fresh socket's QR handshake to generate the single clean pairing code
+    for (let i = 0; i < 30; i++) {
       if (this.latestPairingCode) {
         return this.latestPairingCode;
       }
@@ -370,6 +377,10 @@ export class WhatsAppClient {
       }
 
       const jsonStr = JSON.stringify(filesMap);
+      if (!filesMap['creds.json'] || filesMap['creds.json'].trim().length < 50) {
+        console.warn('[WhatsAppClient] Refusing to backup session: creds.json is empty or incomplete.');
+        return;
+      }
       const gzipped = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'));
       const bundle = gzipped.toString('base64');
 
@@ -567,7 +578,12 @@ export class WhatsAppClient {
               if (!this.sock || this.isRegistered()) return;
               try {
                 console.log(`[WhatsAppClient] Requesting clean pairing code for +${cleanNumber}...`);
-                const code = await this.sock.requestPairingCode(cleanNumber, 'ADEM1234');
+                let code: string;
+                try {
+                  code = await this.sock.requestPairingCode(cleanNumber, 'ADEM1234');
+                } catch {
+                  code = await this.sock.requestPairingCode(cleanNumber);
+                }
                 this.latestPairingCode = code;
                 this.latestPairingCodeAt = Date.now();
                 console.log('\n======================================================');
