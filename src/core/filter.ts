@@ -46,6 +46,7 @@ export function shouldRespondToMessage(
     !isGroup &&
     (cleanRemote === botOwnDigits ||
       cleanRemote === '2347058967815' ||
+      cleanRemote === '83954564632610' ||
       (cleanLidId && cleanRemote === cleanLidId) ||
       cleanRemote === config.bot.pairingPhoneNumber);
 

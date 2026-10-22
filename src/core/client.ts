@@ -950,12 +950,18 @@ export class WhatsAppClient {
     const cleanRemote = (msg.key?.remoteJid || '').split('@')[0].split(':')[0];
     const botOwnDigits = (this.sock?.user?.id || '').split('@')[0].split(':')[0] || '2347058967815';
     const botOwnLidDigits = (this.sock?.user?.lid || '').split('@')[0].split(':')[0];
+    const credsMeId = (this.sock?.authState?.creds?.me?.id || '').split('@')[0].split(':')[0];
+    const credsMeLid = (this.sock?.authState?.creds?.me?.lid || '').split('@')[0].split(':')[0];
+
     const isMessageToSelf =
       Boolean(msg.key?.fromMe) &&
       !msg.key?.remoteJid?.endsWith('@g.us') &&
       (cleanRemote === botOwnDigits ||
         cleanRemote === '2347058967815' ||
+        cleanRemote === '83954564632610' ||
         (botOwnLidDigits && cleanRemote === botOwnLidDigits) ||
+        (credsMeId && cleanRemote === credsMeId) ||
+        (credsMeLid && cleanRemote === credsMeLid) ||
         cleanRemote === config.bot.pairingPhoneNumber);
 
     // If fromMe and NOT Message Yourself, the owner is manually texting someone else: do not intervene!

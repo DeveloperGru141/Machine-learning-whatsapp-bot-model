@@ -74,6 +74,12 @@ export class OutboundSender {
 
     const cleanLid = chatJid.split('@')[0].split(':')[0];
 
+    // If this is the bot's own self-chat / Message Yourself LID (83954564632610),
+    // KEEP IT as 83954564632610@lid so it delivers straight to "Message Yourself" on the bot's phone!
+    if (cleanLid === '83954564632610') {
+      return chatJid;
+    }
+
     // 1. Owner Ademola check (102409552584830@lid -> 2348108574293@s.whatsapp.net)
     if (
       cleanLid === '102409552584830' ||
