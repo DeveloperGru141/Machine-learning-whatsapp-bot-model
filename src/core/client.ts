@@ -876,6 +876,10 @@ export class WhatsAppClient {
 
       // Message handler
       this.sock.ev.on('messages.upsert', async (m) => {
+        const first = m.messages[0];
+        console.log(
+          `[messages.upsert] 📥 Received ${m.messages.length} msg(s) (type: ${m.type}) from ${first?.key?.remoteJid} (fromMe: ${first?.key?.fromMe})`
+        );
         for (const msg of m.messages) {
           await this.processIncomingMessage(msg);
         }
@@ -1383,18 +1387,19 @@ export class WhatsAppClient {
       isGroup: normalized.isGroup,
       rawMessage: msg,
       replyText: async (text: string) => {
-        const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
+        const targetChatJid = OutboundSender.resolveDeliveryJid(normalized.chatJid);
+        const safeQuoted = targetChatJid.endsWith('@lid') ? undefined : msg;
 
         // Simulate authentic human typing presence scaled to incoming message length, reply length, and chat type
         await antiBanEngine.simulateTypingPresence(
           sock,
-          normalized.chatJid,
+          targetChatJid,
           text,
           false,
           incomingCharLen,
           normalized.isGroup
         );
-        const res = await OutboundSender.replyText(sock, normalized.chatJid, text, safeQuoted);
+        const res = await OutboundSender.replyText(sock, targetChatJid, text, safeQuoted);
         if (normalized.isGroup) {
           recordGroupInteraction(normalized.chatJid);
         }
@@ -1403,21 +1408,21 @@ export class WhatsAppClient {
       sendSticker: async (bufferOrPath: Buffer | string, mentions?: string[]) =>
         OutboundSender.sendSticker(
           sock,
-          normalized.chatJid,
+          OutboundSender.resolveDeliveryJid(normalized.chatJid),
           bufferOrPath,
           msg,
           mentions || (normalized.isGroup && normalized.senderJid ? [normalized.senderJid] : undefined)
         ),
       sendImage: (bufferOrUrl: Buffer | string, caption?: string) =>
-        OutboundSender.sendImage(sock, normalized.chatJid, bufferOrUrl, caption, msg),
+        OutboundSender.sendImage(sock, OutboundSender.resolveDeliveryJid(normalized.chatJid), bufferOrUrl, caption, msg),
       sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) =>
-        OutboundSender.sendAudio(sock, normalized.chatJid, bufferOrUrl, isVoiceNote, msg),
+        OutboundSender.sendAudio(sock, OutboundSender.resolveDeliveryJid(normalized.chatJid), bufferOrUrl, isVoiceNote, msg),
       sendVideo: (bufferOrUrl: Buffer | string, caption?: string) =>
-        OutboundSender.sendVideo(sock, normalized.chatJid, bufferOrUrl, caption, msg),
+        OutboundSender.sendVideo(sock, OutboundSender.resolveDeliveryJid(normalized.chatJid), bufferOrUrl, caption, msg),
       sendContact: (displayName: string, phoneNumber: string) =>
-        OutboundSender.sendContact(sock, normalized.chatJid, displayName, phoneNumber, msg),
+        OutboundSender.sendContact(sock, OutboundSender.resolveDeliveryJid(normalized.chatJid), displayName, phoneNumber, msg),
       sendPoll: (question: string, options: string[], selectableCount?: number) =>
-        OutboundSender.sendPoll(sock, normalized.chatJid, question, options, selectableCount, msg),
+        OutboundSender.sendPoll(sock, OutboundSender.resolveDeliveryJid(normalized.chatJid), question, options, selectableCount, msg),
     };
 
     // 4. Dispatch via Concurrency Queue (Anti-Crash & Human-Like Rate Limiting)
@@ -1428,8 +1433,9 @@ export class WhatsAppClient {
       execute: async () => {
         let stopTyping: (() => void) | null = null;
         try {
+          const targetChatJid = OutboundSender.resolveDeliveryJid(normalized.chatJid);
           // 1. Start active typing bubble immediately so users know the bot is actively crafting their reply
-          stopTyping = antiBanEngine.startTypingHeartbeat(sock, normalized.chatJid);
+          stopTyping = antiBanEngine.startTypingHeartbeat(sock, targetChatJid);
           // 2. Light natural cadence pause (50ms in DM, 300-600ms in group)
           await antiBanEngine.simulateReadingDelay(incomingCharLen, normalized.isGroup);
           await agentHarness.handleMessage(promptText, context);

@@ -2,6 +2,8 @@ import type { WASocket, proto } from '@whiskeysockets/baileys';
 import fs from 'fs';
 import { antiBanEngine } from '../security/anti-ban.js';
 import { chatLogger } from '../memory/chat-logger.js';
+import { config } from '../config/env.js';
+import { db } from '../memory/db.js';
 
 let activeSocketGetter: (() => WASocket | null) | null = null;
 export function setActiveSocketGetter(getter: () => WASocket | null) {
@@ -62,6 +64,43 @@ export class OutboundSender {
   }
 
   /**
+   * Resolves @lid JIDs to canonical phone number JIDs (@s.whatsapp.net) whenever known
+   * so messages appear reliably in the recipient's primary mobile WhatsApp chat thread.
+   */
+  public static resolveDeliveryJid(chatJid: string): string {
+    if (!chatJid || !chatJid.endsWith('@lid')) {
+      return chatJid;
+    }
+
+    const cleanLid = chatJid.split('@')[0].split(':')[0];
+
+    // 1. Owner Ademola check (102409552584830@lid -> 2348108574293@s.whatsapp.net)
+    if (
+      cleanLid === '102409552584830' ||
+      config.bot.owners.some((o: string) => o.includes(cleanLid))
+    ) {
+      return '2348108574293@s.whatsapp.net';
+    }
+
+    // 2. Check contacts table for mapped phone number
+    try {
+      const contact = db
+        .prepare(`SELECT phone_number FROM contacts WHERE jid = ? OR phone_number = ? LIMIT 1`)
+        .get(chatJid, cleanLid) as { phone_number: string } | undefined;
+      if (
+        contact?.phone_number &&
+        !contact.phone_number.startsWith('10') &&
+        contact.phone_number.length >= 7 &&
+        contact.phone_number.length <= 14
+      ) {
+        return `${contact.phone_number}@s.whatsapp.net`;
+      }
+    } catch {}
+
+    return chatJid;
+  }
+
+  /**
    * Central Outbound Guardrail: Sanitizes all outbound text and media captions against:
    * 1. WhatsApp internal IDs (WID/wa.id/JID/LID/groups/newsletters)
    * 2. Raw 14-16 digit numbers or @lid mentions
@@ -112,30 +151,33 @@ export class OutboundSender {
     isProactiveCheckIn?: boolean,
     mentions?: string[]
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted, isOwnerCommand, isProactiveCheckIn)) return null;
+    const targetJid = this.resolveDeliveryJid(chatJid);
+
+    if (!this.checkSafety(targetJid, quoted, isOwnerCommand, isProactiveCheckIn)) return null;
 
     const cleanText = this.sanitizeOutboundText(text);
     if (!cleanText || !cleanText.trim()) {
-      console.warn(`[OutboundSender] 🛡️ Suppressed empty or fully redacted message to ${chatJid}`);
+      console.warn(`[OutboundSender] 🛡️ Suppressed empty or fully redacted message to ${targetJid}`);
       return null;
     }
 
-    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
+    const safeQuoted = this.sanitizeQuoted(targetJid, quoted);
 
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return antiBanEngine.scheduleDispatch(targetJid, async () => {
       let currentSock = sock || activeSocketGetter?.();
       try {
         const payload: any = { text: cleanText };
         if (mentions && mentions.length > 0) {
           payload.mentions = mentions;
         }
-        const result = await currentSock.sendMessage(chatJid, payload, { quoted: safeQuoted });
+        const result = await currentSock.sendMessage(targetJid, payload, { quoted: safeQuoted });
         this.recordDispatchedId(result?.key?.id);
-        chatLogger.logOutboundMessage(chatJid, cleanText);
+        chatLogger.logOutboundMessage(targetJid, cleanText);
+        console.log(`[OutboundSender] 📤 Dispatched message to ${targetJid} (id: ${result?.key?.id}): "${cleanText.slice(0, 50)}..."`);
         return result;
       } catch (err: any) {
-        if (safeQuoted) {
-          console.warn(`[OutboundSender] Reply with quoted failed (${err.message}), retrying direct text...`);
+        if (targetJid !== chatJid) {
+          console.warn(`[OutboundSender] Send to resolved JID ${targetJid} failed (${err.message}), retrying original ${chatJid}...`);
           try {
             const payload: any = { text: cleanText };
             if (mentions && mentions.length > 0) {
@@ -144,6 +186,22 @@ export class OutboundSender {
             const result = await currentSock.sendMessage(chatJid, payload);
             this.recordDispatchedId(result?.key?.id);
             chatLogger.logOutboundMessage(chatJid, cleanText);
+            console.log(`[OutboundSender] 📤 Dispatched fallback message to ${chatJid} (id: ${result?.key?.id}): "${cleanText.slice(0, 50)}..."`);
+            return result;
+          } catch (innerErr: any) {
+            err = innerErr;
+          }
+        }
+        if (safeQuoted) {
+          console.warn(`[OutboundSender] Reply with quoted failed (${err.message}), retrying direct text...`);
+          try {
+            const payload: any = { text: cleanText };
+            if (mentions && mentions.length > 0) {
+              payload.mentions = mentions;
+            }
+            const result = await currentSock.sendMessage(targetJid, payload);
+            this.recordDispatchedId(result?.key?.id);
+            chatLogger.logOutboundMessage(targetJid, cleanText);
             return result;
           } catch (innerErr: any) {
             err = innerErr;

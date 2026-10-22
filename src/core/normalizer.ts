@@ -43,9 +43,29 @@ export function unwrapMessage(msg: proto.IMessage | undefined | null): proto.IMe
 export function normalizeMessage(msg: proto.IWebMessageInfo): NormalizedMessage | null {
   if (!msg.message || !msg.key.remoteJid) return null;
 
-  const chatJid = msg.key.remoteJid;
+  let chatJid = msg.key.remoteJid;
   const isGroup = chatJid.endsWith('@g.us');
-  const senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
+  let senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
+
+  // Resolve @lid to canonical phone number JID (@s.whatsapp.net) for seamless message delivery and primary device thread sync
+  if (!isGroup && chatJid.endsWith('@lid')) {
+    const rawId = chatJid.split('@')[0].split(':')[0];
+    if (rawId === '102409552584830') {
+      chatJid = '2348108574293@s.whatsapp.net';
+      senderJid = '2348108574293@s.whatsapp.net';
+    } else if ((msg.key as any).senderPn) {
+      chatJid = (msg.key as any).senderPn;
+      senderJid = (msg.key as any).senderPn;
+    }
+  } else if (isGroup && senderJid.endsWith('@lid')) {
+    const rawId = senderJid.split('@')[0].split(':')[0];
+    if (rawId === '102409552584830') {
+      senderJid = '2348108574293@s.whatsapp.net';
+    } else if ((msg.key as any).participantPn) {
+      senderJid = (msg.key as any).participantPn;
+    }
+  }
+
   const rawId = senderJid.split('@')[0].split(':')[0];
   const isLid = senderJid.endsWith('@lid') || rawId.length > 13;
   const fallbackName = isLid ? (isGroup ? 'Member' : 'Friend') : rawId;
