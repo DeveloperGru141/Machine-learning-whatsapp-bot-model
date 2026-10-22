@@ -347,6 +347,10 @@ export class WhatsAppClient {
     return this.sock;
   }
 
+  public setSocket(sock: WASocket | null): void {
+    this.sock = sock;
+  }
+
   
   public async autoBackupSessionToRender(): Promise<void> {
     const credsFile = path.join(config.paths.sessions, 'creds.json');

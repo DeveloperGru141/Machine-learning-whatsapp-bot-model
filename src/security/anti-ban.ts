@@ -31,7 +31,11 @@ export const BOT_GROUP_INTRO =
   "Hello everyone! I am Forgelabs Assistant, an intelligent WhatsApp assistant created by Ademola. I dey here with full energy to help the group—just tag me with @Forgelabs whenever you need quick answers, live web searches, reminders, or media downloads! 🔥";
 
 function isLivetestRunner(): boolean {
-  return process.argv.some((arg) => arg.includes('livetest')) || process.env.NODE_ENV === 'test' || Boolean(process.env.LIVETEST_RUNNER);
+  return (
+    process.argv.some((arg) => arg.includes('livetest') || arg.includes('test_') || arg.includes('test.')) ||
+    process.env.NODE_ENV === 'test' ||
+    Boolean(process.env.LIVETEST_RUNNER)
+  );
 }
 
 /**
@@ -69,9 +73,8 @@ export class AntiBanEngine {
   }
 
   /**
-   * Calculates realistic human typing delay based on message length.
-   * DMs: 150ms - 350ms for lightning-fast replies.
-   * Groups: 400ms - 1000ms to maintain authentic group cadence without sluggishness.
+   * Calculates realistic human typing delay based on message length (~5 seconds).
+   * DMs & Groups: ~4.5s - 5.5s to simulate authentic mobile human typing with active chat bubble.
    */
   public calculateTypingDelay(
     responseTextLength: number = 0,
@@ -80,19 +83,20 @@ export class AntiBanEngine {
   ): number {
     if (isLivetestRunner()) return 20;
 
-    const baseMs = isGroup ? 400 : 120;
-    const replyTypingMs = Math.min(isGroup ? 600 : 200, responseTextLength * (isGroup ? 2 : 1));
-    const rawTotal = baseMs + replyTypingMs;
+    const baseMs = 4600;
+    const replyTypingMs = Math.min(600, Math.floor(responseTextLength * 2.5));
+    const jitter = Math.floor(Math.random() * 400 - 200); // +/- 200ms natural human variance
+    const rawTotal = baseMs + replyTypingMs + jitter;
 
-    const minFloor = isGroup ? 400 : 150;
-    const maxCeiling = isGroup ? 1000 : 350;
+    const minFloor = 4500;
+    const maxCeiling = 5500;
     return Math.max(minFloor, Math.min(maxCeiling, rawTotal));
   }
 
   /**
    * Simulates active human presence: sends 'composing' (or 'recording'), waits a realistic
-   * human typing duration proportional to message length (with a mid-sentence thinking pause
-   * on longer messages), then sends 'paused'.
+   * human typing duration proportional to message length (with an active chat bubble refresh
+   * at midway so WhatsApp's composing bubble never expires), then sends 'paused'.
    */
   public async simulateTypingPresence(
     sock: WASocket,
@@ -125,21 +129,15 @@ export class AntiBanEngine {
       } catch {}
     }
 
-    // For longer typing durations (> 3.8s) outside tests, simulate a natural brief pause mid-typing like a real human thinking
-    if (!isLivetestRunner() && !isVoiceNote && delay > 3800 && canSendPresence) {
-      const firstLeg = Math.floor(delay * 0.58);
-      const pauseDuration = Math.floor(250 + Math.random() * 250);
-      const secondLeg = Math.max(500, delay - firstLeg - pauseDuration);
-
-      await new Promise((r) => setTimeout(r, firstLeg));
-      try {
-        await sock.sendPresenceUpdate('paused', chatJid);
-      } catch {}
-      await new Promise((r) => setTimeout(r, pauseDuration));
+    // For realistic ~5s typing durations outside tests, maintain active chat bubble:
+    // Send composing immediately, refresh halfway (~2.5s) so the bubble never expires on WhatsApp clients, then pause
+    if (!isLivetestRunner() && !isVoiceNote && delay >= 4000 && canSendPresence) {
+      const halfDelay = Math.floor(delay / 2);
+      await new Promise((r) => setTimeout(r, halfDelay));
       try {
         await sock.sendPresenceUpdate(presenceType, chatJid);
       } catch {}
-      await new Promise((r) => setTimeout(r, secondLeg));
+      await new Promise((r) => setTimeout(r, delay - halfDelay));
     } else {
       await new Promise((r) => setTimeout(r, delay));
     }

@@ -492,7 +492,7 @@ Combine the live tool data in the user's last message with your own knowledge an
           );
           let phoneToUse = phoneMatch ? phoneMatch[0] : '';
 
-          if (!phoneToUse) {
+          if (!phoneToUse && /\b(him|her|them|that number|the number|the guy|same number)\b/i.test(userMessage)) {
             try {
               const recentInChat = db
                 .prepare(
@@ -522,6 +522,59 @@ Combine the live tool data in the user's last message with your own knowledge an
               await context.replyText(confirmText);
               return;
             }
+          }
+        }
+
+        // Check if model hallucinated that it sent/messaged someone without calling send_message_to_contact
+        const isHallucinatedDispatch =
+          /(?:I(?:'ve| have)?\s+(?:sent|messaged|texted|forwarded|pinged|delivered|alerted)|Message(?:\s+has been|\s+is)?\s+sent|Sent\s+sharp\s+sharp|don\s+send\s+am|already\s+sent)/i.test(
+            rawContent
+          ) && !executedToolNames.has('send_message_to_contact');
+
+        if (isHallucinatedDispatch) {
+          console.warn(
+            '[AgentHarness] ⚠️ Intercepted hallucinated outbound message dispatch from LLM. Attempting real execution or requesting phone number...'
+          );
+          const phoneMatch = userMessage.match(
+            /(?:(?:\+|00)?234|0)\s*[789][01]\s*(?:[\s-]?\d{3,4}){2}|\+?\d[\d\s-]{9,}\d/
+          );
+          let phoneToUse = phoneMatch ? phoneMatch[0] : '';
+
+          if (!phoneToUse && /\b(him|her|them|that number|the number|the guy|same number)\b/i.test(userMessage)) {
+            try {
+              const recentInChat = db
+                .prepare(
+                  `SELECT message_text FROM chat_logs WHERE chat_jid = ? ORDER BY id DESC LIMIT 5`
+                )
+                .all(context.chatJid) as Array<{ message_text: string | null }>;
+              for (const r of recentInChat) {
+                const m = (r.message_text || '').match(
+                  /(?:(?:\+|00)?234|0)\s*[789][01]\s*(?:[\s-]?\d{3,4}){2}|\+?\d[\d\s-]{9,}\d/
+                );
+                if (m) {
+                  phoneToUse = m[0];
+                  break;
+                }
+              }
+            } catch {}
+          }
+
+          if (phoneToUse) {
+            const toolRes = await pluginRegistry.executeTool(
+              'send_message_to_contact',
+              { recipient: phoneToUse, message: userMessage },
+              context
+            );
+            if (toolRes.success) {
+              const confirmText = `Done! Message sent directly to ${phoneToUse} sharp sharp. Delivery confirmed (✓✓).`;
+              await context.replyText(confirmText);
+              return;
+            }
+          } else {
+            // Cannot deliver without a valid recipient phone number or contact JID: prompt user directly
+            const clarifyText = `Whoops! I need the recipient's phone number to deliver this message. Drop the phone number (e.g. 080... or +234...) and I'll send it sharp sharp! 🤝`;
+            await context.replyText(clarifyText);
+            return;
           }
         }
 

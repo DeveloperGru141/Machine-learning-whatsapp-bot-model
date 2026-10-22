@@ -171,7 +171,19 @@ export class PluginRegistry {
       text.includes('send') ||
       text.includes('sent') ||
       text.includes('deliver') ||
+      text.includes('ping') ||
+      text.includes('inform') ||
+      text.includes('notify') ||
+      text.includes('write') ||
+      text.includes('forward') ||
+      text.includes('relay') ||
+      text.includes('holla') ||
       text.includes('reach out') ||
+      text.includes('reach') ||
+      text.includes('alert') ||
+      text.includes('talk to') ||
+      text.includes('chat with') ||
+      text.includes('drop a note') ||
       text.includes('say hi') ||
       text.includes('greet') ||
       text.includes('contact') ||
@@ -183,7 +195,9 @@ export class PluginRegistry {
       text.includes("s no") ||
       text.includes('micah') ||
       text.includes('vcard') ||
-      text.includes('vcf')
+      text.includes('vcf') ||
+      text.includes('someone') ||
+      text.includes('friend')
     ) {
       selected.add('send_message_to_contact');
       selected.add('save_contact');

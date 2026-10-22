@@ -5,7 +5,7 @@ import path from 'path';
 dotenv.config({ override: true });
 
 const envSchema = z.object({
-  LLM_PROVIDER: z.enum(['gemini', 'openrouter', 'groq']).default('gemini'),
+  LLM_PROVIDER: z.enum(['gemini', 'openrouter', 'groq']).default('groq'),
   GEMINI_MODEL: z.string().default('gemini-flash-latest'),
   OPENROUTER_API_KEY: z.string().optional(),
   OPENROUTER_MODEL: z.string().default('deepseek/deepseek-chat'),
