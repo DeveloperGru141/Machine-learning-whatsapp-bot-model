@@ -802,7 +802,10 @@ export function sanitizeAssistantResponse(text: string): string {
   const paragraphs = cleaned.split(/\n\s*\n/);
   const isMetaReasoningParagraph = (p: string): boolean => {
     const trimmedP = p.trim();
-    return /^(?:(?:the\s+)?context is|in this context|the situation is|this is a group chat where|in this group chat|the user is (?:asking|saying|trying|inquiring|requesting)|based on the (?:chat|recent) history|looking at the (?:context|chat|history)|analyzing the (?:context|chat|conversation)|here,\s*(?:the\s*)?(?:user|someone)|someone just dropped|my task is to|i should respond|i need to respond|let's analyze|let me analyze|we need to respond|(?:we|e)?\s*need to|make sure total|count characters|let's craft|let's write|line\d+:|blank line|now count characters|quote block:.*length:|probably something like)/i.test(trimmedP);
+    if (/(?:count characters|make sure total characters|line\d+:.*count:|\bapprox:\s*each line length\b)/i.test(trimmedP)) {
+      return true;
+    }
+    return /^(?:(?:the\s+)?context is|in this context|the situation is|this is a group chat where|in this group chat|the user is (?:asking|saying|trying|inquiring|requesting)|based on the (?:chat|recent) history|looking at the (?:context|chat|history)|analyzing the (?:context|chat|conversation)|here,\s*(?:the\s*)?(?:user|someone)|someone just dropped|my task is to|i should respond|i need to respond|let's analyze|let me analyze|we need to respond|(?:we|e)?\s*need\b|make sure total|let's craft|let's write|line\d+:|blank line|now count characters|quote block:.*length:|probably something like)/i.test(trimmedP);
   };
 
   const filtered = paragraphs.filter(p => !isMetaReasoningParagraph(p));
