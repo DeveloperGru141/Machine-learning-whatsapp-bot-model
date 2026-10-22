@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "postinstall": "node scripts/patch_baileys.js",
     "start": "node dist/index.js",
     "ingest": "uv run --python 3.15 python scripts/ingest_chats.py",
     "validate-data": "uv run --python 3.15 python scripts/validate_and_finetune.py",

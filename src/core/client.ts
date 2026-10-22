@@ -389,7 +389,7 @@ export class WhatsAppClient {
           const numB = parseInt(b.replace(/[^0-9]/g, ''), 10) || 0;
           return numB - numA;
         })
-        .slice(0, 60);
+        .slice(0, 75);
       for (const f of preKeys) essentialFiles.add(f);
 
       const filesMap: Record<string, string> = {};
@@ -735,6 +735,23 @@ export class WhatsAppClient {
           this.startUnrepliedScanner();
 
           const ownerJid = config.bot.owners[0] || '';
+          if (ownerJid && (this.sock as any)?.assertSessions) {
+            (this.sock as any).assertSessions([ownerJid], false).catch(() => {});
+            try {
+              this.sock?.presenceSubscribe?.(ownerJid);
+              this.sock?.sendPresenceUpdate?.('available');
+            } catch {}
+          }
+
+          // Replenish prekeys on WhatsApp servers to prevent "Invalid PreKey ID" and failed handshake from new/group senders
+          try {
+            console.log('[WhatsAppClient] 🔑 Syncing and replenishing prekeys on WhatsApp server...');
+            await (this.sock as any)?.uploadPreKeys?.(50);
+            console.log('[WhatsAppClient] ✅ Server prekeys successfully replenished (50 fresh prekeys).');
+          } catch (err: any) {
+            console.warn('[WhatsAppClient] Note on prekey replenishment:', err?.message || err);
+          }
+
           healthMonitor.startMonitoring(this.sock!, ownerJid);
           analyticsEngine.startPeriodicReports(this.sock!, ownerJid);
           this.syncGroups().catch((err) => console.warn('[WhatsAppClient] Error syncing groups on connect:', err?.message || err));
@@ -1064,6 +1081,10 @@ export class WhatsAppClient {
     );
     if (msg.messageStubType === 2) {
       console.warn(`[processIncomingMessage] ⚠️ Message arrived as un-decrypted ciphertext (stub=2) from ${msg.key?.remoteJid}; awaiting retry/sender-key handshake...`);
+      const targetSender = msg.key?.participant || msg.key?.remoteJid;
+      if (targetSender && !msg.key?.fromMe && (this.sock as any)?.assertSessions) {
+        (this.sock as any).assertSessions([targetSender], false).catch(() => {});
+      }
     }
 
     // If fromMe and NOT Message Yourself, the owner is manually texting someone else: do not intervene!
