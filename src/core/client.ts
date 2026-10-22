@@ -56,7 +56,7 @@ export function formatPhoneNumberForPairing(num: string): string {
 
 export class WhatsAppClient {
   private sock: WASocket | null = null;
-  private logger = pino({ level: 'silent' });
+  private logger = pino({ level: 'warn' });
   private reconnectAttempts = 0;
   private isConnecting = false;
   private keepAliveInterval: NodeJS.Timeout | null = null;
@@ -70,6 +70,7 @@ export class WhatsAppClient {
   private sessionStartedAt = Date.now();
   private attemptedCatchupKeys: Set<string> = new Set();
   private messageStore: Map<string, any> = new Map();
+  private lastBackupFileCount = 0;
   private deliveryStatusMap: Map<
     string,
     { status: 'SENT_TO_SERVER' | 'DELIVERED_TO_DEVICE' | 'READ'; statusCode: number; updatedAt: number; recipientJid: string }
@@ -364,13 +365,32 @@ export class WhatsAppClient {
       const allFiles = fs.readdirSync(config.paths.sessions);
       const essentialFiles = new Set<string>();
       essentialFiles.add('creds.json');
+
+      // 1. App state sync keys
       for (const f of allFiles) {
         if (f.startsWith('app-state-sync-key')) essentialFiles.add(f);
       }
-      const preKeys = allFiles.filter((f) => f.startsWith('pre-key-')).slice(-20);
+
+      // 2. ALL sender keys and sender key memory (vital for group message decryption!)
+      for (const f of allFiles) {
+        if (f.startsWith('sender-key-')) essentialFiles.add(f);
+      }
+
+      // 3. ALL pairwise session keys (vital for DM message decryption!)
+      for (const f of allFiles) {
+        if (f.startsWith('session-')) essentialFiles.add(f);
+      }
+
+      // 4. Pre-keys (sorted newest first, up to 60)
+      const preKeys = allFiles
+        .filter((f) => f.startsWith('pre-key-'))
+        .sort((a, b) => {
+          const numA = parseInt(a.replace(/[^0-9]/g, ''), 10) || 0;
+          const numB = parseInt(b.replace(/[^0-9]/g, ''), 10) || 0;
+          return numB - numA;
+        })
+        .slice(0, 60);
       for (const f of preKeys) essentialFiles.add(f);
-      const sessionKeys = allFiles.filter((f) => f.startsWith('session-')).slice(-25);
-      for (const f of sessionKeys) essentialFiles.add(f);
 
       const filesMap: Record<string, string> = {};
       for (const file of essentialFiles) {
@@ -385,8 +405,18 @@ export class WhatsAppClient {
         console.warn('[WhatsAppClient] Refusing to backup session: creds.json is empty or incomplete.');
         return;
       }
-      const gzipped = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'));
-      const bundle = gzipped.toString('base64');
+      let gzipped = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'));
+      let bundle = gzipped.toString('base64');
+
+      // Ensure bundle fits safely within Render env var threshold (32,768 bytes limit)
+      if (bundle.length > 30_000) {
+        for (const pk of [...preKeys].reverse()) {
+          delete filesMap[pk];
+          const prunedGz = zlib.gzipSync(Buffer.from(JSON.stringify(filesMap), 'utf8'));
+          bundle = prunedGz.toString('base64');
+          if (bundle.length <= 29_000) break;
+        }
+      }
 
       const apiKey = process.env.RENDER_API_KEY || '[REDACTED_RENDER_API_KEY]';
       const serviceId = process.env.RENDER_SERVICE_ID || 'srv-db9jvcmq1p3s738hpa40';
@@ -403,7 +433,10 @@ export class WhatsAppClient {
       });
 
       if (res.ok) {
-        console.log(`[WhatsAppClient] 💾 Successfully persisted authenticated session (${Object.keys(filesMap).length} files) to Render SESSION_BUNDLE_BASE64!`);
+        this.lastBackupFileCount = Object.keys(filesMap).length;
+        console.log(
+          `[WhatsAppClient] 💾 Successfully persisted authenticated session (${Object.keys(filesMap).length} files, ${bundle.length}b base64) to Render SESSION_BUNDLE_BASE64!`
+        );
       } else {
         console.warn(`[WhatsAppClient] Render session backup response: ${res.status}`);
       }
@@ -540,7 +573,16 @@ export class WhatsAppClient {
         msgRetryCounterCache,
         getMessage: async (key) => {
           if (key.id) {
-            return this.messageStore.get(key.id);
+            const inMem = this.messageStore.get(key.id);
+            if (inMem) return inMem;
+            try {
+              const row = db
+                .prepare(`SELECT message_text FROM chat_logs WHERE message_id = ? LIMIT 1`)
+                .get(key.id) as any;
+              if (row?.message_text) {
+                return { conversation: row.message_text };
+              }
+            } catch {}
           }
           return undefined;
         },
@@ -778,8 +820,8 @@ export class WhatsAppClient {
         }
       });
 
-      // Track WhatsApp message delivery receipts (SERVER_ACK ✓, DELIVERY_ACK ✓✓, READ ✓✓)
-      this.sock.ev.on('messages.update', (updates) => {
+      // Track WhatsApp message delivery receipts (SERVER_ACK ✓, DELIVERY_ACK ✓✓, READ ✓✓) and handle delayed/decrypted updates
+      this.sock.ev.on('messages.update', async (updates) => {
         try {
           for (const u of updates) {
             const msgId = u.key?.id;
@@ -788,8 +830,24 @@ export class WhatsAppClient {
             if (msgId && status >= 2) {
               this.recordDeliveryStatus(msgId, remoteJid, status);
             }
+
+            // If this update contains a decrypted message or edited message that wasn't available on upsert:
+            if (u.update?.message && !u.key?.fromMe) {
+              const fullMsg: proto.IWebMessageInfo = {
+                key: u.key,
+                message: u.update.message,
+                messageTimestamp: (u.update as any).messageTimestamp || Math.floor(Date.now() / 1000),
+                pushName: (u.update as any).pushName,
+              };
+              console.log(
+                `[messages.update] 🔄 Decrypted/edited message update received for ${u.key?.remoteJid} (id: ${u.key?.id})`
+              );
+              await this.processIncomingMessage(fullMsg);
+            }
           }
-        } catch {}
+        } catch (err: any) {
+          console.warn('[messages.update] Error processing update:', err.message);
+        }
       });
 
       this.sock.ev.on('message-receipt.update', (receipts) => {
@@ -884,6 +942,18 @@ export class WhatsAppClient {
           await this.processIncomingMessage(msg);
         }
       });
+
+      // Periodic session backup check: if new keys/sessions appeared on disk, sync to Render
+      const sessionBackupTimer = setInterval(async () => {
+        try {
+          if (!this.isRegistered() || !fs.existsSync(config.paths.sessions)) return;
+          const currentCount = fs.readdirSync(config.paths.sessions).length;
+          if (currentCount !== this.lastBackupFileCount && this.lastBackupFileCount > 0) {
+            await this.autoBackupSessionToRender();
+          }
+        } catch {}
+      }, 45_000);
+      sessionBackupTimer.unref();
     } finally {
       this.isConnecting = false;
     }
@@ -914,6 +984,9 @@ export class WhatsAppClient {
         upsertKnownGroup(group.id, group.subject, group.participants?.length || 0, isAdmin);
       }
       console.log(`[WhatsAppClient] 👥 Synced ${Object.keys(participating).length} participating groups into memory.`);
+      if (this.isRegistered()) {
+        await this.autoBackupSessionToRender();
+      }
     } catch (err: any) {
       console.warn('[WhatsAppClient] Failed to fetch participating groups:', err?.message || err);
     }
@@ -987,8 +1060,11 @@ export class WhatsAppClient {
 
     const rawKeys = msg.message ? Object.keys(msg.message) : [];
     console.log(
-      `[processIncomingMessage] 🔍 id=${msg.key?.id} fromMe=${msg.key?.fromMe} remote=${msg.key?.remoteJid} isSelf=${isMessageToSelf} keys=[${rawKeys.join(',')}]`
+      `[processIncomingMessage] 🔍 id=${msg.key?.id} fromMe=${msg.key?.fromMe} remote=${msg.key?.remoteJid} isSelf=${isMessageToSelf} keys=[${rawKeys.join(',')}] stub=${msg.messageStubType || 0} params=${JSON.stringify(msg.messageStubParameters || [])}`
     );
+    if (msg.messageStubType === 2) {
+      console.warn(`[processIncomingMessage] ⚠️ Message arrived as un-decrypted ciphertext (stub=2) from ${msg.key?.remoteJid}; awaiting retry/sender-key handshake...`);
+    }
 
     // If fromMe and NOT Message Yourself, the owner is manually texting someone else: do not intervene!
     if (msg.key?.fromMe && !isMessageToSelf) {
