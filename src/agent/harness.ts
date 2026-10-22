@@ -578,19 +578,47 @@ Combine the live tool data in the user's last message with your own knowledge an
           }
         }
 
-        if (rawContent && rawContent.trim()) {
-          const replyText = sanitizeAssistantResponse(rawContent);
-          if (!replyText) return;
-          console.log(`[AgentHarness] 💬 Bot replied to ${context.senderName}: "${replyText.slice(0, 100)}..."`);
-          await context.replyText(replyText);
-          analyticsEngine.trackEvent('message_sent', { length: replyText.length }, context.chatJid, context.senderJid);
-          this.recordFineTuningPair(
-            messages[0]?.content || '',
-            userMessage,
-            replyText,
-            []
-          );
+        let replyText = rawContent && rawContent.trim() ? sanitizeAssistantResponse(rawContent) : '';
+
+        // If direct response was empty or completely stripped by thought-filter, run fallback knowledge answer
+        if (!replyText || !replyText.trim()) {
+          console.warn('[AgentHarness] ⚠️ Direct LLM content was empty or stripped by thought-sanitizer. Triggering fail-safe fallback answer...');
+          const fallbackSystem = `${messages[0]?.content || ''}\n\nDeliver a direct, crisp 1-2 sentence reply in authentic Nigerian WhatsApp flow from your knowledge. Speak directly to ${context.senderName}. DO NOT output any thought process or <think> tags.`;
+          
+          try {
+            const fallbackRes = await llmClient.callGroqInternal({
+              messages: [
+                { role: 'system', content: fallbackSystem },
+                { role: 'user', content: `${context.senderName}: ${userMessage}` },
+              ],
+              model: 'qwen/qwen3.8-27b',
+              temperature: 0.7,
+              max_tokens: 256,
+            });
+            const rawFb = fallbackRes?.choices?.[0]?.message?.content || '';
+            replyText = sanitizeAssistantResponse(rawFb);
+          } catch (fbErr: any) {
+            console.warn('[AgentHarness] Fallback call failed:', fbErr.message);
+          }
+
+          // If still empty, use authentic conversational greeting so the user is NEVER left unanswered
+          if (!replyText || !replyText.trim()) {
+            const isOwner = context.senderName === 'Ademola' || config.bot.owners.some((o: string) => context.senderJid.startsWith(o.replace(/[^0-9]/g, '')));
+            replyText = isOwner
+              ? "Boss, I dey here steady! Wetin dey happen? 🤝"
+              : "How far! I dey active steady, wetin dey happen? 🤝";
+          }
         }
+
+        console.log(`[AgentHarness] 💬 Bot replied to ${context.senderName}: "${replyText.slice(0, 100)}..."`);
+        await context.replyText(replyText);
+        analyticsEngine.trackEvent('message_sent', { length: replyText.length }, context.chatJid, context.senderJid);
+        this.recordFineTuningPair(
+          messages[0]?.content || '',
+          userMessage,
+          replyText,
+          []
+        );
       }
     } catch (err: any) {
       console.error('[AgentHarness] Error in reasoning loop:', err.message || err);

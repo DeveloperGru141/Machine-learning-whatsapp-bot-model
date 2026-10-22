@@ -104,16 +104,7 @@ export function shouldRespondToMessage(
     msg.message?.videoMessage?.contextInfo;
 
   const mentionedJidList: string[] = contextInfo?.mentionedJid || [];
-  const rawIsMentioned = mentionedJidList.some((jid: string) => isBotMatch(jid));
-
-  // Anti-Spam / Anti-Intrusion Rule: Ignore mass broadcast @all or @everyone tags in groups
-  // unless the bot was specifically called by name (isNameCalled) or its message was quoted (isQuoted).
-  // When someone tags @all or mass-mentions 5+ participants, it is an announcement to the group, not a command to the bot.
-  const isMassBroadcastMention =
-    isGroup &&
-    (/@(?:all|everyone)\b/i.test(rawText || '') || (rawText || '').trim().toLowerCase() === '@all' || mentionedJidList.length >= 5);
-
-  const isMentioned = rawIsMentioned && !isMassBroadcastMention;
+  const isMentioned = mentionedJidList.some((jid: string) => isBotMatch(jid));
 
   // Check 2: Was a message sent by the bot quoted / replied to?
   const quotedParticipant = contextInfo?.participant;

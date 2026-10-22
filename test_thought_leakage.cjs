@@ -64,13 +64,13 @@ assert(sanitizedMixed2.includes('5pm works fine for me'), 'Must preserve actual 
 console.log('✅ Test 4 Passed: Meta-reasoning paragraphs peeled while keeping real replies.\n');
 
 // ---------------------------------------------------------
-// Test 5: Mass broadcast @all and @everyone filter in groups
+// Test 5: Group mention & direct trigger filtering
 // ---------------------------------------------------------
-console.log('▶ Test 5: Verify @all mass broadcast suppression in groups...');
+console.log('▶ Test 5: Verify group mention & direct trigger filtering...');
 const botJid = '2347058967815@s.whatsapp.net';
 const groupJid = '120363028392182910@g.us';
 
-// Scenario A: Someone types "@all" and tags 20 members (including the bot)
+// Scenario A: Someone types "@all" and tags members including the bot
 const massAllMsg = {
   key: { remoteJid: groupJid, fromMe: false },
   message: {
@@ -81,46 +81,43 @@ const massAllMsg = {
           botJid,
           '2348011111111@s.whatsapp.net',
           '2348022222222@s.whatsapp.net',
-          '2348033333333@s.whatsapp.net',
-          '2348044444444@s.whatsapp.net',
-          '2348055555555@s.whatsapp.net',
         ],
       },
     },
   },
 };
 const resA = shouldRespondToMessage(massAllMsg, botJid, '@all');
-assert.strictEqual(resA.shouldRespond, false, 'Bot should NOT respond to mass @all tag in group');
+assert.strictEqual(resA.shouldRespond, true, 'Bot should respond when tagged in group (including @all)');
 
-// Scenario B: Someone types "@everyone meeting in 10 mins"
-const massEveryoneMsg = {
+// Scenario B: Someone talks in group without mentioning or naming the bot
+const unmentionedMsg = {
   key: { remoteJid: groupJid, fromMe: false },
   message: {
     extendedTextMessage: {
-      text: '@everyone meeting in 10 mins',
+      text: 'meeting in 10 mins',
       contextInfo: {
-        mentionedJid: [botJid, '2348011111111@s.whatsapp.net'],
+        mentionedJid: ['2348011111111@s.whatsapp.net'],
       },
     },
   },
 };
-const resB = shouldRespondToMessage(massEveryoneMsg, botJid, '@everyone meeting in 10 mins');
-assert.strictEqual(resB.shouldRespond, false, 'Bot should NOT respond to @everyone broadcast in group');
+const resB = shouldRespondToMessage(unmentionedMsg, botJid, 'meeting in 10 mins');
+assert.strictEqual(resB.shouldRespond, false, 'Bot should NOT respond when unmentioned in group');
 
-// Scenario C: Someone specifically names the bot in the broadcast: "@all @forgelabs what time is it?"
+// Scenario C: Someone specifically names the bot in the text: "@all @forgelabs what time is it?"
 const namedInAllMsg = {
   key: { remoteJid: groupJid, fromMe: false },
   message: {
     extendedTextMessage: {
       text: '@all @forgelabs what time is it?',
       contextInfo: {
-        mentionedJid: [botJid, '2348011111111@s.whatsapp.net', '2348022222222@s.whatsapp.net'],
+        mentionedJid: [botJid, '2348011111111@s.whatsapp.net'],
       },
     },
   },
 };
 const resC = shouldRespondToMessage(namedInAllMsg, botJid, '@all @forgelabs what time is it?');
-assert.strictEqual(resC.shouldRespond, true, 'Bot SHOULD respond when specifically named even if @all is present');
+assert.strictEqual(resC.shouldRespond, true, 'Bot SHOULD respond when specifically named in group');
 
 // Scenario D: Normal direct mention to bot only
 const directMentionMsg = {
@@ -137,6 +134,6 @@ const directMentionMsg = {
 const resD = shouldRespondToMessage(directMentionMsg, botJid, '@2347058967815 how far?');
 assert.strictEqual(resD.shouldRespond, true, 'Bot SHOULD respond to normal targeted @mention');
 
-console.log('✅ Test 5 Passed: Mass broadcast @all suppression correctly distinguishes broadcasts from direct bot calls.\n');
+console.log('✅ Test 5 Passed: Group mention and direct trigger filtering verified.\n');
 
 console.log('🎉 ALL 5 THOUGHT LEAKAGE & MASS BROADCAST TESTS PASSED SUCCESSFULLY! 🚀');

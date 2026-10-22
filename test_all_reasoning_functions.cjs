@@ -184,41 +184,41 @@ console.log('▶ Section 6: Testing Mass Broadcast Group Trigger Filter...');
 const botPhone = '2347058967815@s.whatsapp.net';
 const group = '120363028392182910@g.us';
 
-// 6.1: Mass broadcast with @all text
+// 6.1: Group mention with @all (bot is tagged)
 const massAll = {
   key: { remoteJid: group, fromMe: false },
   message: {
     extendedTextMessage: {
       text: '@all',
-      contextInfo: { mentionedJid: [botPhone, '2348011111111@s.whatsapp.net', '2348022222222@s.whatsapp.net', '2348033333333@s.whatsapp.net', '2348044444444@s.whatsapp.net', '2348055555555@s.whatsapp.net'] },
-    },
-  },
-};
-assert.strictEqual(shouldRespondToMessage(massAll, botPhone, '@all').shouldRespond, false, 'Must not respond to @all mass tag');
-
-// 6.2: Mass broadcast with @everyone text
-const massEveryone = {
-  key: { remoteJid: group, fromMe: false },
-  message: {
-    extendedTextMessage: {
-      text: '@everyone please read this announcement',
-      contextInfo: { mentionedJid: [botPhone, '2348011111111@s.whatsapp.net'] },
-    },
-  },
-};
-assert.strictEqual(shouldRespondToMessage(massEveryone, botPhone, '@everyone please read this announcement').shouldRespond, false, 'Must not respond to @everyone broadcast');
-
-// 6.3: Mass broadcast that explicitly calls bot by name
-const namedInBroadcast = {
-  key: { remoteJid: group, fromMe: false },
-  message: {
-    extendedTextMessage: {
-      text: '@all @forgelabs what time is the meeting?',
       contextInfo: { mentionedJid: [botPhone, '2348011111111@s.whatsapp.net', '2348022222222@s.whatsapp.net'] },
     },
   },
 };
-assert.strictEqual(shouldRespondToMessage(namedInBroadcast, botPhone, '@all @forgelabs what time is the meeting?').shouldRespond, true, 'MUST respond when explicitly named in broadcast');
+assert.strictEqual(shouldRespondToMessage(massAll, botPhone, '@all').shouldRespond, true, 'Must respond when bot is tagged in group');
+
+// 6.2: Unmentioned message in group (bot is NOT tagged)
+const unmentionedGroup = {
+  key: { remoteJid: group, fromMe: false },
+  message: {
+    extendedTextMessage: {
+      text: 'please read this announcement',
+      contextInfo: { mentionedJid: ['2348011111111@s.whatsapp.net'] },
+    },
+  },
+};
+assert.strictEqual(shouldRespondToMessage(unmentionedGroup, botPhone, 'please read this announcement').shouldRespond, false, 'Must not respond when bot is not mentioned in group');
+
+// 6.3: Message that explicitly calls bot by name
+const namedInBroadcast = {
+  key: { remoteJid: group, fromMe: false },
+  message: {
+    extendedTextMessage: {
+      text: '@forgelabs what time is the meeting?',
+      contextInfo: { mentionedJid: [botPhone] },
+    },
+  },
+};
+assert.strictEqual(shouldRespondToMessage(namedInBroadcast, botPhone, '@forgelabs what time is the meeting?').shouldRespond, true, 'MUST respond when explicitly named in group');
 
 // 6.4: Direct 1-on-1 DM (always responds)
 const directDm = {
@@ -227,7 +227,7 @@ const directDm = {
 };
 assert.strictEqual(shouldRespondToMessage(directDm, botPhone, 'Hello bot').shouldRespond, true, 'Must always respond in DMs');
 
-console.log('✅ Section 6 Passed: Mass broadcast group triggers correctly filtered.\n');
+console.log('✅ Section 6 Passed: Group triggers and direct mentions correctly filtered.\n');
 
 // =========================================================================
 // SECTION 7: Executive Morning Digest Reasoning Synthesis
