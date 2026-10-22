@@ -945,10 +945,14 @@ export class WhatsAppClient {
     // 2. Distinguish "Message Yourself" (user testing on their own WhatsApp phone) vs user texting a 3rd party
     const cleanRemote = (msg.key?.remoteJid || '').split('@')[0].split(':')[0];
     const botOwnDigits = (this.sock?.user?.id || '').split('@')[0].split(':')[0] || '2347058967815';
+    const botOwnLidDigits = (this.sock?.user?.lid || '').split('@')[0].split(':')[0];
     const isMessageToSelf =
       Boolean(msg.key?.fromMe) &&
       !msg.key?.remoteJid?.endsWith('@g.us') &&
-      (cleanRemote === botOwnDigits || cleanRemote === '2347058967815' || cleanRemote === config.bot.pairingPhoneNumber);
+      (cleanRemote === botOwnDigits ||
+        cleanRemote === '2347058967815' ||
+        (botOwnLidDigits && cleanRemote === botOwnLidDigits) ||
+        cleanRemote === config.bot.pairingPhoneNumber);
 
     // If fromMe and NOT Message Yourself, the owner is manually texting someone else: do not intervene!
     if (msg.key?.fromMe && !isMessageToSelf) {
@@ -1017,10 +1021,10 @@ export class WhatsAppClient {
     batchLearner.recordExchange(normalized.chatJid, normalized.senderJid);
 
     // Historical Backlog Evaluation:
-    // Strictly ignore any message older than 2 minutes for immediate live trigger,
+    // Strictly ignore any message older than 10 minutes for immediate live trigger (accommodates Render redeploys),
     // and ONLY consider offline DMs that arrived DURING this session (never historical sync from before startup)
-    if (!isNaN(msgTime) && msgTime > 0 && Date.now() - msgTime > 120_000) {
-      if (!normalized.isGroup && msgTime >= this.sessionStartedAt - 5 * 60 * 1000) {
+    if (!isNaN(msgTime) && msgTime > 0 && Date.now() - msgTime > 600_000) {
+      if (!normalized.isGroup && msgTime >= this.sessionStartedAt - 10 * 60 * 1000) {
         this.scheduleUnrepliedScan(12_000);
       }
       return;
@@ -1127,7 +1131,14 @@ export class WhatsAppClient {
       botLid
     );
 
-    if (!shouldRespond) return;
+    if (!shouldRespond) {
+      if (normalized.isGroup) {
+        console.log(
+          `[Filter] 🔇 Ignored message from ${normalized.senderName} in group ${normalized.chatJid}: "${normalized.text?.slice(0, 40) || ''}"`
+        );
+      }
+      return;
+    }
 
     // Fast-Path for Bot Owner: Private DM View-Once Retrieval
     const isOwnerDmUser = userProfileManager.isOwner(normalized.senderJid, normalized.senderName);

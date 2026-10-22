@@ -15,7 +15,7 @@ const envSchema = z.object({
   GROQ_TEMPERATURE: z.coerce.number().default(0.7),
   GROQ_MAX_TOKENS: z.coerce.number().default(2048),
   GROQ_TOP_P: z.coerce.number().default(1),
-  GROQ_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('low'),
+  GROQ_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).optional(),
   BOT_NAME: z.string().default('Forgelabs assistant'),
   BOT_CREATOR: z.string().default('ADEMOLA'),
   BOT_PREFIX: z.string().default(''),

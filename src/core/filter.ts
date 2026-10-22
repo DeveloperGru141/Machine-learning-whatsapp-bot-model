@@ -40,10 +40,14 @@ export function shouldRespondToMessage(
   // Never respond to our own outbound messages UNLESS it is "Message Yourself" (owner testing the bot on the bot's phone)
   const cleanRemote = (msg.key.remoteJid || '').split('@')[0].split(':')[0];
   const botOwnDigits = (botJid || '').split('@')[0].split(':')[0] || '2347058967815';
+  const cleanLidId = (botLid || '').split(':')[0].split('@')[0];
   const isMessageToSelf =
     Boolean(msg.key.fromMe) &&
     !isGroup &&
-    (cleanRemote === botOwnDigits || cleanRemote === '2347058967815' || cleanRemote === config.bot.pairingPhoneNumber);
+    (cleanRemote === botOwnDigits ||
+      cleanRemote === '2347058967815' ||
+      (cleanLidId && cleanRemote === cleanLidId) ||
+      cleanRemote === config.bot.pairingPhoneNumber);
 
   if (msg.key.fromMe && !isMessageToSelf) {
     return { shouldRespond: false, cleanedText: rawText };
@@ -65,7 +69,6 @@ export function shouldRespondToMessage(
 
   // Normalize bot identifiers across standard phone number and LID formats
   const cleanPhoneId = (botJid || '').split(':')[0].split('@')[0];
-  const cleanLidId = (botLid || '').split(':')[0].split('@')[0];
 
   const botPhoneStandard = cleanPhoneId ? `${cleanPhoneId}@s.whatsapp.net` : '';
   const botPhoneLid = cleanPhoneId ? `${cleanPhoneId}@lid` : '';
@@ -150,7 +153,11 @@ export function shouldRespondToMessage(
   );
   const isNameCalled = textTriggerRegex.test(textLower);
 
-  if (isMentioned || isQuoted || isNameCalled) {
+  // Check 3b: Explicit bot command (e.g. .status, !ping, .help, /ask, .meme, .rvo)
+  const trimmed = (rawText || '').trim();
+  const isExplicitCommand = /^[!/.#$][a-zA-Z0-9_-]{2,}/.test(trimmed);
+
+  if (isMentioned || isQuoted || isNameCalled || isExplicitCommand) {
     if (isGroup) {
       recordGroupInteraction(groupJid);
     }
