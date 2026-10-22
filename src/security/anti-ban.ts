@@ -54,26 +54,24 @@ export class AntiBanEngine {
   private readonly minGlobalGapMs = 250; // 0.25s minimum gap between consecutive dispatches
 
   /**
-   * Calculates an authentic human reading delay proportional to the length of the message
-   * sent by the user (~1.2s - 2.5s for groups, ~700ms - 1.8s for DMs).
+   * Calculates an authentic human reading delay proportional to the length of the message.
+   * DMs are near-instant (~50ms) for ultra-snappy velocity, while groups have a light pause (300ms - 600ms).
    */
   public calculateReadingDelay(incomingTextLength: number = 0, isGroup: boolean = false): number {
     if (isLivetestRunner()) return 10;
+    if (!isGroup) return 50;
 
-    const cleanLen = Math.max(1, Math.min(incomingTextLength || 20, 150));
-    // Groups: Realistic human reading pause so group replies feel like an active human member
-    // DMs: Snappy, agile response (300ms - 800ms) so private chats feel immediate and attentive
-    const baseMs = isGroup ? 1200 : 300;
-    const perCharMs = isGroup ? 6 : 2;
+    const cleanLen = Math.max(1, Math.min(incomingTextLength || 20, 100));
+    const baseMs = 250;
+    const perCharMs = 2;
     const rawDelay = baseMs + cleanLen * perCharMs;
-    const jitter = Math.floor(Math.random() * (isGroup ? 300 : 100));
-    const maxCap = isGroup ? 2500 : 800;
-    return Math.min(maxCap, rawDelay + jitter);
+    return Math.min(600, rawDelay);
   }
 
   /**
-   * Calculates realistic human typing delay based on BOTH how long the user's message was
-   * and how long the bot's reply is (~8-14ms per character).
+   * Calculates realistic human typing delay based on message length.
+   * DMs: 150ms - 350ms for lightning-fast replies.
+   * Groups: 400ms - 1000ms to maintain authentic group cadence without sluggishness.
    */
   public calculateTypingDelay(
     responseTextLength: number = 0,
@@ -82,23 +80,13 @@ export class AntiBanEngine {
   ): number {
     if (isLivetestRunner()) return 20;
 
-    const replyLen = Math.max(10, Math.min(responseTextLength || 40, 150));
-    const userLen = Math.max(0, Math.min(incomingTextLength || 20, 100));
+    const baseMs = isGroup ? 400 : 120;
+    const replyTypingMs = Math.min(isGroup ? 600 : 200, responseTextLength * (isGroup ? 2 : 1));
+    const rawTotal = baseMs + replyTypingMs;
 
-    // Groups: Realistic human typing presence (1.8s - 3.8s)
-    // DMs: Fast typing presence (500ms - 1.4s) for high conversational velocity
-    const baseMs = isGroup ? 1500 : 450;
-    const replyTypingMs = replyLen * (isGroup ? 10 : 4);
-    const userComprehensionMs = userLen * (isGroup ? 3 : 1);
-    const rawTotal = baseMs + replyTypingMs + userComprehensionMs;
-
-    // Add +/- 10% natural human rhythm variance
-    const varianceFactor = 0.9 + Math.random() * 0.2;
-    const computed = Math.floor(rawTotal * varianceFactor);
-
-    const minFloor = isGroup ? 1800 : 500;
-    const maxCeiling = isGroup ? 3800 : 1400;
-    return Math.max(minFloor, Math.min(maxCeiling, computed));
+    const minFloor = isGroup ? 400 : 150;
+    const maxCeiling = isGroup ? 1000 : 350;
+    return Math.max(minFloor, Math.min(maxCeiling, rawTotal));
   }
 
   /**

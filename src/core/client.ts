@@ -1411,10 +1411,10 @@ export class WhatsAppClient {
       execute: async () => {
         let stopTyping: (() => void) | null = null;
         try {
-          // 1. Human reading delay proportional to user's message length (longer in groups)
-          await antiBanEngine.simulateReadingDelay(incomingCharLen, normalized.isGroup);
-          // 2. Start active typing bubble immediately so users know the bot is alive and crafting their reply
+          // 1. Start active typing bubble immediately so users know the bot is actively crafting their reply
           stopTyping = antiBanEngine.startTypingHeartbeat(sock, normalized.chatJid);
+          // 2. Light natural cadence pause (50ms in DM, 300-600ms in group)
+          await antiBanEngine.simulateReadingDelay(incomingCharLen, normalized.isGroup);
           await agentHarness.handleMessage(promptText, context);
 
           // 3. Autonomous Pattern-Based Sticker Engine:

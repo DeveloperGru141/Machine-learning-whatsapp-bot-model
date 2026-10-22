@@ -5,8 +5,8 @@ import { config } from '../config/env.js';
 export const geminiClient = new OpenAI({
   apiKey: config.gemini.apiKey || 'dummy_key',
   baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-  maxRetries: 1,
-  timeout: 25_000,
+  maxRetries: 0,
+  timeout: 5_000,
 });
 
 export const openRouterClient = new OpenAI({
@@ -68,14 +68,17 @@ export class LLMClient {
   private qwenQuotaExhaustedUntil: number = 0;
 
   public getProvider(): 'gemini' | 'groq' | 'openrouter' {
+    if (config.llm.provider === 'groq' && config.groq.apiKey) {
+      return 'groq';
+    }
+    if (config.llm.provider === 'openrouter' && config.openrouter.apiKey) {
+      return 'openrouter';
+    }
     if (config.gemini.apiKey) {
       if (Date.now() < this.geminiQuotaExhaustedUntil && config.groq.apiKey) {
         return 'groq';
       }
       return 'gemini';
-    }
-    if (config.llm.provider === 'openrouter' && config.openrouter.apiKey) {
-      return 'openrouter';
     }
     return 'groq';
   }
@@ -149,9 +152,9 @@ export class LLMClient {
           String(err?.message || err).includes('RESOURCE_EXHAUSTED');
 
         if (isQuota) {
-          // Instant failover: mark cooldown and throw immediately so Groq/Cerebras takes over with 0 delay!
-          this.geminiQuotaExhaustedUntil = Date.now() + 15 * 1000;
-          console.warn(`[LLMClient] ⚠️ Gemini model ${model} rate-limited (429). Instantly failing over to Groq/Cerebras...`);
+          // Instant failover: mark cooldown for 6 hours so Groq takes over immediately with 0 latency penalty
+          this.geminiQuotaExhaustedUntil = Date.now() + 6 * 60 * 60 * 1000;
+          console.warn(`[LLMClient] ⚠️ Gemini model ${model} rate-limited (429). Instantly failing over to Groq...`);
           throw new Error('Gemini rate-limited (429)');
         } else {
           console.warn(`[LLMClient] ⚠️ Gemini model ${model} encountered ${err?.status || err?.message || err}. Trying next candidate...`);
@@ -188,15 +191,10 @@ export class LLMClient {
         return await this.callGeminiInternal({ ...params, model: primaryModel });
       } catch (err: any) {
         if (config.groq.apiKey) {
-          console.log(`[LLMClient] 🔄 Falling back to Groq model: qwen/qwen3.8-27b`);
-          try {
-            return await this.callGroqInternal({ ...params, model: 'qwen/qwen3.8-27b' });
-          } catch (groqErr: any) {
-            console.warn(`[LLMClient] Groq fallback failed (${groqErr?.message || groqErr})`);
-          }
+          console.log(`[LLMClient] 🔄 Instant failover to Groq model: qwen/qwen3.8-27b`);
+          return await this.callGroqInternal({ ...params, model: 'qwen/qwen3.8-27b' });
         }
-        // Final resilient attempt on gemini-flash-latest
-        return await this.callGeminiInternal({ ...params, model: 'gemini-flash-latest' });
+        throw err;
       }
     } else if (provider === 'openrouter') {
       try {
