@@ -933,9 +933,19 @@ export class WhatsAppClient {
     }
 
     // Safely parse timestamp even if deserialized as protobuf Long object
-    const rawTs = (msg.messageTimestamp as any)?.low ?? msg.messageTimestamp;
-    const msgTime = Number(rawTs) * 1000;
-    const effectiveMsgTime = !isNaN(msgTime) && msgTime > 0 ? Math.min(msgTime, Date.now()) : Date.now();
+    let rawTs: any = (msg.messageTimestamp as any)?.toNumber
+      ? (msg.messageTimestamp as any).toNumber()
+      : ((msg.messageTimestamp as any)?.low ?? msg.messageTimestamp);
+
+    let msgTime = Number(rawTs);
+    if (!isNaN(msgTime) && msgTime > 0) {
+      if (msgTime < 1e11) {
+        msgTime *= 1000;
+      }
+    } else {
+      msgTime = Date.now();
+    }
+    const effectiveMsgTime = Math.min(msgTime, Date.now());
 
     // 1. Check if this is an automated outbound message sent by OutboundSender
     const isBotDispatched = Boolean(msg.key?.id && OutboundSender.isDispatchedId(msg.key.id));
@@ -952,17 +962,33 @@ export class WhatsAppClient {
     const botOwnLidDigits = (this.sock?.user?.lid || '').split('@')[0].split(':')[0];
     const credsMeId = (this.sock?.authState?.creds?.me?.id || '').split('@')[0].split(':')[0];
     const credsMeLid = (this.sock?.authState?.creds?.me?.lid || '').split('@')[0].split(':')[0];
+    const pairingDigits = (config.bot.pairingPhoneNumber || '').replace(/[^0-9]/g, '');
 
+    const isSelfChatJid = (jid?: string | null): boolean => {
+      if (!jid) return false;
+      const clean = jid.split('@')[0].split(':')[0];
+      return (
+        clean === botOwnDigits ||
+        clean === '2347058967815' ||
+        clean === '83954564632610' ||
+        (Boolean(botOwnLidDigits) && clean === botOwnLidDigits) ||
+        (Boolean(credsMeId) && clean === credsMeId) ||
+        (Boolean(credsMeLid) && clean === credsMeLid) ||
+        (Boolean(pairingDigits) && clean === pairingDigits)
+      );
+    };
+
+    const destJid = (msg.message as any)?.deviceSentMessage?.destinationJid;
     const isMessageToSelf =
       Boolean(msg.key?.fromMe) &&
       !msg.key?.remoteJid?.endsWith('@g.us') &&
-      (cleanRemote === botOwnDigits ||
-        cleanRemote === '2347058967815' ||
-        cleanRemote === '83954564632610' ||
-        (botOwnLidDigits && cleanRemote === botOwnLidDigits) ||
-        (credsMeId && cleanRemote === credsMeId) ||
-        (credsMeLid && cleanRemote === credsMeLid) ||
-        cleanRemote === config.bot.pairingPhoneNumber);
+      isSelfChatJid(msg.key?.remoteJid) &&
+      (!destJid || isSelfChatJid(destJid));
+
+    const rawKeys = msg.message ? Object.keys(msg.message) : [];
+    console.log(
+      `[processIncomingMessage] 🔍 id=${msg.key?.id} fromMe=${msg.key?.fromMe} remote=${msg.key?.remoteJid} isSelf=${isMessageToSelf} keys=[${rawKeys.join(',')}]`
+    );
 
     // If fromMe and NOT Message Yourself, the owner is manually texting someone else: do not intervene!
     if (msg.key?.fromMe && !isMessageToSelf) {
@@ -972,7 +998,7 @@ export class WhatsAppClient {
       const normalized = normalizeMessage(msg);
       if (normalized && (normalized.text || normalized.contentType)) {
         chatLogger.logMessage({
-          chatJid: normalized.chatJid,
+          chatJid: destJid || normalized.chatJid,
           senderJid: 'bot',
           senderName: config.bot.name,
           isGroup: normalized.isGroup,
@@ -995,7 +1021,12 @@ export class WhatsAppClient {
     await this.interceptViewOnceMessage(msg);
 
     const normalized = normalizeMessage(msg);
-    if (!normalized) return;
+    if (!normalized) {
+      if (rawKeys.length > 0 && !rawKeys.includes('protocolMessage') && !rawKeys.includes('senderKeyDistributionMessage')) {
+        console.log(`[processIncomingMessage] ℹ️ Message unwrapped but produced no normalized content: keys=[${rawKeys.join(',')}]`);
+      }
+      return;
+    }
 
     // If Message Yourself, set sender to the owner so owner recognition triggers properly
     if (isMessageToSelf) {
@@ -1405,7 +1436,16 @@ export class WhatsAppClient {
           incomingCharLen,
           normalized.isGroup
         );
-        const res = await OutboundSender.replyText(sock, targetChatJid, text, safeQuoted);
+        const res = await OutboundSender.replyText(
+          sock,
+          targetChatJid,
+          text,
+          safeQuoted,
+          isOwnerUser,
+          false,
+          undefined,
+          true
+        );
         if (normalized.isGroup) {
           recordGroupInteraction(normalized.chatJid);
         }
@@ -1855,7 +1895,7 @@ export class WhatsAppClient {
           rawMessage: syntheticMsg,
           replyText: async (text: string) => {
             await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, false, userMsgLen, false);
-            return OutboundSender.replyText(sock, chat.chatJid, text, undefined);
+            return OutboundSender.replyText(sock, chat.chatJid, text, undefined, isOwner, false, undefined, true);
           },
           sendSticker: async (bufferOrPath: Buffer | string) =>
             OutboundSender.sendSticker(sock, chat.chatJid, bufferOrPath, undefined),

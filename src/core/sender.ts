@@ -29,13 +29,19 @@ export class OutboundSender {
   /**
    * Verifies outbound safety with the Anti-Ban Engine before dispatching.
    */
-  private static checkSafety(chatJid: string, quoted?: proto.IWebMessageInfo, isOwnerCommand?: boolean, isProactiveCheckIn?: boolean): boolean {
+  private static checkSafety(
+    chatJid: string,
+    quoted?: proto.IWebMessageInfo,
+    isOwnerCommand?: boolean,
+    isProactiveCheckIn?: boolean,
+    isReply: boolean = true
+  ): boolean {
     const isGroup = chatJid.endsWith('@g.us');
     const check = antiBanEngine.canSendOutbound({
       chatJid,
       isGroup,
-      isReplyToInbound: Boolean(quoted),
-      isGroupMention: Boolean(quoted),
+      isReplyToInbound: isReply || Boolean(quoted),
+      isGroupMention: isReply || Boolean(quoted),
       isOwnerCommand,
       isProactiveCheckIn,
     });
@@ -155,11 +161,12 @@ export class OutboundSender {
     quoted?: proto.IWebMessageInfo,
     isOwnerCommand?: boolean,
     isProactiveCheckIn?: boolean,
-    mentions?: string[]
+    mentions?: string[],
+    isReply: boolean = true
   ): Promise<any> {
     const targetJid = this.resolveDeliveryJid(chatJid);
 
-    if (!this.checkSafety(targetJid, quoted, isOwnerCommand, isProactiveCheckIn)) return null;
+    if (!this.checkSafety(targetJid, quoted, isOwnerCommand, isProactiveCheckIn, isReply)) return null;
 
     const cleanText = this.sanitizeOutboundText(text);
     if (!cleanText || !cleanText.trim()) {
@@ -242,19 +249,21 @@ export class OutboundSender {
     chatJid: string,
     bufferOrPath: Buffer | string,
     quoted?: proto.IWebMessageInfo,
-    mentions?: string[]
+    mentions?: string[],
+    isReply: boolean = true
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted)) return null;
+    const targetJid = this.resolveDeliveryJid(chatJid);
+    if (!this.checkSafety(targetJid, quoted, false, false, isReply)) return null;
 
-    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
+    const safeQuoted = this.sanitizeQuoted(targetJid, quoted);
     const buffer = typeof bufferOrPath === 'string'
       ? fs.readFileSync(bufferOrPath)
       : bufferOrPath;
 
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return antiBanEngine.scheduleDispatch(targetJid, async () => {
       let currentSock = sock || activeSocketGetter?.();
       if (!currentSock) {
-        console.warn(`[OutboundSender] No active socket to send sticker to ${chatJid}`);
+        console.warn(`[OutboundSender] No active socket to send sticker to ${targetJid}`);
         return null;
       }
       const payload: any = { sticker: buffer };
@@ -263,7 +272,7 @@ export class OutboundSender {
       }
       try {
         const res = await currentSock.sendMessage(
-          chatJid,
+          targetJid,
           payload,
           safeQuoted ? { quoted: safeQuoted } : undefined
         );
@@ -272,11 +281,11 @@ export class OutboundSender {
       } catch (err: any) {
         console.warn(`[OutboundSender] sendSticker with quoted failed (${err.message}), retrying directly with mentions...`);
         try {
-          const res = await currentSock.sendMessage(chatJid, payload);
+          const res = await currentSock.sendMessage(targetJid, payload);
           this.recordDispatchedId(res?.key?.id);
           return res;
         } catch (retryErr: any) {
-          console.error(`[OutboundSender] Failed to send sticker directly to ${chatJid}:`, retryErr.message);
+          console.error(`[OutboundSender] Failed to send sticker directly to ${targetJid}:`, retryErr.message);
           throw retryErr;
         }
       }
@@ -288,20 +297,22 @@ export class OutboundSender {
     chatJid: string,
     bufferOrUrl: Buffer | string,
     caption?: string,
-    quoted?: proto.IWebMessageInfo
+    quoted?: proto.IWebMessageInfo,
+    isReply: boolean = true
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted)) return null;
+    const targetJid = this.resolveDeliveryJid(chatJid);
+    if (!this.checkSafety(targetJid, quoted, false, false, isReply)) return null;
 
-    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
+    const safeQuoted = this.sanitizeQuoted(targetJid, quoted);
     const content = Buffer.isBuffer(bufferOrUrl)
       ? bufferOrUrl
       : { url: bufferOrUrl };
     const cleanCaption = caption ? this.sanitizeOutboundText(caption) : undefined;
 
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return antiBanEngine.scheduleDispatch(targetJid, async () => {
       try {
         const res = await sock.sendMessage(
-          chatJid,
+          targetJid,
           { image: content, caption: cleanCaption },
           { quoted: safeQuoted }
         );
@@ -310,7 +321,7 @@ export class OutboundSender {
       } catch (err: any) {
         if (safeQuoted) {
           console.warn(`[OutboundSender] sendImage with quoted failed (${err.message}), retrying directly...`);
-          const res = await sock.sendMessage(chatJid, { image: content, caption: cleanCaption });
+          const res = await sock.sendMessage(targetJid, { image: content, caption: cleanCaption });
           this.recordDispatchedId(res?.key?.id);
           return res;
         }
@@ -324,11 +335,13 @@ export class OutboundSender {
     chatJid: string,
     bufferOrUrl: Buffer | string,
     isVoiceNote: boolean = false,
-    quoted?: proto.IWebMessageInfo
+    quoted?: proto.IWebMessageInfo,
+    isReply: boolean = true
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted)) return null;
+    const targetJid = this.resolveDeliveryJid(chatJid);
+    if (!this.checkSafety(targetJid, quoted, false, false, isReply)) return null;
 
-    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
+    const safeQuoted = this.sanitizeQuoted(targetJid, quoted);
     const content = Buffer.isBuffer(bufferOrUrl)
       ? bufferOrUrl
       : { url: bufferOrUrl };
@@ -345,10 +358,10 @@ export class OutboundSender {
       }
     }
 
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return antiBanEngine.scheduleDispatch(targetJid, async () => {
       try {
         const res = await sock.sendMessage(
-          chatJid,
+          targetJid,
           {
             audio: content,
             mimetype,
@@ -361,7 +374,7 @@ export class OutboundSender {
       } catch (err: any) {
         if (safeQuoted) {
           console.warn(`[OutboundSender] sendAudio with quoted failed (${err.message}), retrying directly...`);
-          const res = await sock.sendMessage(chatJid, {
+          const res = await sock.sendMessage(targetJid, {
             audio: content,
             mimetype,
             ptt: isVoiceNote,
@@ -379,20 +392,22 @@ export class OutboundSender {
     chatJid: string,
     bufferOrUrl: Buffer | string,
     caption?: string,
-    quoted?: proto.IWebMessageInfo
+    quoted?: proto.IWebMessageInfo,
+    isReply: boolean = true
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted)) return null;
+    const targetJid = this.resolveDeliveryJid(chatJid);
+    if (!this.checkSafety(targetJid, quoted, false, false, isReply)) return null;
 
-    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
+    const safeQuoted = this.sanitizeQuoted(targetJid, quoted);
     const content = Buffer.isBuffer(bufferOrUrl)
       ? bufferOrUrl
       : { url: bufferOrUrl };
     const cleanCaption = caption ? this.sanitizeOutboundText(caption) : undefined;
 
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return antiBanEngine.scheduleDispatch(targetJid, async () => {
       try {
         return await sock.sendMessage(
-          chatJid,
+          targetJid,
           {
             video: content,
             caption: cleanCaption,
@@ -403,7 +418,7 @@ export class OutboundSender {
       } catch (err: any) {
         if (safeQuoted) {
           console.warn(`[OutboundSender] sendVideo with quoted failed (${err.message}), retrying directly...`);
-          return await sock.sendMessage(chatJid, {
+          return await sock.sendMessage(targetJid, {
             video: content,
             caption: cleanCaption,
             mimetype: 'video/mp4',
@@ -419,11 +434,13 @@ export class OutboundSender {
     chatJid: string,
     displayName: string,
     phoneNumber: string,
-    quoted?: proto.IWebMessageInfo
+    quoted?: proto.IWebMessageInfo,
+    isReply: boolean = true
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted)) return null;
+    const targetJid = this.resolveDeliveryJid(chatJid);
+    if (!this.checkSafety(targetJid, quoted, false, false, isReply)) return null;
 
-    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
+    const safeQuoted = this.sanitizeQuoted(targetJid, quoted);
     const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
     const vcard =
       'BEGIN:VCARD\n' +
@@ -432,9 +449,9 @@ export class OutboundSender {
       `TEL;type=CELL;type=VOICE;waid=${cleanNumber}:+${cleanNumber}\n` +
       'END:VCARD';
 
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return antiBanEngine.scheduleDispatch(targetJid, async () => {
       return await sock.sendMessage(
-        chatJid,
+        targetJid,
         {
           contacts: {
             displayName,
@@ -452,11 +469,13 @@ export class OutboundSender {
     question: string,
     options: string[],
     selectableCount: number = 1,
-    quoted?: proto.IWebMessageInfo
+    quoted?: proto.IWebMessageInfo,
+    isReply: boolean = true
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted)) return null;
+    const targetJid = this.resolveDeliveryJid(chatJid);
+    if (!this.checkSafety(targetJid, quoted, false, false, isReply)) return null;
 
-    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
+    const safeQuoted = this.sanitizeQuoted(targetJid, quoted);
     const cleanOptions = (options || []).map((o) => String(o).trim()).filter(Boolean);
     if (cleanOptions.length < 2) {
       throw new Error('A WhatsApp poll requires at least 2 options.');

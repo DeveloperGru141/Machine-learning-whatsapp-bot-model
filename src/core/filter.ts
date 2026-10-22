@@ -41,14 +41,26 @@ export function shouldRespondToMessage(
   const cleanRemote = (msg.key.remoteJid || '').split('@')[0].split(':')[0];
   const botOwnDigits = (botJid || '').split('@')[0].split(':')[0] || '2347058967815';
   const cleanLidId = (botLid || '').split(':')[0].split('@')[0];
+  const pairingDigits = (config.bot.pairingPhoneNumber || '').replace(/[^0-9]/g, '');
+
+  const isSelfChatJid = (jid?: string | null): boolean => {
+    if (!jid) return false;
+    const clean = jid.split('@')[0].split(':')[0];
+    return (
+      clean === botOwnDigits ||
+      clean === '2347058967815' ||
+      clean === '83954564632610' ||
+      (Boolean(cleanLidId) && clean === cleanLidId) ||
+      (Boolean(pairingDigits) && clean === pairingDigits)
+    );
+  };
+
+  const destJid = (msg.message as any)?.deviceSentMessage?.destinationJid;
   const isMessageToSelf =
     Boolean(msg.key.fromMe) &&
     !isGroup &&
-    (cleanRemote === botOwnDigits ||
-      cleanRemote === '2347058967815' ||
-      cleanRemote === '83954564632610' ||
-      (cleanLidId && cleanRemote === cleanLidId) ||
-      cleanRemote === config.bot.pairingPhoneNumber);
+    isSelfChatJid(msg.key.remoteJid) &&
+    (!destJid || isSelfChatJid(destJid));
 
   if (msg.key.fromMe && !isMessageToSelf) {
     return { shouldRespond: false, cleanedText: rawText };
@@ -144,12 +156,11 @@ export function shouldRespondToMessage(
   // Check 3: Was the bot called by name or phone number in text?
   const textLower = (rawText || '').toLowerCase().trim();
   const botConfigName = (config.bot.name || 'forgelabs').toLowerCase();
-  const pairingDigits = (config.bot.pairingPhoneNumber || '07058967815').replace(/[^0-9]/g, '');
   const cleanPhoneDigits = cleanPhoneId || '2347058967815';
   const cleanLidDigits = cleanLidId || '83954564632610';
 
   const textTriggerRegex = new RegExp(
-    `(^|\\s|@)(${botConfigName}|forgelabs|assistant|bot|${cleanPhoneDigits}|${pairingDigits}|${cleanLidDigits})\\b`,
+    `(^|\\s|@)(${botConfigName}|forgelabs|assistant|bot|${cleanPhoneDigits}|${pairingDigits || '07058967815'}|${cleanLidDigits})\\b`,
     'i'
   );
   const isNameCalled = textTriggerRegex.test(textLower);

@@ -12,28 +12,28 @@ export interface NormalizedMessage {
 }
 
 /**
- * Recursively unwraps WhatsApp message wrappers (ephemeral, viewOnce, documentWithCaption, etc.)
+ * Recursively unwraps WhatsApp message wrappers (ephemeral, viewOnce, documentWithCaption, deviceSent, botInvoke, etc.)
  */
 export function unwrapMessage(msg: proto.IMessage | undefined | null): proto.IMessage | undefined | null {
   if (!msg) return null;
   let m: any = extractMessageContent(msg) || msg;
 
-  // Recursively peel wrappers
-  while (
-    m?.ephemeralMessage?.message ||
-    m?.viewOnceMessage?.message ||
-    m?.viewOnceMessageV2?.message ||
-    m?.viewOnceMessageV2Extension?.message ||
-    m?.documentWithCaptionMessage?.message ||
-    m?.protocolMessage?.editedMessage
-  ) {
+  // Recursively peel wrappers up to 10 levels deep
+  for (let i = 0; i < 10; i++) {
     const next =
-      m.ephemeralMessage?.message ||
-      m.viewOnceMessage?.message ||
-      m.viewOnceMessageV2?.message ||
-      m.viewOnceMessageV2Extension?.message ||
-      m.documentWithCaptionMessage?.message ||
-      m.protocolMessage?.editedMessage;
+      m?.ephemeralMessage?.message ||
+      m?.viewOnceMessage?.message ||
+      m?.viewOnceMessageV2?.message ||
+      m?.viewOnceMessageV2Extension?.message ||
+      m?.documentWithCaptionMessage?.message ||
+      m?.protocolMessage?.editedMessage ||
+      m?.deviceSentMessage?.message ||
+      m?.botInvokeMessage?.message ||
+      m?.groupMentionedMessage?.message ||
+      m?.associatedChildMessage?.message ||
+      m?.editedMessage?.message;
+
+    if (!next) break;
     m = extractMessageContent(next) || next;
   }
 
@@ -118,14 +118,23 @@ export function normalizeMessage(msg: proto.IWebMessageInfo): NormalizedMessage 
     text = m.documentMessage.fileName || '[Document]';
     contentType = 'document';
     hasContent = true;
+  } else if (m.interactiveMessage?.body?.text) {
+    text = m.interactiveMessage.body.text;
+    hasContent = true;
   } else if (m.interactiveResponseMessage?.body?.text) {
     text = m.interactiveResponseMessage.body.text;
     hasContent = true;
-  } else if (m.buttonsResponseMessage?.selectedButtonId) {
-    text = m.buttonsResponseMessage.selectedButtonId;
+  } else if (m.buttonsResponseMessage?.selectedDisplayText || m.buttonsResponseMessage?.selectedButtonId) {
+    text = m.buttonsResponseMessage.selectedDisplayText || m.buttonsResponseMessage.selectedButtonId || '';
     hasContent = true;
-  } else if (m.templateButtonReplyMessage?.selectedId) {
-    text = m.templateButtonReplyMessage.selectedId;
+  } else if (m.templateButtonReplyMessage?.selectedDisplayText || m.templateButtonReplyMessage?.selectedId) {
+    text = m.templateButtonReplyMessage.selectedDisplayText || m.templateButtonReplyMessage.selectedId || '';
+    hasContent = true;
+  } else if (m.listResponseMessage?.title || m.listResponseMessage?.singleSelectReply?.selectedRowId) {
+    text = m.listResponseMessage.title || m.listResponseMessage.singleSelectReply?.selectedRowId || '';
+    hasContent = true;
+  } else if (m.pollCreationMessage?.name || m.pollCreationMessageV2?.name || m.pollCreationMessageV3?.name) {
+    text = m.pollCreationMessage?.name || m.pollCreationMessageV2?.name || m.pollCreationMessageV3?.name || '';
     hasContent = true;
   } else if (m.contactMessage?.displayName) {
     text = `[Contact: ${m.contactMessage.displayName}]`;
