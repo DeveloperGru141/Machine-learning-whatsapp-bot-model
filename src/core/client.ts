@@ -220,13 +220,31 @@ export class WhatsAppClient {
     return Boolean(creds?.registered || creds?.account || creds?.me?.lid);
   }
 
+  public async clearRenderSessionBundle(): Promise<void> {
+    try {
+      const apiKey = process.env.RENDER_API_KEY || '[REDACTED_RENDER_API_KEY]';
+      const serviceId = process.env.RENDER_SERVICE_ID || 'srv-db9jvcmq1p3s738hpa40';
+      const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars/SESSION_BUNDLE_BASE64`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Accept': 'application/json',
+        },
+        signal: AbortSignal.timeout(10_000),
+      });
+      console.log(`[WhatsAppClient] 🗑️ Cleared SESSION_BUNDLE_BASE64 from Render environment variables (status: ${res.status}).`);
+    } catch (err: any) {
+      console.warn('[WhatsAppClient] Failed to clear Render session bundle:', err?.message || err);
+    }
+  }
+
   /**
    * Returns the current valid pairing code for the active socket, or performs a clean
    * session reset if forceReset is true (or if code is expired / none generated yet).
    * Never calls requestPairingCode twice on the same authState to avoid corrupting noise keys.
    */
   public async requestFreshPairingCode(forceReset: boolean = false): Promise<string | null> {
-    if (this.isRegistered()) {
+    if (this.isRegistered() && !forceReset) {
       return null;
     }
 
@@ -243,6 +261,9 @@ export class WhatsAppClient {
     // Clean session wipe & fresh socket start
     console.log('[WhatsAppClient] 🔄 Generating clean pairing session and fresh pairing code...');
     this.sessionBundleInvalidated = true;
+    if (forceReset) {
+      await this.clearRenderSessionBundle();
+    }
     try {
       if (this.sock) {
         this.sock.ev.removeAllListeners('connection.update');
@@ -265,8 +286,8 @@ export class WhatsAppClient {
     this.isConnecting = false;
     await this.start();
 
-    // Wait up to 15 seconds for the fresh socket's QR handshake to generate the single clean pairing code
-    for (let i = 0; i < 30; i++) {
+    // Wait up to 20 seconds for the fresh socket's QR handshake to generate the single clean pairing code
+    for (let i = 0; i < 40; i++) {
       if (this.latestPairingCode) {
         return this.latestPairingCode;
       }
@@ -354,6 +375,7 @@ export class WhatsAppClient {
 
   
   public async autoBackupSessionToRender(): Promise<void> {
+    if (this.sessionBundleInvalidated) return;
     const credsFile = path.join(config.paths.sessions, 'creds.json');
     if (!fs.existsSync(credsFile)) return;
 
@@ -729,6 +751,7 @@ export class WhatsAppClient {
           this.pairingRequested = false;
           this.latestPairingCode = null;
           this.latestQr = null;
+          this.sessionBundleInvalidated = false;
           healthMonitor.setConnectionStatus(true);
           if (this.isRegistered()) { this.autoBackupSessionToRender(); }
           this.startKeepAlive();

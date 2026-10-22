@@ -184,12 +184,19 @@ function startHealthServer() {
       return;
     }
 
-    // 2. WhatsApp Pairing & QR Endpoints (Never blocked by rate-limiting)
-    if (req.url && (req.url.startsWith('/qr') || req.url.startsWith('/pair'))) {
+    // 2. WhatsApp Pairing, Reset & Reconnect Endpoints (Never blocked by rate-limiting)
+    if (req.url && (req.url.startsWith('/qr') || req.url.startsWith('/pair') || req.url.startsWith('/reset-session') || req.url.startsWith('/reconnect'))) {
       const registered = whatsAppClient.isRegistered();
+      const isForceReset =
+        req.url.includes('refresh=1') ||
+        req.url.includes('new=1') ||
+        req.url.includes('force=1') ||
+        req.url.includes('reset=1') ||
+        req.url.startsWith('/reset-session') ||
+        req.url.startsWith('/reconnect');
 
-      // On-demand refresh endpoint: /pair?refresh=1 or /qr?refresh=1
-      if (req.url.includes('refresh=1') || req.url.includes('new=1')) {
+      // On-demand refresh/reset endpoint: /reset-session, /reconnect, /pair?refresh=1, /pair?force=1
+      if (isForceReset) {
         const freshCode = await whatsAppClient.requestFreshPairingCode(true);
         const freshQr = whatsAppClient.getLatestQr();
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -200,7 +207,8 @@ function startHealthServer() {
             pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2347058967815'}`,
             pairingCode: freshCode,
             qr: freshQr,
-          })
+            instructions: 'Enter this 8-character pairing code in WhatsApp on your phone: Settings > Linked Devices > Link with Phone Number',
+          }, null, 2)
         );
         return;
       }
