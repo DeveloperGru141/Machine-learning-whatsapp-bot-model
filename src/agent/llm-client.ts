@@ -66,6 +66,7 @@ export interface LLMChatResponse {
 export class LLMClient {
   private geminiQuotaExhaustedUntil: number = 0;
   private qwenQuotaExhaustedUntil: number = 0;
+  private groqClientIndex: number = 0;
 
   public getProvider(): 'gemini' | 'groq' | 'openrouter' {
     if (config.llm.provider === 'groq' && config.groq.apiKey) {
@@ -259,8 +260,15 @@ export class LLMClient {
       return payload;
     };
 
-    // 1. Try Groq clients pool across all candidate models
-    for (const client of groqClients) {
+    // 1. Try Groq clients pool across all candidate models with round-robin load distribution
+    const totalClients = groqClients.length;
+    const startIndex = totalClients > 0 ? this.groqClientIndex % totalClients : 0;
+    this.groqClientIndex = totalClients > 0 ? (this.groqClientIndex + 1) % totalClients : 0;
+    const orderedClients = totalClients > 1
+      ? [...groqClients.slice(startIndex), ...groqClients.slice(0, startIndex)]
+      : groqClients;
+
+    for (const client of orderedClients) {
       for (const modelName of candidateModels) {
         if (modelName === 'qwen/qwen3.8-27b' && Date.now() < this.qwenQuotaExhaustedUntil) {
           console.log(`[LLMClient] ⏳ Qwen in brief cooldown (${Math.ceil((this.qwenQuotaExhaustedUntil - Date.now()) / 1000)}s remaining), trying fallback models...`);

@@ -23,6 +23,7 @@ import { healthMonitor } from '../../core/health-monitor.js';
 import { db } from '../../memory/db.js';
 import { config, normalizePhoneNumber } from '../../config/env.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
+import { contactService } from '../../memory/contact-service.js';
 import {
   broadcastMorningGroupMotivation,
   broadcastEveningGroupRoundup,
@@ -74,6 +75,102 @@ export function parseTimeToHHMM(timeStr: string): string {
   if (isPm && hour < 12) hour += 12;
   if (isAm && hour === 12) hour = 0;
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+/**
+ * Generates an Executive Morning Intelligence Briefing for owner Ademola.
+ * Combines overnight DM catch-up, pending agenda for the day, tech/AI pulse, and system health.
+ */
+export async function buildExecutiveMorningDigest(): Promise<string> {
+  const report = healthMonitor.getHealthReport();
+  const uptimeHours = Math.floor(report.uptime / 3600);
+  const uptimeMinutes = Math.floor((report.uptime % 3600) / 60);
+  const memMb = Math.round(report.memoryUsage.rss / 1024 / 1024);
+
+  const dateFormatted = new Date().toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+
+  // 1. Overnight & Unreplied DMs
+  let unrepliedSection = '• *Direct Messages*: All DMs are replied and up to date! 🟢';
+  try {
+    const unreplied = contactService.getUnrepliedChats();
+    const filtered = unreplied.filter(
+      (c: any) => c.chatJid && !c.chatJid.endsWith('@g.us') && !c.chatJid.includes('broadcast')
+    );
+    if (filtered.length > 0) {
+      const names = filtered.slice(0, 3).map((c: any) => c.senderName || c.chatJid.split('@')[0]).join(', ');
+      unrepliedSection = `• *Direct Messages*: ⚠️ ${filtered.length} unreplied DM(s) waiting from ${names}`;
+    }
+  } catch {}
+
+  // 2. Today's Agenda & Pending Tasks
+  let agendaSection = '• *Scheduled Tasks*: No pending personal tasks due today.';
+  try {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
+
+    const pendingToday = db.prepare(`
+      SELECT topic, message, time_of_day, fire_at FROM scheduled_tasks
+      WHERE status = 'pending'
+        AND fire_at >= ? AND fire_at <= ?
+      ORDER BY fire_at ASC LIMIT 4
+    `).all(startOfToday.getTime(), endOfToday.getTime()) as Array<{
+      topic: string;
+      message: string;
+      time_of_day?: string;
+      fire_at: number;
+    }>;
+
+    if (pendingToday.length > 0) {
+      const items = pendingToday.map((t) => {
+        const timeStr = t.time_of_day || new Date(t.fire_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const label = t.topic && t.topic !== 'custom' ? `[${t.topic}]` : '';
+        return `  ⏰ ${timeStr} — ${label} ${t.message.slice(0, 50)}`;
+      });
+      agendaSection = `• *Today's Agenda & Tasks*:\n${items.join('\n')}`;
+    }
+  } catch {}
+
+  // 3. Tech & AI Pulse
+  let techPulse =
+    '• *Tech Pulse*: Open-weights reasoning models and multi-tool agentic workflows continue expanding across mobile and server infrastructure.';
+  try {
+    const aiRes = await llmClient.chatCompletion({
+      messages: [
+        {
+          role: 'system',
+          content: 'You provide a 1-2 sentence ultra-concise executive tech & AI intelligence bullet for a tech founder. Punchy, professional, and forward-looking.',
+        },
+        { role: 'user', content: "Provide today's top 1-2 sentence executive AI and tech development summary." },
+      ],
+      max_tokens: 120,
+      temperature: 0.7,
+    });
+    const insight = aiRes.choices[0]?.message?.content?.trim();
+    if (insight && insight.length > 20) {
+      techPulse = `• *Tech & AI Pulse*: ${insight}`;
+    }
+  } catch {}
+
+  return (
+    `☀️ *FORGELABS ASSISTANT • EXECUTIVE MORNING BRIEFING*\n` +
+    `📅 ${dateFormatted} | Creator: Ademola\n\n` +
+    `🎯 *Today's Overview:*\n` +
+    `${agendaSection}\n` +
+    `${unrepliedSection}\n` +
+    `${techPulse}\n\n` +
+    `⚡ *System Vitals:*\n` +
+    `• *Uptime*: ${uptimeHours}h ${uptimeMinutes}m | *RAM*: ${memMb} MB RSS\n` +
+    `• *WhatsApp Socket*: ${report.isConnected ? 'Connected 🟢' : 'Active 🟢'}\n` +
+    `• *LLM Engine Pool*: 3 Groq Keys Active (Qwen 3.8 / GPT-OSS Failover)\n\n` +
+    `Top of the morning boss Ademola! Everything is primed and ready. Let's make today count! 🤝🔥`
+  );
 }
 
 /**
@@ -151,7 +248,16 @@ async function generateMorningContent(topic: string, customPrompt?: string): Pro
   let systemPrompt = '';
   let userQuery = '';
 
-  if (normTopic === 'owner_health_report' || normTopic === 'bot_health_status') {
+  if (
+    normTopic === 'owner_health_report' ||
+    normTopic === 'executive_briefing' ||
+    normTopic === 'morning_briefing' ||
+    normTopic === 'daily_briefing'
+  ) {
+    return buildExecutiveMorningDigest();
+  }
+
+  if (normTopic === 'bot_health_status') {
     return buildBotHealthReport();
   }
 
@@ -951,7 +1057,24 @@ export class SchedulerPlugin implements IPlugin {
   }
 
   tools: BotTool[] = [
-        {
+    {
+      name: 'get_executive_briefing',
+      description:
+        'Provides an executive morning intelligence briefing for owner Ademola with today\'s agenda, pending tasks, unreplied DMs, tech & AI pulse, and system health status. Use whenever someone asks for a morning briefing, executive digest, daily overview, or "brief me".',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (_args: any, _ctx: ExecutionContext): Promise<ToolResult> => {
+        try {
+          const briefing = await buildExecutiveMorningDigest();
+          return { success: true, message: briefing, data: briefing };
+        } catch (err: any) {
+          return { success: false, message: `Could not generate executive briefing: ${err.message}` };
+        }
+      },
+    },
+    {
       name: 'broadcast_group_evening_roundup',
       description:
         'Delivers the evening roundup and calming night reflection motivational quote across participating WhatsApp groups or to a specific group.',

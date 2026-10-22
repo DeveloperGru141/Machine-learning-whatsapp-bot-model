@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "ingest": "uv run --python 3.15 python scripts/ingest_chats.py",
     "validate-data": "uv run --python 3.15 python scripts/validate_and_finetune.py",
-    "test": "node test_new_features.cjs && node test_boss_relay.mjs && node test_group_admin.mjs && node test_anti_hallucination.cjs && node scripts/test_all_harness_tools.cjs"
+    "test": "node test_new_features.cjs && node test_boss_relay.mjs && node test_group_admin.mjs && node test_anti_hallucination.cjs && node test_new_helper_features.cjs && node scripts/test_all_harness_tools.cjs"
   },
   "keywords": [
     "whatsapp",

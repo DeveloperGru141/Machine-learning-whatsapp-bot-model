@@ -13,6 +13,7 @@ export interface ExecutionContext {
   sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) => Promise<any>;
   sendVideo: (bufferOrUrl: Buffer | string, caption?: string) => Promise<any>;
   sendContact: (displayName: string, phoneNumber: string) => Promise<any>;
+  sendPoll?: (question: string, options: string[], selectableCount?: number) => Promise<any>;
 }
 
 export interface ToolResult {

@@ -3,6 +3,8 @@ import { config } from '../../config/env.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
 import { chatLogger } from '../../memory/chat-logger.js';
 import { contactService } from '../../memory/contact-service.js';
+import { llmClient } from '../../agent/llm-client.js';
+import { OutboundSender } from '../../core/sender.js';
 import {
   db,
   logAutonomousAction,
@@ -1537,6 +1539,167 @@ export class GroupAdminPlugin implements IPlugin {
           success: false,
           message: 'Omo chief, I dey here steady! I no dey leave or exit this group abeg, we dey together sharp sharp! 😂🤝',
         };
+      },
+    },
+    {
+      name: 'create_poll',
+      description:
+        'Creates an interactive, native WhatsApp poll with multiple selectable options in the current group or direct chat. Use whenever someone wants to take a vote, create a poll, make a decision, or ask group members to vote on choices.',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: {
+            type: 'string',
+            description: 'The poll question or topic being voted on.',
+          },
+          options: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'List of choices or options for participants to vote on (minimum 2 options, up to 12).',
+          },
+          selectable_count: {
+            type: 'number',
+            description: 'Maximum number of options each user can select (default: 1 for single-choice poll).',
+          },
+        },
+        required: ['question', 'options'],
+      },
+      execute: async (
+        args: { question?: string; options?: string[] | string; selectable_count?: number },
+        ctx: ExecutionContext
+      ): Promise<ToolResult> => {
+        try {
+          const rawQ = (args.question || '').trim();
+          if (!rawQ) {
+            return { success: false, message: 'Please provide a question for the poll.' };
+          }
+
+          let rawOptions: string[] = [];
+          if (Array.isArray(args.options)) {
+            rawOptions = args.options;
+          } else if (typeof args.options === 'string') {
+            rawOptions = args.options.split(/[,;\n|]+/).map((s) => s.trim()).filter(Boolean);
+          }
+
+          const cleanOptions = rawOptions.map((o) => String(o).trim()).filter(Boolean);
+          if (cleanOptions.length < 2) {
+            return {
+              success: false,
+              message: 'A poll requires at least 2 distinct voting options (e.g. ["Yes", "No"]).',
+            };
+          }
+
+          const selectable = Math.min(cleanOptions.length, Math.max(1, Number(args.selectable_count) || 1));
+
+          if (ctx.sendPoll) {
+            await ctx.sendPoll(rawQ, cleanOptions, selectable);
+          } else {
+            await OutboundSender.sendPoll(ctx.sock, ctx.chatJid, rawQ, cleanOptions, selectable, ctx.rawMessage);
+          }
+
+          return {
+            success: true,
+            message: `Poll created successfully! Question: "${rawQ}" with ${cleanOptions.length} voting options.`,
+          };
+        } catch (err: any) {
+          console.error('[GroupAdmin] Error creating poll:', err);
+          return { success: false, message: `Failed to create poll: ${err.message}` };
+        }
+      },
+    },
+    {
+      name: 'summarize_group_discussion',
+      description:
+        'Catches users up on recent group conversations by analyzing message history and generating a concise, structured recap with key topics discussed, major viewpoints, and conclusions/action points. Use when someone asks "catch me up", "what did I miss", "summarize group", or "give me a recap".',
+      parameters: {
+        type: 'object',
+        properties: {
+          hours: {
+            type: 'number',
+            description: 'Number of recent hours of conversation to summarize (default: 3).',
+          },
+          message_count: {
+            type: 'number',
+            description: 'Maximum number of recent messages to analyze (default: 60, max: 150).',
+          },
+        },
+      },
+      execute: async (
+        args: { hours?: number; message_count?: number },
+        ctx: ExecutionContext
+      ): Promise<ToolResult> => {
+        try {
+          const hours = Math.max(0.5, Math.min(24, Number(args.hours) || 3));
+          const limit = Math.max(15, Math.min(150, Number(args.message_count) || 60));
+          const cutoffTime = Date.now() - hours * 60 * 60 * 1000;
+
+          const rows = db.prepare(`
+            SELECT sender_name, message_text, timestamp FROM chat_logs
+            WHERE chat_jid = ?
+              AND is_noise = 0
+              AND sender_jid != 'bot'
+              AND content_type = 'conversation'
+              AND message_text IS NOT NULL
+              AND timestamp >= ?
+            ORDER BY id DESC
+            LIMIT ?
+          `).all(ctx.chatJid, cutoffTime, limit) as Array<{
+            sender_name: string | null;
+            message_text: string | null;
+            timestamp: number;
+          }>;
+
+          if (!rows || rows.length < 3) {
+            return {
+              success: true,
+              message: 'Omo, there hasn’t been much discussion here in the past few hours! Everything is quiet and peaceful for now 🤝',
+            };
+          }
+
+          rows.reverse(); // chronological order
+          const formattedTranscript = rows
+            .map((r) => {
+              const name = r.sender_name || 'Member';
+              const text = (r.message_text || '').replace(/\s+/g, ' ').trim();
+              return `[${name}]: ${text}`;
+            })
+            .join('\n');
+
+          const summaryPrompt = `You are Forgelabs assistant catching a user up on recent WhatsApp group discussion.
+Analyze the following raw group messages from the past ${hours} hours:
+
+${formattedTranscript}
+
+Create a crisp, engaging, structured WhatsApp recap with emojis in authentic Nigerian tech tone:
+1. 📌 *Key Topics Discussed* (2-3 concise bullet points)
+2. 🗣️ *Highlights & Debates* (brief summary of prominent views)
+3. 🎯 *Decisions & Action Points* (any agreements reached or upcoming plans, or "None noted" if casual banter)
+
+Keep it high-signal, conversational, and under 150 words. Do not leak internal IDs or technical tags.`;
+
+          const res = await llmClient.chatCompletion({
+            messages: [
+              { role: 'system', content: 'You are an intelligent group assistant that provides fast, distilled conversation summaries.' },
+              { role: 'user', content: summaryPrompt },
+            ],
+            temperature: 0.5,
+            max_tokens: 350,
+          });
+
+          const summary = res.choices[0]?.message?.content?.trim();
+          if (!summary) {
+            return { success: false, message: 'Could not generate summary at this time.' };
+          }
+
+          return {
+            success: true,
+            data: summary,
+            message: summary,
+          };
+        } catch (err: any) {
+          console.error('[GroupAdmin] Error summarizing group discussion:', err);
+          return { success: false, message: `Failed to summarize group discussion: ${err.message}` };
+        }
       },
     },
   ];

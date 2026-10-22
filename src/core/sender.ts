@@ -381,4 +381,39 @@ export class OutboundSender {
       );
     });
   }
+
+  public static async sendPoll(
+    sock: WASocket,
+    chatJid: string,
+    question: string,
+    options: string[],
+    selectableCount: number = 1,
+    quoted?: proto.IWebMessageInfo
+  ): Promise<any> {
+    if (!this.checkSafety(chatJid, quoted)) return null;
+
+    const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
+    const cleanOptions = (options || []).map((o) => String(o).trim()).filter(Boolean);
+    if (cleanOptions.length < 2) {
+      throw new Error('A WhatsApp poll requires at least 2 options.');
+    }
+
+    const currentSock = activeSocketGetter?.() || sock;
+    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+      const res = await currentSock.sendMessage(
+        chatJid,
+        {
+          poll: {
+            name: question.trim(),
+            values: cleanOptions,
+            selectableCount: Math.min(cleanOptions.length, Math.max(1, selectableCount || 1)),
+          },
+        },
+        safeQuoted ? { quoted: safeQuoted } : undefined
+      );
+      this.recordDispatchedId(res?.key?.id);
+      chatLogger.logOutboundMessage(chatJid, `[Poll] ${question} (Options: ${cleanOptions.join(', ')})`);
+      return res;
+    });
+  }
 }

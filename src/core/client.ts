@@ -1405,6 +1405,8 @@ export class WhatsAppClient {
         OutboundSender.sendVideo(sock, normalized.chatJid, bufferOrUrl, caption, msg),
       sendContact: (displayName: string, phoneNumber: string) =>
         OutboundSender.sendContact(sock, normalized.chatJid, displayName, phoneNumber, msg),
+      sendPoll: (question: string, options: string[], selectableCount?: number) =>
+        OutboundSender.sendPoll(sock, normalized.chatJid, question, options, selectableCount, msg),
     };
 
     // 4. Dispatch via Concurrency Queue (Anti-Crash & Human-Like Rate Limiting)
@@ -1842,6 +1844,8 @@ export class WhatsAppClient {
             OutboundSender.sendVideo(sock, chat.chatJid, bufferOrUrl, caption, undefined),
           sendContact: (displayName: string, phoneNumber: string) =>
             OutboundSender.sendContact(sock, chat.chatJid, displayName, phoneNumber, undefined),
+          sendPoll: (question: string, options: string[], selectableCount?: number) =>
+            OutboundSender.sendPoll(sock, chat.chatJid, question, options, selectableCount, undefined),
         };
 
         try {

@@ -59,7 +59,12 @@ export class PluginRegistry {
   }
 
   public getTool(name: string): BotTool | undefined {
-    return this.tools.get(name);
+    const resolved = this.resolveAlias(name);
+    return this.tools.get(resolved);
+  }
+
+  public resolveAlias(name: string): string {
+    return PluginRegistry.ALIAS_MAP[name] || name;
   }
 
   public getAllTools(): BotTool[] {
@@ -114,17 +119,53 @@ export class PluginRegistry {
           text.includes('text') ||
           text.includes('do')));
 
-    // 1. Diagnostics, Status, & Bot Health
+    // 1. Diagnostics, Status, Executive Briefing & Bot Health
     if (
       text.includes('health') ||
       text.includes('uptime') ||
       text.includes('diagnostics') ||
       text.includes('brief me') ||
+      text.includes('briefing') ||
+      text.includes('agenda') ||
+      text.includes('my day') ||
+      text.includes('morning brief') ||
+      text.includes('executive') ||
       text.includes('analytics') ||
       text.includes('stats')
     ) {
       selected.add('get_bot_health_status');
       selected.add('get_bot_analytics');
+      selected.add('get_executive_briefing');
+    }
+
+    // Interactive WhatsApp Polls
+    if (
+      text.includes('poll') ||
+      text.includes('vote') ||
+      text.includes('voting') ||
+      text.includes('choice') ||
+      text.includes('decide') ||
+      text.includes('ballot')
+    ) {
+      selected.add('create_poll');
+    }
+
+    // Group Discussion Catch-Up & Thread Recap
+    if (
+      text.includes('catch up') ||
+      text.includes('catch me up') ||
+      text.includes('what did i miss') ||
+      text.includes('what i miss') ||
+      text.includes('recap') ||
+      text.includes('summarize group') ||
+      text.includes('summary of group') ||
+      text.includes('summary of the group') ||
+      text.includes('what was said') ||
+      text.includes('what were you guys saying') ||
+      text.includes('discussion summary') ||
+      text.includes('fill me in')
+    ) {
+      selected.add('summarize_group_discussion');
     }
 
     // 2. WhatsApp Status Posting & Morning Status Broadcast
@@ -487,77 +528,94 @@ export class PluginRegistry {
       }));
   }
 
-  public async executeTool(name: string, args: any, context: ExecutionContext): Promise<ToolResult> {
-    const aliasMap: Record<string, string> = {
-      send_message: 'send_message_to_contact',
-      message_contact: 'send_message_to_contact',
-      send_dm: 'send_message_to_contact',
-      text_contact: 'send_message_to_contact',
-      search_contacts: 'get_contact',
-      find_contact: 'get_contact',
-      lookup_contact: 'get_contact',
-      schedule_reminder: 'set_reminder',
-      post_status: 'post_whatsapp_status',
-      broadcast_motivation: 'broadcast_group_motivation',
-      post_morning_motivation: 'broadcast_group_motivation',
-      scrape_quotes: 'scrape_channel_quotes',
-      get_channel_quotes: 'list_channel_quotes',
-      send_sticker: 'send_contextual_sticker',
-      reply_with_sticker: 'send_contextual_sticker',
-      post_meme: 'post_channel_meme',
-      scrape_memes: 'scrape_channel_memes',
-      meme_cooldown: 'get_meme_cooldown_status',
-      reply_unreplied: 'reply_unreplied_messages',
-      join_group_via_invite_link: 'join_group',
-      join_whatsapp_group: 'join_group',
-      accept_group_invite: 'join_group',
-      send_to_group: 'send_message_to_group',
-      message_group: 'send_message_to_group',
-      reply_to_group: 'send_message_to_group',
-      post_to_group: 'send_message_to_group',
-      send_group_message: 'send_message_to_group',
-      kick: 'kick_member',
-      remove_member: 'kick_member',
-      add_participant: 'add_member',
-      add_user: 'add_member',
-      delete_message: 'delete_group_message',
-      delete_msg: 'delete_group_message',
-      revoke_message: 'delete_group_message',
-            open_group: 'set_group_mode',
-      unlock_group: 'set_group_mode',
-      lock_group: 'set_group_mode',
-      close_group: 'set_group_mode',
-      mute_group: 'set_group_mode',
-      unmute_group: 'set_group_mode',
-      open_chat: 'set_group_mode',
-      unlock_chat: 'set_group_mode',
-      lock_settings: 'set_group_mode',
-      unlock_settings: 'set_group_mode',
-      group_info: 'get_group_info',
-      list_admins: 'get_group_info',
-      disappearing_messages: 'set_disappearing_messages',
-      ephemeral_messages: 'set_disappearing_messages',
-      approve_participant: 'approve_join_request',
-      reject_participant: 'reject_join_request',
-      create_image: 'generate_image',
-      draw_image: 'generate_image',
-      make_image: 'generate_image',
-      generate_picture: 'generate_image',
-      image_generator: 'generate_image',
-      leave: 'leave_group',
-      exit_group: 'leave_group',
-      leave_chat: 'leave_group',
-      exit_chat: 'leave_group',
-      earlier_messages: 'get_earlier_chat_history',
-      chat_history: 'get_earlier_chat_history',
-      earlier_chat: 'get_earlier_chat_history',
-      group_history: 'get_earlier_chat_history',
-      earlier_discussion: 'get_earlier_chat_history',
-      cross_chat_activity: 'get_cross_chat_activity',
-      chats_contributed: 'get_cross_chat_activity',
-    };
+  public static readonly ALIAS_MAP: Record<string, string> = {
+    send_message: 'send_message_to_contact',
+    message_contact: 'send_message_to_contact',
+    send_dm: 'send_message_to_contact',
+    text_contact: 'send_message_to_contact',
+    search_contacts: 'get_contact',
+    find_contact: 'get_contact',
+    lookup_contact: 'get_contact',
+    schedule_reminder: 'set_reminder',
+    post_status: 'post_whatsapp_status',
+    broadcast_motivation: 'broadcast_group_motivation',
+    post_morning_motivation: 'broadcast_group_motivation',
+    scrape_quotes: 'scrape_channel_quotes',
+    get_channel_quotes: 'list_channel_quotes',
+    send_sticker: 'send_contextual_sticker',
+    reply_with_sticker: 'send_contextual_sticker',
+    post_meme: 'post_channel_meme',
+    scrape_memes: 'scrape_channel_memes',
+    meme_cooldown: 'get_meme_cooldown_status',
+    reply_unreplied: 'reply_unreplied_messages',
+    join_group_via_invite_link: 'join_group',
+    join_whatsapp_group: 'join_group',
+    accept_group_invite: 'join_group',
+    send_to_group: 'send_message_to_group',
+    message_group: 'send_message_to_group',
+    reply_to_group: 'send_message_to_group',
+    post_to_group: 'send_message_to_group',
+    send_group_message: 'send_message_to_group',
+    kick: 'kick_member',
+    remove_member: 'kick_member',
+    add_participant: 'add_member',
+    add_user: 'add_member',
+    delete_message: 'delete_group_message',
+    delete_msg: 'delete_group_message',
+    revoke_message: 'delete_group_message',
+    open_group: 'set_group_mode',
+    unlock_group: 'set_group_mode',
+    lock_group: 'set_group_mode',
+    close_group: 'set_group_mode',
+    mute_group: 'set_group_mode',
+    unmute_group: 'set_group_mode',
+    open_chat: 'set_group_mode',
+    unlock_chat: 'set_group_mode',
+    lock_settings: 'set_group_mode',
+    unlock_settings: 'set_group_mode',
+    group_info: 'get_group_info',
+    list_admins: 'get_group_info',
+    disappearing_messages: 'set_disappearing_messages',
+    ephemeral_messages: 'set_disappearing_messages',
+    approve_participant: 'approve_join_request',
+    reject_participant: 'reject_join_request',
+    create_image: 'generate_image',
+    draw_image: 'generate_image',
+    make_image: 'generate_image',
+    generate_picture: 'generate_image',
+    image_generator: 'generate_image',
+    leave: 'leave_group',
+    exit_group: 'leave_group',
+    leave_chat: 'leave_group',
+    exit_chat: 'leave_group',
+    earlier_messages: 'get_earlier_chat_history',
+    chat_history: 'get_earlier_chat_history',
+    earlier_chat: 'get_earlier_chat_history',
+    group_history: 'get_earlier_chat_history',
+    earlier_discussion: 'get_earlier_chat_history',
+    cross_chat_activity: 'get_cross_chat_activity',
+    chats_contributed: 'get_cross_chat_activity',
+    create_whatsapp_poll: 'create_poll',
+    make_poll: 'create_poll',
+    start_poll: 'create_poll',
+    start_vote: 'create_poll',
+    vote: 'create_poll',
+    poll: 'create_poll',
+    catch_me_up: 'summarize_group_discussion',
+    group_summary: 'summarize_group_discussion',
+    recap: 'summarize_group_discussion',
+    chat_recap: 'summarize_group_discussion',
+    what_did_i_miss: 'summarize_group_discussion',
+    group_catchup: 'summarize_group_discussion',
+    brief_me: 'get_executive_briefing',
+    executive_briefing: 'get_executive_briefing',
+    morning_briefing: 'get_executive_briefing',
+    daily_briefing: 'get_executive_briefing',
+    agenda: 'get_executive_briefing',
+  };
 
-    const resolvedName = aliasMap[name] || name;
+  public async executeTool(name: string, args: any, context: ExecutionContext): Promise<ToolResult> {
+    const resolvedName = this.resolveAlias(name);
     const tool = this.tools.get(resolvedName);
     if (!tool) {
       return { success: false, message: `Tool "${name}" is not registered.` };
