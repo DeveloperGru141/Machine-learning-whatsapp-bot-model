@@ -12,8 +12,8 @@ export interface ManagedContextResult {
 }
 
 export class ContextManager {
-  private readonly TOTAL_CONTEXT_BUDGET = 1100;
-  private readonly RAW_HISTORY_MIN_MESSAGES = 4;
+  private readonly TOTAL_CONTEXT_BUDGET = 950;
+  private readonly RAW_HISTORY_MIN_MESSAGES = 3;
   private activeSummarizations = new Set<string>();
 
   /**
@@ -81,7 +81,7 @@ export class ContextManager {
 
     // 2b. Autonomous Local Database RAG Context Retrieval (User Facts, Group Facts, Contacts, Past Decisions)
     try {
-      const ragResult = await ragEngine.retrieveContext(currentPrompt, chatJid, userJid, 2);
+      const ragResult = await ragEngine.retrieveContext(currentPrompt, chatJid, userJid, 1);
       if (ragResult.hasMatches && ragResult.formattedContext) {
         systemPromptText += `\n\n${ragResult.formattedContext}\n`;
       }
