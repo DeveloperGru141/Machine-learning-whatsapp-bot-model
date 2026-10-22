@@ -295,10 +295,10 @@ export class AgentHarness {
     userMessage: string,
     context: ExecutionContext
   ): Promise<void> {
-    const hasKey = config.groq.apiKey || config.gemini.apiKey || config.openrouter.apiKey;
+    const hasKey = config.groq.apiKey || config.openrouter.apiKey;
     if (!hasKey) {
       await context.replyText(
-        '⚠️ No LLM API key (GROQ_API_KEY or GEMINI_API_KEY) is configured in your .env file.'
+        '⚠️ No LLM API key (GROQ_API_KEY) is configured in your .env file.'
       );
       return;
     }

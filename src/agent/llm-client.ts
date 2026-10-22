@@ -2,13 +2,6 @@ import OpenAI from 'openai';
 import Groq from 'groq-sdk';
 import { config } from '../config/env.js';
 
-export const geminiClient = new OpenAI({
-  apiKey: config.gemini.apiKey || 'dummy_key',
-  baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-  maxRetries: 0,
-  timeout: 5_000,
-});
-
 export const openRouterClient = new OpenAI({
   apiKey: config.openrouter.apiKey || 'dummy_key',
   baseURL: 'https://openrouter.ai/api/v1',
@@ -64,35 +57,18 @@ export interface LLMChatResponse {
 }
 
 export class LLMClient {
-  private geminiQuotaExhaustedUntil: number = 0;
   private qwenQuotaExhaustedUntil: number = 0;
   private groqClientIndex: number = 0;
 
-  public getProvider(): 'gemini' | 'groq' | 'openrouter' {
-    if (config.llm.provider === 'groq' && config.groq.apiKey) {
-      return 'groq';
-    }
+  public getProvider(): 'groq' | 'openrouter' {
     if (config.llm.provider === 'openrouter' && config.openrouter.apiKey) {
       return 'openrouter';
-    }
-    if (config.gemini.apiKey) {
-      if (Date.now() < this.geminiQuotaExhaustedUntil && config.groq.apiKey) {
-        return 'groq';
-      }
-      return 'gemini';
     }
     return 'groq';
   }
 
   public getModel(): string {
     const provider = this.getProvider();
-    if (provider === 'gemini') {
-      const model = config.gemini.model;
-      if (!model || model.includes('3.5') || model.includes('3.1') || model.includes('2.5-flash-lite')) {
-        return 'gemini-flash-latest';
-      }
-      return model;
-    }
     if (provider === 'openrouter') {
       return config.openrouter.model;
     }
@@ -101,66 +77,6 @@ export class LLMClient {
       return 'qwen/qwen3.8-27b';
     }
     return groqModel;
-  }
-
-  public async callGeminiInternal(params: LLMChatParams): Promise<LLMChatResponse> {
-    if (Date.now() < this.geminiQuotaExhaustedUntil) {
-      // Zero sleep: immediately hand off to Groq/Cerebras so DM replies stay snappy
-      throw new Error(`Gemini rate limit cooldown active until ${new Date(this.geminiQuotaExhaustedUntil).toLocaleTimeString()}`);
-    }
-
-    const candidateGeminiModels = [
-      params.model || this.getModel(),
-      'gemini-flash-latest',
-      'gemini-3.8-flash',
-      'gemini-flash-lite-latest',
-    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx && !m.includes('3.5') && !m.includes('3.1') && !m.includes('2.5-flash-lite'));
-
-    for (const model of candidateGeminiModels) {
-      const payload: any = {
-        model,
-        messages: params.messages,
-        temperature: params.temperature ?? 0.7,
-        max_tokens: Math.max(128, Math.min(800, params.max_tokens ?? 600)),
-      };
-
-      if (params.tools && params.tools.length > 0) {
-        payload.tools = params.tools;
-        payload.tool_choice = params.tool_choice || 'auto';
-      }
-
-      try {
-        const res = await geminiClient.chat.completions.create(payload);
-        const choice = res.choices?.[0];
-        if (choice && choice.message) {
-          if (
-            !choice.message.content &&
-            (!choice.message.tool_calls || choice.message.tool_calls.length === 0) &&
-            (choice.message as any).reasoning
-          ) {
-            choice.message.content = (choice.message as any).reasoning;
-          }
-        }
-        return res as unknown as LLMChatResponse;
-      } catch (err: any) {
-        const isQuota =
-          err?.status === 429 ||
-          String(err?.message || err).includes('429') ||
-          String(err?.message || err).includes('quota') ||
-          String(err?.message || err).includes('RESOURCE_EXHAUSTED');
-
-        if (isQuota) {
-          // Instant failover: mark cooldown for 6 hours so Groq takes over immediately with 0 latency penalty
-          this.geminiQuotaExhaustedUntil = Date.now() + 6 * 60 * 60 * 1000;
-          console.warn(`[LLMClient] ⚠️ Gemini model ${model} rate-limited (429). Instantly failing over to Groq...`);
-          throw new Error('Gemini rate-limited (429)');
-        } else {
-          console.warn(`[LLMClient] ⚠️ Gemini model ${model} encountered ${err?.status || err?.message || err}. Trying next candidate...`);
-        }
-      }
-    }
-
-    throw new Error('All Gemini candidate models failed to respond.');
   }
 
   public async callCerebrasInternal(params: LLMChatParams): Promise<LLMChatResponse> {
@@ -184,17 +100,7 @@ export class LLMClient {
     const provider = this.getProvider();
     const primaryModel = params.model || this.getModel();
 
-    if (provider === 'gemini') {
-      try {
-        return await this.callGeminiInternal({ ...params, model: primaryModel });
-      } catch (err: any) {
-        if (config.groq.apiKey) {
-          console.log(`[LLMClient] 🔄 Instant failover to Groq model: qwen/qwen3.8-27b`);
-          return await this.callGroqInternal({ ...params, model: 'qwen/qwen3.8-27b' });
-        }
-        throw err;
-      }
-    } else if (provider === 'openrouter') {
+    if (provider === 'openrouter') {
       try {
         const payload: any = {
           model: primaryModel,
@@ -216,9 +122,6 @@ export class LLMClient {
         );
         if (config.groq.apiKey) {
           return this.callGroqInternal({ ...params, model: this.getModel() });
-        }
-        if (config.gemini.apiKey && Date.now() >= this.geminiQuotaExhaustedUntil) {
-          return this.callGeminiInternal({ ...params, model: config.gemini.model });
         }
         throw err;
       }
@@ -363,17 +266,7 @@ export class LLMClient {
       }
     }
 
-    // 3. Fallback to Gemini if configured
-    if (config.gemini.apiKey && Date.now() >= this.geminiQuotaExhaustedUntil) {
-      console.warn(`[LLMClient] 🔄 Falling back to Gemini model: ${config.gemini.model}...`);
-      try {
-        return await this.callGeminiInternal({ ...params, model: config.gemini.model });
-      } catch (gemErr: any) {
-        console.warn(`[LLMClient] ⚠️ Gemini fallback also failed: ${gemErr.message || gemErr}`);
-      }
-    }
-
-    throw new Error('All LLM providers (Groq primary, Groq backup, Gemini) failed to generate response.');
+    throw new Error('All LLM providers (Groq pooled clients, Cerebras fallback) failed to generate response.');
   }
 }
 

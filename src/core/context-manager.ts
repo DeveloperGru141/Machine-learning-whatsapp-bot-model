@@ -300,7 +300,7 @@ export class ContextManager {
       return null;
     }
 
-    const hasKey = config.groq.apiKey || config.gemini.apiKey || config.openrouter.apiKey;
+    const hasKey = config.groq.apiKey || config.openrouter.apiKey;
     if (!hasKey) {
       console.warn('[ContextManager] Skipping summarization: No LLM API key configured.');
       return null;
@@ -373,23 +373,14 @@ export class ContextManager {
 
       let summaryText: string | undefined;
       try {
-        const response = config.gemini.apiKey
-          ? await llmClient.callGeminiInternal({
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: userContent },
-              ],
-              temperature: 0.2,
-              max_tokens: 250,
-            })
-          : await llmClient.chatCompletion({
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: userContent },
-              ],
-              temperature: 0.2,
-              max_tokens: 300,
-            });
+        const response = await llmClient.chatCompletion({
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userContent },
+          ],
+          temperature: 0.2,
+          max_tokens: 300,
+        });
         summaryText = response.choices[0]?.message?.content?.trim() || undefined;
       } catch (err: any) {
         console.warn(`[ContextManager] Summarizer failed: ${err?.message || err}`);

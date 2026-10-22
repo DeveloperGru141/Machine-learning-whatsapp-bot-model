@@ -58,8 +58,8 @@ export class BatchLearner {
   }
 
   /**
-   * Compresses 20 exchanges into 3 high-value bullet points of learned behavioral data
-   * in a single batched API call to respect free-tier cooldowns.
+   * Compresses exchanges into 3 high-value bullet points of learned behavioral data
+   * in a single batched API call.
    */
   public async processBatch(chatJid: string, senderJid: string): Promise<boolean> {
     if (this.processingChats.has(chatJid)) return false;
@@ -116,30 +116,18 @@ export class BatchLearner {
 
       let response: any;
       try {
-        // Try Gemini free tier first
-        response = await llmClient.callGeminiInternal({
+        // Distill learned behaviors using multi-key Groq round-robin pool
+        response = await llmClient.chatCompletion({
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: `Chat Transcript:\n${transcript}` },
           ],
           temperature: 0.3,
+          max_tokens: 350,
         });
-      } catch (gemErr) {
-        // Fallback to Groq using fast lightweight llama-3.1-8b-instant so learning never stops
-        try {
-          response = await llmClient.callGroqInternal({
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: `Chat Transcript:\n${transcript}` },
-            ],
-            model: 'llama-3.1-8b-instant',
-            temperature: 0.3,
-            max_tokens: 150,
-          });
-        } catch (groqErr) {
-          console.warn(`[BatchLearner] Skipping batch: both Gemini and Groq fallback failed:`, (groqErr as any)?.message || groqErr);
-          return false;
-        }
+      } catch (err: any) {
+        console.warn(`[BatchLearner] Skipping batch: LLM completion failed:`, err?.message || err);
+        return false;
       }
 
       const content = response.choices[0]?.message?.content || '';

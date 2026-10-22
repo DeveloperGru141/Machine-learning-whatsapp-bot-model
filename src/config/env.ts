@@ -5,8 +5,7 @@ import path from 'path';
 dotenv.config({ override: true });
 
 const envSchema = z.object({
-  LLM_PROVIDER: z.enum(['gemini', 'openrouter', 'groq']).default('groq'),
-  GEMINI_MODEL: z.string().default('gemini-flash-latest'),
+  LLM_PROVIDER: z.enum(['openrouter', 'groq']).default('groq'),
   OPENROUTER_API_KEY: z.string().optional(),
   OPENROUTER_MODEL: z.string().default('deepseek/deepseek-chat'),
   OPENROUTER_TEMPERATURE: z.coerce.number().default(0.7),
@@ -21,7 +20,6 @@ const envSchema = z.object({
   BOT_CREATOR: z.string().default('ADEMOLA'),
   BOT_PREFIX: z.string().default(''),
   BOT_VOICE: z.string().default('en-NG-AbeoNeural'),
-  GEMINI_API_KEY: z.string().optional(),
   BOT_OWNERS: z.string().default('').transform((val) => 
     val.split(',').map((s) => s.trim()).filter(Boolean)
   ),
@@ -76,7 +74,7 @@ const normalizedOwners = Array.from(
 
 export const config = {
   llm: {
-    provider: (process.env.LLM_PROVIDER || 'groq') as 'gemini' | 'openrouter' | 'groq',
+    provider: (process.env.LLM_PROVIDER || 'groq') as 'openrouter' | 'groq',
   },
   openrouter: {
     apiKey: process.env.OPENROUTER_API_KEY || '',
@@ -105,16 +103,6 @@ export const config = {
     owners: normalizedOwners,
     pairingMethod: (process.env.PAIRING_METHOD as 'code' | 'qr') || 'qr',
     pairingPhoneNumber: normalizePhoneNumber(process.env.PAIRING_PHONE_NUMBER || '07058967815'),
-  },
-  gemini: {
-    apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',
-    model: (() => {
-      const configured = (process.env.GEMINI_MODEL || 'gemini-flash-latest').trim();
-      if (configured.includes('3.5') || configured.includes('3.1') || configured.includes('2.5-flash-lite')) {
-        return 'gemini-flash-latest';
-      }
-      return configured;
-    })(),
   },
   huggingface: {
     apiKey: process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || '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',

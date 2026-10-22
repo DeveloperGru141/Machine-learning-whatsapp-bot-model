@@ -4,7 +4,6 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Baileys](https://img.shields.io/badge/WhatsApp-@whiskeysockets/baileys-25D366?logo=whatsapp&logoColor=white)](https://github.com/WhiskeySockets/Baileys)
 [![Groq](https://img.shields.io/badge/Groq-Qwen%203.8%2027B%20%7C%20Multi--Key%20Pool-F55036?logo=groq&logoColor=white)](https://groq.com)
-[![Google Gemini](https://img.shields.io/badge/Google%20Gemini-3.8%20Flash-4285F4?logo=google&logoColor=white)](https://ai.google.dev/)
 [![SQLite](https://img.shields.io/badge/Database-SQLite%20WAL-003B57?logo=sqlite&logoColor=white)](https://sqlite.org)
 [![License](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
 
@@ -29,10 +28,10 @@ flowchart TD
         CLIENT -->|Primary: Sub-Second Latency| GROQ["Groq Multi-Key Pool (Qwen 3.8 27B)"]
         CLIENT -->|Auto-Failover Tier 1| GROQ_OSS["Groq Reasoning (GPT-OSS 120B / 20B)"]
         CLIENT -->|Auto-Failover Tier 2| CEREBRAS["Cerebras (Llama 3.3 70B)"]
-        CLIENT -->|Auto-Failover Tier 3| GEMINI["Google Gemini (3.8 Flash)"]
+        CLIENT -->|Auto-Failover Tier 3| OPENROUTER["OpenRouter (Fallback)"]
     end
     
-    subgraph PLUGINS["Modular Plugin Suite (20+ Plugins, 70 Tools)"]
+    subgraph PLUGINS["Modular Plugin Suite (20+ Plugins, 73 Tools)"]
         HARNESS --> P_ADMIN[Group Admin & Moderation]
         HARNESS --> P_STICKER[Sticker Engine (550+ Catalog)]
         HARNESS --> P_SCHED[Scheduler & Channel Broadcaster]
@@ -61,8 +60,8 @@ flowchart TD
 
 ### 1. Ultra-Fast LLM Engine & Multi-Key Pooling
 - **Primary Engine**: **Groq Qwen 27B** (`qwen/qwen3.8-27b`) delivering sub-second message response times.
-- **Multi-Key Pool**: Comma-separated API keys (`GROQ_API_KEY=key1,key2`) pool daily token limits across accounts (400,000+ tokens/day) with instant automatic failover.
-- **Failover Chain**: Automatic routing to `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, Cerebras (`llama3.3-70b`), and Google Gemini.
+- **Multi-Key Pool**: Comma-separated API keys (`GROQ_API_KEY=key1,key2,key3`) pool daily token limits across accounts (600,000+ tokens/day) with instant round-robin load distribution and automatic failover.
+- **Failover Chain**: Automatic routing to `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, Cerebras (`llama3.3-70b`), and OpenRouter.
 - **Adaptive Context Budgeting**: Strict ~950 token budget prevents token bloat and rate-limit exhaustion.
 
 ### 2. Authentic Persona & Cultural Nuance
@@ -212,8 +211,6 @@ whatsapp-modular-bot/
    GROQ_MAX_TOKENS=512
 
    # Fallback LLMs
-   GEMINI_API_KEY="AIzaSy..."
-   GEMINI_MODEL="gemini-flash-latest"
    OPENROUTER_API_KEY=""
    CEREBRAS_API_KEY=""
 

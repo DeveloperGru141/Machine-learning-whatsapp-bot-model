@@ -134,8 +134,8 @@ const mockCtxAdmin = {
 
   // Test 6: LLM Client configuration
   console.log('▶ Test 6: Verify LLM Client Resilience Config...');
-  assert(['groq', 'gemini'].includes(llmClient.getProvider()), 'LLM Provider should resolve to groq or gemini');
-  assert(['qwen/qwen3.8-27b', 'gemini-flash-latest'].includes(llmClient.getModel()), 'Model should be valid active engine');
+  assert(['groq', 'openrouter'].includes(llmClient.getProvider()), 'LLM Provider should resolve to groq or openrouter');
+  assert(['qwen/qwen3.8-27b', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b'].includes(llmClient.getModel()), 'Model should be valid active engine');
   console.log('✅ Test 6 Passed: LLM provider and model configured correctly.\n');
 
   // Test 7: Training Pipeline Distillation & Anti-Generic Guardrails
