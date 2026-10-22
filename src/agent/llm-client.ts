@@ -95,9 +95,6 @@ export class LLMClient {
     if (provider === 'openrouter') {
       return config.openrouter.model;
     }
-    if (Date.now() < this.qwenQuotaExhaustedUntil) {
-      return 'openai/gpt-oss-120b';
-    }
     const groqModel = config.groq.model;
     if (groqModel.includes('llama-3.3') || groqModel.includes('llama-3.1')) {
       return 'qwen/qwen3.8-27b';
@@ -231,29 +228,31 @@ export class LLMClient {
 
   public async callGroqInternal(params: LLMChatParams): Promise<LLMChatResponse> {
     const configuredModel = params.model || this.getModel();
+    const hasTools = Boolean(params.tools && params.tools.length > 0);
     const candidateModels = [
       configuredModel,
       'qwen/qwen3.8-27b',
       'openai/gpt-oss-120b',
       'openai/gpt-oss-20b',
-      'allam-2-7b',
+      ...(hasTools ? [] : ['allam-2-7b']),
     ].filter((m, idx, arr) => m && arr.indexOf(m) === idx && !m.includes('llama-3.3') && !m.includes('llama-3.1'));
 
     const buildPayload = (modelName: string) => {
+      const isOss = modelName.includes('oss');
       const payload: any = {
         model: modelName,
         messages: params.messages,
         temperature: params.temperature ?? config.groq.temperature,
-        max_completion_tokens: modelName.includes('oss') ? 600 : Math.max(64, params.max_tokens ?? config.groq.maxTokens),
+        max_completion_tokens: isOss ? 600 : Math.max(64, params.max_tokens ?? config.groq.maxTokens),
         top_p: config.groq.topP,
       };
 
-      if (params.tools && params.tools.length > 0) {
+      if (params.tools && params.tools.length > 0 && !modelName.includes('allam')) {
         payload.tools = params.tools;
         payload.tool_choice = params.tool_choice || 'auto';
       }
 
-      if (config.groq.reasoningEffort && !modelName.includes('oss')) {
+      if (config.groq.reasoningEffort && !isOss) {
         payload.reasoning_effort = config.groq.reasoningEffort;
       }
 
@@ -264,6 +263,7 @@ export class LLMClient {
     for (const client of groqClients) {
       for (const modelName of candidateModels) {
         if (modelName === 'qwen/qwen3.8-27b' && Date.now() < this.qwenQuotaExhaustedUntil) {
+          console.log(`[LLMClient] ⏳ Qwen in brief cooldown (${Math.ceil((this.qwenQuotaExhaustedUntil - Date.now()) / 1000)}s remaining), trying fallback models...`);
           continue;
         }
 
@@ -279,6 +279,16 @@ export class LLMClient {
               choice.message.content = (choice.message as any).reasoning;
             }
           }
+
+          if (
+            choice?.message &&
+            !choice.message.content &&
+            (!choice.message.tool_calls || choice.message.tool_calls.length === 0)
+          ) {
+            console.warn(`[LLMClient] ⚠️ Groq model ${modelName} returned empty content with finish_reason: ${choice.finish_reason}. Trying next candidate...`);
+            continue;
+          }
+
           return res as unknown as LLMChatResponse;
         } catch (err: any) {
           const failedGen =
@@ -321,7 +331,11 @@ export class LLMClient {
             String(err?.message || err).includes('TPD');
 
           if (modelName.startsWith('qwen/') && isRateLimit) {
-            this.qwenQuotaExhaustedUntil = Date.now() + 15 * 60 * 1000;
+            const isDailyLimit =
+              String(err?.message || err).includes('TPD') ||
+              String(err?.message || err).includes('tokens per day');
+            // Brief cooldown: 45 seconds for daily token limit retry, 15 seconds for transient TPM spike
+            this.qwenQuotaExhaustedUntil = Date.now() + (isDailyLimit ? 45 * 1000 : 15 * 1000);
           }
 
           console.warn(
