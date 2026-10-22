@@ -89,7 +89,7 @@ export const config = {
     temperature: Number(process.env.GROQ_TEMPERATURE ?? 0.7),
     maxTokens: Number(process.env.GROQ_MAX_TOKENS ?? 512),
     topP: Number(process.env.GROQ_TOP_P ?? 1),
-    reasoningEffort: process.env.GROQ_REASONING_EFFORT || 'low',
+    reasoningEffort: (process.env.GROQ_REASONING_EFFORT as 'low' | 'medium' | 'high') || undefined,
   },
   cerebras: {
     apiKey: process.env.CEREBRAS_API_KEY || '',

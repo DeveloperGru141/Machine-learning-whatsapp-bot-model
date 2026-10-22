@@ -181,16 +181,9 @@ export class LLMClient {
         try {
           const res = await client.chat.completions.create(buildPayload(modelName));
           const choice = res.choices[0];
-          if (choice?.message) {
-            if (
-              !choice.message.content &&
-              (!choice.message.tool_calls || choice.message.tool_calls.length === 0) &&
-              (choice.message as any).reasoning
-            ) {
-              choice.message.content = (choice.message as any).reasoning;
-            }
-          }
 
+          // Defense-in-depth: Never copy model internal reasoning / scratchpad to user-facing content.
+          // If model produced only reasoning or empty content, fall through to the next candidate model.
           if (
             choice?.message &&
             !choice.message.content &&
