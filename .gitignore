@@ -13,6 +13,11 @@ sessions_*/
 data/*.sqlite*
 data/*.pid
 data/temp/
+assets/channel_media/*.jpg
+assets/channel_media/*.png
+assets/channel_media/*.jpeg
+assets/channel_media/*.webp
+!assets/channel_media/.gitkeep
 
 # Environment Variables
 .env

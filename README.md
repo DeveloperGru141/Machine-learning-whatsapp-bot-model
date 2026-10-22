@@ -3,21 +3,18 @@
 [![Node.js](https://img.shields.io/badge/Node.js-v22+-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Baileys](https://img.shields.io/badge/WhatsApp-@whiskeysockets/baileys-25D366?logo=whatsapp&logoColor=white)](https://github.com/WhiskeySockets/Baileys)
-[![Google Gemini](https://img.shields.io/badge/Google%20Gemini-3.5%20Flash--Lite-4285F4?logo=google&logoColor=white)](https://ai.google.dev/)
-[![Groq](https://img.shields.io/badge/Groq-Llama%203.3%20%7C%20Qwen-F55036)](https://groq.com)
+[![Groq](https://img.shields.io/badge/Groq-Qwen%203.8%2027B%20%7C%20Multi--Key%20Pool-F55036?logo=groq&logoColor=white)](https://groq.com)
+[![Google Gemini](https://img.shields.io/badge/Google%20Gemini-3.8%20Flash-4285F4?logo=google&logoColor=white)](https://ai.google.dev/)
 [![SQLite](https://img.shields.io/badge/Database-SQLite%20WAL-003B57?logo=sqlite&logoColor=white)](https://sqlite.org)
 [![License](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
 
-> *"This is Forgelabs Assistant — an Agentic WhatsApp Bot. I was inspired to build this by my bro **Micah Okoh**, and my other bro **Adeniran Glory**. We're going places guys! 🚀"*  
-> — **Ademola** (*Aspiring ML/AI Engineer*)
+> *"This is Forgelabs Assistant — an Agentic WhatsApp Bot engineered for humanlike conversational flow, high availability, and multi-tier autonomy. Built from scratch with love and grit by **Ademola** (*Aspiring ML/AI Engineer*), with shout-outs to my brothers **Micah Okoh** and **Adeniran Glory**. We're going places! 🚀"*
 
 **Forgelabs Assistant** is a modular, continuous-learning WhatsApp AI agent designed for high availability, humanlike conversational intelligence, and multimedia automation. It combines the speed and flexibility of modern agentic tool routing with strict anti-ban human behavior emulation, persistent vector and relational memory, and an end-to-end machine learning data generation pipeline.
 
 ---
 
-## 🏛️ Framework & Architectural Foundation
-
-Forgelabs Assistant is built upon an enterprise-grade multi-tier architecture engineered for continuous 24/7 cloud operation with low resource consumption (~130MB RSS).
+## 🏛️ System Architecture
 
 ```mermaid
 flowchart TD
@@ -28,25 +25,28 @@ flowchart TD
     
     subgraph LLM_CORE["Multi-Provider LLM Engine"]
         ROUTER --> HARNESS[Agent Harness]
-        HARNESS --> CLIENT[LLM Client Fallback Router]
-        CLIENT -->|Primary| GEMINI["Google Gemini (3.5 Flash-Lite / 2.5 Flash)"]
-        CLIENT -->|Auto-Failover| GROQ["Groq Pool (Llama 3.3 70B / Qwen 3.8 / GPT-OSS)"]
-        CLIENT -->|Tertiary| OPENROUTER["OpenRouter / Cerebras"]
+        HARNESS --> CLIENT[LLM Client Multi-Key Pool]
+        CLIENT -->|Primary: Sub-Second Latency| GROQ["Groq Multi-Key Pool (Qwen 3.8 27B)"]
+        CLIENT -->|Auto-Failover Tier 1| GROQ_OSS["Groq Reasoning (GPT-OSS 120B / 20B)"]
+        CLIENT -->|Auto-Failover Tier 2| CEREBRAS["Cerebras (Llama 3.3 70B)"]
+        CLIENT -->|Auto-Failover Tier 3| GEMINI["Google Gemini (3.8 Flash)"]
     end
     
-    subgraph PLUGINS["Modular Plugin Suite (15+ Plugins)"]
+    subgraph PLUGINS["Modular Plugin Suite (20+ Plugins, 70 Tools)"]
         HARNESS --> P_ADMIN[Group Admin & Moderation]
-        HARNESS --> P_STICKER[Sticker Engine & Vision Vibe]
-        HARNESS --> P_SCHED[Scheduler & Channel Scraper]
+        HARNESS --> P_STICKER[Sticker Engine (550+ Catalog)]
+        HARNESS --> P_SCHED[Scheduler & Channel Broadcaster]
         HARNESS --> P_MEDIA[Audio & Video Downloaders]
         HARNESS --> P_VOICE[Voice Synthesizer & Whisper]
-        HARNESS --> P_OTHERS[Search / RAG / CRM / Export]
+        HARNESS --> P_RAG[SQLite RAG & User Profiles]
+        HARNESS --> P_IMG[Free FLUX.1 Image Gen]
     end
     
     subgraph STORAGE_LAYER["Memory & Learning Engine"]
         HARNESS <--> SQLITE[(SQLite WAL Database)]
         NORMALIZER --> VECTOR_STORE[256-D Local Vector Store]
         VECTOR_STORE <--> SQLITE
+        SQLITE --> RAG_ENGINE[Local Database RAG Engine]
         SQLITE --> DATASET_EXPORT["ML Dataset Pipeline (train.jsonl)"]
     end
 
@@ -57,113 +57,70 @@ flowchart TD
 
 ---
 
-### 1. Transport Layer: Direct Signal Protocol via Baileys
-- **Framework**: [`@whiskeysockets/baileys`](https://github.com/WhiskeySockets/Baileys) (v6.7.12)
-- **Protocol**: Direct WebSocket connection communicating over WhatsApp's native multi-device Signal protocol.
-- **Efficiency**: Unlike Puppeteer or Selenium-based bots that require heavy headless Chromium instances (eating 1–2 GB RAM), Baileys connects directly to WhatsApp servers via binary WebSocket stanzas. The entire bot runs smoothly within **~130 MB RAM**, making it ideal for cost-effective cloud deployments on Render, Railway, Koyeb, or Docker.
-- **Connection Management**:
-  - Auto-reconnection with exponential backoff on transient network drops.
-  - Multi-file auth state persistence with base64 session bundling for stateless cloud container redeploys.
-  - Web-based pairing portal supporting QR scan and 8-digit WhatsApp Pairing Codes.
+## ✨ Key Capabilities & Highlights
 
----
+### 1. Ultra-Fast LLM Engine & Multi-Key Pooling
+- **Primary Engine**: **Groq Qwen 27B** (`qwen/qwen3.8-27b`) delivering sub-second message response times.
+- **Multi-Key Pool**: Comma-separated API keys (`GROQ_API_KEY=key1,key2`) pool daily token limits across accounts (400,000+ tokens/day) with instant automatic failover.
+- **Failover Chain**: Automatic routing to `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, Cerebras (`llama3.3-70b`), and Google Gemini.
+- **Adaptive Context Budgeting**: Strict ~950 token budget prevents token bloat and rate-limit exhaustion.
 
-### 2. Multi-Provider Intelligence & Resilience Layer
-Forgelabs Assistant uses an adaptive model hierarchy managed by `LLMClient` and `AgentHarness`:
-- **Primary Engine**: **Google Gemini** (`gemini-flash-latest`, `gemini-3.8-flash`) via OpenAI-compatible endpoints, providing ultra-fast inference and 1,500 requests-per-day free tier capacity.
-- **Autonomous Multi-Key Failover**:
-  - If Gemini encounters minute quota rate-limiting (HTTP 429), the bot automatically fails over within milliseconds to a round-robin pool of **Groq** keys.
-  - Models supported: `qwen/qwen3.8-27b`, `llama-3.3-70b-versatile`, `openai/gpt-oss-120b`, `llama-3.1-8b-instant`, and `allam-2-7b`.
-- **Intelligent Tool Routing**:
-  - **Zero-Schema Casual Turns**: For regular greetings and casual conversation, the bot bypasses tool schemas completely, reducing prompt token overhead to ~590 tokens for sub-second reply latency.
-  - **Dynamic Action Injection**: When action intent is detected (e.g., sticker creation, media download, group moderation), the harness dynamically injects only the 1–3 relevant tool definitions.
-  - **Universal Tool Call Parser**: Handles native API tool calls, XML-style `<tool_call>` tags, and inline JSON function calls generated by reasoning models.
+### 2. Authentic Persona & Cultural Nuance
+- **Natural Nigerian WhatsApp Flow**: Blends casual English with authentic Nigerian Pidgin and slang (*"how far"*, *"wetin dey happen"*, *"omo"*, *"abeg"*, *"no wahala"*, *"sharp sharp"*, *"my guy"*).
+- **Distilled Responses**: Delivers punchy 1–3 sentence insights without encyclopedic textbook dumps or robotic AI clichés.
+- **Zero Corporate Cliches**: Never outputs *"How can I help you?"*, *"Certainly! Here is..."*, or rocket emojis (🚀).
+- **Introduction Flow**: Always begins introductions in plain English before transitioning into warm Pidgin/slang.
 
----
+### 3. Creator Safeguards & Identity Protection
+- **Creator & Owner**: **Ademola** (`08108574293 / +2348108574293`).
+- **Owner Immunity**: Strictly immune from being kicked, removed, or demoted in any WhatsApp group, even if ordered by admins or superadmins.
+- **Privacy Shield**: Never discloses or leaks Ademola's phone number or confidential address book contacts unless explicitly requested by the owner.
+- **Boss Message Relay**: When anyone asks to *"message your boss"*, *"tell Ademola"*, or *"ping your creator"*, the bot immediately invokes `send_message_to_contact` to dispatch the message directly to Ademola with delivery receipts.
 
-### 3. Perception Layer: Vision, Speech & Stickers
-- **Groq Whisper Large v3**: Automatically converts incoming WhatsApp voice notes and audio messages into text before forwarding them to the LLM agent.
-- **Visual Intelligence**: Powered by Gemini and Groq Vision to inspect images, summarize documents, read screenshots, and parse sticker emotions.
-- **Sticker Vibe Engine**:
-  - Curated catalog of **550+ stickers** indexed by emotion, culture, and slang vibes (e.g., *sarcastic*, *wahala*, *laughter*, *shock*, *celebration*).
-  - Multimodal vision classifier matches the mood of incoming stickers to reply with a contextually aligned sticker in real-time.
-  - Dynamic sticker generation converting user images, GIFs, and video clips into animated or static WhatsApp WebP stickers using `sharp` and `ffmpeg-static`.
-- **Voice Note Synthesis**:
-  - Integrated text-to-speech with natural cadence and tone shaping for English and Nigerian conversational accents.
+### 4. Group Administration Suite (Elevated Privileges)
+- **Moderation Tools**: Kick bad actors (`kick_member`), add participants (`add_member`), and delete spam for everyone (`delete_group_message`).
+- **Remote Group Control**: Lock/unlock group chat (`set_group_mode`), toggle announcement mode, and manage join requests (`approve_join_request`, `reject_join_request`).
+- **Anti-Link Defense**: Intercepts unauthorized group invite links and immediately revokes spam messages.
+- **Ephemeral Settings**: Sets disappearing message durations (`set_disappearing_messages`).
 
----
-
-### 4. Continuous Machine Learning & Training Data Pipeline
-Forgelabs Assistant is built as an evolving machine learning platform:
-- **Local 256-Dimensional Vector Store**:
-  - Generates subword and character n-gram embeddings on the fly without external neural network latency.
-  - Computes cosine similarity to recall contextually relevant banter, slang, and historical dialogue.
-- **Data Mining & Reinforcement**:
-  - `pattern-miner.ts` analyzes conversation logs, message sentiments, and user feedback.
-  - Dynamic reinforcement scoring updates dialogue weights based on interaction success.
-- **Automated Fine-Tuning Pipeline**:
-  - Automatically seeds **353+ curated Nigerian WhatsApp dialogue exemplars** on first boot.
-  - Exports cleaned, de-duplicated conversation pairs into standard `train.jsonl` format.
-  - Python 3.15 + UV scripts (`scripts/ingest_chats.py`, `scripts/validate_and_finetune.py`) validate format compatibility for LoRA or full-model fine-tuning.
-
----
-
-### 5. Media Pipeline: Channel Scraping & WhatsApp Status Automation
+### 5. Automated Media & Daily Broadcast Engine
+- **Daily 7:00 AM WhatsApp Status Broadcast**:
+  - Posts signature animated motion design video featuring the winking red panda avatar with a golden star sparkle, transitioning into the luminous Forgelabs Assistant logo reveal.
+  - Accompanied by curated morning bundle: top tech/AI news, inspirational Bible verse, motivational quote, and funny memes.
 - **WhatsApp Channel Scraping**:
-  - Subscribes to verified WhatsApp channels (`Memes` and `Quotes📖`) to extract viral media and text.
-  - Uses Baileys `downloadMediaMessage` to download full-resolution images directly from channel stanzas.
-- **Multimodal Status & Group Broadcaster**:
-  - Automatically formats and posts high-engagement image quotes and memes to WhatsApp Status (`status@broadcast`).
-  - Target list is filtered to active, verified contacts (`statusJidList`) to avoid protocol timeout limits.
-  - Delivers daily motivational morning charges and meme drops to designated community groups with an 18-hour per-group cooldown.
+  - Automatically scrapes viral memes from WhatsApp Channel `Memes` with a strict 2-hour cooldown.
+  - Automatically scrapes motivational quotes from WhatsApp Channel `Quotes📖` and delivers niche-tailored morning charges to groups.
+- **Native Sticker Engine**:
+  - Curated catalog of **550+ stickers** indexed by emotion, culture, and vibe.
+  - Contextual mood-matching to drop fitting stickers in natural conversations.
+- **Free FLUX.1 Image Generation**: Generates high-definition images using free open-source FLUX.1 models via Hugging Face Spaces.
+
+### 6. Anti-Ban Human Simulation Engine
+- **Realistic Typing & Reading**: Simulates human reading speeds (120–250 WPM) and typing presence (`composing`) with natural jitter (1.2s to 4.5s).
+- **Velocity Throttling**: Caps message velocity at 25 msgs/min with chat cooldown debouncers.
+- **Protocol Sanitization**: Normalizes E.164 phone numbers and scrubs internal `@lid` identifiers and technical WhatsApp IDs (WID/wa.id).
 
 ---
 
-### 6. Security, Anti-Ban & Human Behavior Emulation
-To safeguard the connected WhatsApp account against automated bot bans, the **AntiBanEngine** enforces realistic human communication patterns:
-- **Human Reading & Typing Simulation**:
-  - Calculates realistic reading delays proportional to incoming message length (120–250 WPM) before dispatching typing indicators.
-  - Simulates active typing presence (`composing`) with natural pauses and random jitter (1.2s to 4.5s) instead of instantaneous bot replies.
-- **Velocity Rate Limiting**:
-  - Global message limiter capping traffic at **25 messages/minute**.
-  - Per-chat cooldown debouncers to prevent looping or rapid-fire spam.
-- **Protocol Sanitization**:
-  - Normalizes phone numbers to E.164 international formats (e.g., Nigerian `0810...` -> `234810...`).
-  - Corrects `@lid` (Linked Device) internal identifiers to standard user JIDs.
+## 🧩 Modular Plugin Registry (70 Tools)
 
----
-
-### 7. Storage, Memory & Health Architecture
-- **Database**: Embedded SQLite operating in **Write-Ahead Logging (WAL)** mode via `better-sqlite3` for high concurrency and zero locking overhead.
-- **Tables Indexed**: `chat_logs`, `scheduled_tasks`, `channel_quotes`, `channel_memes`, `contacts`, `user_profiles`, and `bot_settings`.
-- **Production HTTP Server**:
-  - Exposes `GET /health` and `GET /status` reporting socket connectivity, RSS memory usage, uptime, message throughput, and active LLM models.
-  - Serves `GET /pair` and `GET /qr` for remote browser-based WhatsApp device linking.
-  - Exports encrypted `GET /session-bundle` for zero-downtime container updates.
-
----
-
-## 🧩 Modular Plugin System
-
-The bot implements a clean `IPlugin` interface with dynamic tool dispatch, hot-reloading, and granular permission gates:
-
-| Plugin | Tools / Capabilities | Description |
+| Plugin | Key Tools | Description |
 | :--- | :--- | :--- |
-| **`groupAdminPlugin`** | `kick_user`, `promote_user`, `demote_user`, `set_group_announcement`, `antilink` | Comprehensive group administration, anti-link enforcement, and automated welcome messages. |
-| **`stickerPlugin`** | `create_sticker`, `search_sticker`, `reply_vibe_sticker` | 550+ sticker catalog, multimodal emotion classification, and WebP creation via Sharp/FFmpeg. |
-| **`schedulerPlugin`** | `schedule_reminder`, `list_reminders`, `cancel_reminder`, Channel Broadcasters | Cron-powered task execution, WhatsApp channel scraping, morning routines, and Status posting. |
-| **`audioDownloaderPlugin`** | `download_audio` | High-quality MP3 audio scraping from YouTube, TikTok, SoundCloud, and social links. |
-| **`videoDownloaderPlugin`** | `download_video` | Multi-platform video downloader supporting Instagram Reels, TikTok, YouTube Shorts, and X (Twitter). |
-| **`voiceNotePlugin`** | `send_voice_note` | Synthesizes realistic voice notes with authentic tone and natural phrasing. |
-| **`imageGenPlugin`** | `generate_image` | AI image generation powered by Flux, HuggingFace Inference, and Pollinations. |
-| **`webSearchPlugin`** | `web_search` | Real-time web search and ground-truth validation for breaking news and technical queries. |
-| **`documentReaderPlugin`** | `read_document` | Extracts text and summarizes PDF, DOCX, and TXT files sent in chats. |
-| **`linkSummarizerPlugin`** | `summarize_link` | Fetches webpage contents and generates concise executive summaries. |
-| **`contactPlugin`** | `save_contact`, `search_contact`, `set_contact_reminder` | Contact relationship management, birthday reminders, and contact indexing. |
-| **`memoryPlugin`** | `search_memory`, `recall_conversation` | Semantic RAG retrieval across past conversations and user preferences. |
-| **`engagementPlugin`** | `tell_joke`, `trivia_quiz`, `roast_user`, `motivate` | Interactive games, Nigerian pop culture banter, trivia, and community engagement. |
-| **`datasetExporterPlugin`**| `export_training_data` | Continuously compiles and filters conversation logs into fine-tuning datasets (`train.jsonl`). |
-| **`systemAdminPlugin`** | `reload_plugins` | Dynamic hot-reloading of tools and plugin definitions without server restarts. |
+| **`groupAdminPlugin`** | `kick_member`, `add_member`, `delete_group_message`, `set_group_mode`, `tag_all` | Comprehensive group administration, anti-link enforcement, and join requests. |
+| **`stickerPlugin`** | `send_contextual_sticker`, `create_sticker` | 550+ sticker catalog, WebP conversion via Sharp/FFmpeg, and vibe matching. |
+| **`schedulerPlugin`** | `set_reminder`, `post_whatsapp_status`, `broadcast_group_motivation` | Cron-powered task execution, WhatsApp channel scraping, and status broadcasts. |
+| **`contactPlugin`** | `send_message_to_contact`, `get_contact`, `save_contact` | Direct phone messaging without prior saving, CRM, and boss message relay. |
+| **`imageGenPlugin`** | `generate_image` | Free AI image generation powered by open-source FLUX.1 models on HF Spaces. |
+| **`audioDownloaderPlugin`** | `download_audio` | High-quality audio extraction from YouTube, TikTok, SoundCloud, and social links. |
+| **`videoDownloaderPlugin`** | `download_video` | Multi-platform video downloader for Reels, TikTok, YouTube Shorts, and X. |
+| **`voiceNotePlugin`** | `send_voice_note` | Synthesizes realistic human voice notes in articulate, professional English. |
+| **`webSearchPlugin`** | `web_search` | Real-time web search and ground-truth validation for current information. |
+| **`linkSummarizerPlugin`** | `summarize_link` | Web scraping and executive content summarization. |
+| **`documentReaderPlugin`** | `read_document` | Extracts text and summarizes PDF, DOCX, and TXT files. |
+| **`memoryPlugin`** | `search_memory`, `recall_conversation` | Local SQLite RAG layer retrieving user facts and conversation history. |
+| **`engagementPlugin`** | `tell_joke`, `trivia_quiz`, `roast_user`, `motivate` | Interactive games, Nigerian pop culture banter, and community engagement. |
+| **`viewOnceVaultPlugin`** | `inspect_view_once` | Safeguards and logs view-once media for audit and recovery. |
+| **`datasetExporterPlugin`** | `export_training_data` | Compiles and filters conversation logs into fine-tuning datasets (`train.jsonl`). |
 
 ---
 
@@ -172,31 +129,42 @@ The bot implements a clean `IPlugin` interface with dynamic tool dispatch, hot-r
 ```
 whatsapp-modular-bot/
 ├── assets/
-│   ├── channel_media/       # Bundled starter media for channel broadcasts
-│   └── stickers/            # 550+ curated stickers categorized by vibe
+│   ├── channel_media/           # Bundled starter media for broadcasts
+│   ├── stickers/                # 550+ curated stickers categorized by vibe
+│   ├── status_motion_design.gif # Avatar winking motion design GIF
+│   └── status_motion_design.mp4 # Avatar winking motion design video (1080x1920)
 ├── data/
-│   ├── bot.sqlite           # SQLite database (WAL mode)
-│   ├── bot.sqlite-wal       # SQLite Write-Ahead Log
-│   └── train.jsonl          # Continuous ML fine-tuning dataset
+│   ├── contacts.vcf             # Preloaded contact cards
+│   ├── finetune_dataset.jsonl   # 353+ curated Nigerian dialogue exemplars
+│   ├── train.jsonl              # ML fine-tuning training set
+│   └── validation.jsonl         # ML fine-tuning validation set
 ├── scripts/
 │   ├── audit_training_data.py   # Dataset validation and quality auditor
+│   ├── check_unreplied.py       # DM catch-up inspector
+│   ├── generate_motion_design.py# Motion design video renderer
 │   ├── ingest_chats.py          # WhatsApp export chat ingest pipeline
 │   ├── ingest_web_datasets.py   # Web dataset parser
 │   ├── seed_training_data.js    # SQLite exemplar seeder
 │   └── validate_and_finetune.py # Tokenizer and format validator for fine-tuning
 ├── src/
-│   ├── agent/               # Agent harness, prompt engineering, LLM failover client
-│   ├── config/              # Environment schema validation (Zod) and constants
-│   ├── core/                # Baileys client, normalizer, rate-limiter, vision, TTS
-│   ├── learning/            # Vector store, pattern miner, dataset exporter
-│   ├── memory/              # Database service, chat logger, user profiles
-│   ├── plugins/             # 15+ modular plugins and hot-reload registry
-│   ├── security/            # Anti-ban engine and human simulation algorithms
-│   └── index.ts             # Application entrypoint & HTTP server
-├── sessions/                # Baileys multi-device credentials & keys
-├── Dockerfile               # Container definition for cloud deployment
-├── package.json             # Node.js dependencies and run scripts
-└── tsconfig.json            # TypeScript compiler configuration
+│   ├── agent/                   # Agent harness, prompt builder, LLM multi-key client
+│   ├── config/                  # Environment configuration and owner validation
+│   ├── core/                    # Baileys client, context manager, RAG, normalizer, TTS
+│   ├── learning/                # Vector store, pattern miner, reinforcement engine
+│   ├── memory/                  # Database, chat logger, user profiles, contacts
+│   ├── plugins/                 # 20+ plugins and dynamic tool registry
+│   ├── security/                # Anti-ban engine, sensitive data filter, HTTP security
+│   └── index.ts                 # Application entrypoint & HTTP server
+├── test_boss_relay.mjs          # Boss recognition & instant messaging test suite
+├── test_daily_broadcasts.mjs    # Channel scraping & status broadcast test suite
+├── test_group_admin.mjs         # Elevated group admin test suite (34 tests)
+├── test_new_features.cjs        # Master verification test suite (7 tests)
+├── test_scheduler_timezone_and_routing.mjs # WAT timezone test suite
+├── Dockerfile                   # Cloud container definition
+├── ecosystem.config.cjs         # PM2 production process configuration
+├── package.json                 # Node.js dependencies and run scripts
+├── tsconfig.json                # TypeScript compiler configuration
+└── sync.bat                     # Windows GitHub synchronization utility
 ```
 
 ---
@@ -213,7 +181,7 @@ whatsapp-modular-bot/
 1. **Clone the repository**:
    ```bash
    git clone https://github.com/DeveloperGru141/Machine-learning-whatsapp-bot-model.git
-   cd whatsapp-modular-bot
+   cd Machine-learning-whatsapp-bot-model
    ```
 
 2. **Install dependencies**:
@@ -224,7 +192,7 @@ whatsapp-modular-bot/
 3. **Configure Environment Variables**:
    Create a `.env` file in the project root:
    ```env
-   # Core Bot Configuration
+   # Core Configuration
    BOT_NAME="Forgelabs assistant"
    BOT_CREATOR="ADEMOLA"
    BOT_PREFIX=""
@@ -232,55 +200,83 @@ whatsapp-modular-bot/
    PORT=3000
 
    # WhatsApp Linking
-   PAIRING_METHOD="qr"                     # "qr" or "code"
-   PAIRING_PHONE_NUMBER="07058967815"       # Phone number for pairing code
-   BOT_OWNERS="08108574293,2348108574293"
+   PAIRING_METHOD="code"                     # "code" (8-digit pairing) or "qr"
+   PAIRING_PHONE_NUMBER="07058967815"        # Bot phone number for pairing
+   BOT_OWNERS="08108574293,2348108574293,102409552584830@lid"
 
-   # Primary LLM: Google Gemini
-   LLM_PROVIDER="gemini"
-   GEMINI_API_KEY="AIzaSy..."
-   GEMINI_MODEL="gemini-flash-latest"
-
-   # Failover LLMs: Groq (supports comma-separated keys)
+   # Primary LLM: Groq Multi-Key Pool (supports comma-separated keys)
+   LLM_PROVIDER="groq"
    GROQ_API_KEY="gsk_key1,gsk_key2"
    GROQ_MODEL="qwen/qwen3.8-27b"
+   GROQ_TEMPERATURE=0.7
+   GROQ_MAX_TOKENS=512
 
-   # Optional Fallbacks
+   # Fallback LLMs
+   GEMINI_API_KEY="AIzaSy..."
+   GEMINI_MODEL="gemini-flash-latest"
    OPENROUTER_API_KEY=""
    CEREBRAS_API_KEY=""
+
+   # Render Session Backup (Auto-populated by bot)
+   SESSION_BUNDLE_BASE64=""
+   ADMIN_AUTH_TOKEN="your_secure_admin_token"
    ```
 
-4. **Build and Run**:
-   - **Development Mode** (with hot-reload):
-     ```bash
-     npm run dev
-     ```
-   - **Production Build**:
-     ```bash
-     npm run build
-     npm start
-     ```
+4. **Build and Test**:
+   ```bash
+   # Compile TypeScript
+   npm run build
+
+   # Run automated test suite (57+ assertions)
+   npm test
+   ```
+
+5. **Start Application**:
+   ```bash
+   # Development mode with hot-reload
+   npm run dev
+
+   # Production mode
+   npm start
+   ```
 
 ---
 
 ## 🌐 Cloud Deployment (Render / Docker)
 
-The bot includes built-in features optimized for platforms like **Render**, **Railway**, and **Fly.io**:
+The bot is fully optimized for **Render**, **Railway**, and **Fly.io**:
 
-1. **Keep-Alive Server**:
-   A lightweight HTTP server binds to `process.env.PORT` (default `3000`). Pinging `/health` every 5 minutes prevents free-tier instances from idling.
+1. **Stateless Container Persistence**:
+   - On connection, all 31 authentication session files are compressed and automatically backed up to Render via the Render API (`SESSION_BUNDLE_BASE64`).
+   - On redeployment or crash recovery, credentials are automatically hydrated before Baileys initializes, ensuring **zero QR re-scans**.
 2. **Web Pairing Portal**:
-   Navigate to `https://<your-service-url>/pair` or `/qr` to link your WhatsApp account directly from any browser without checking server terminal logs.
-3. **Stateless Session Sync**:
-   Hit `GET /session-bundle` to retrieve an encrypted base64 payload of your authenticated WhatsApp session files for fast restoration across redeployments.
+   - Access `https://<your-service-url>/pair` or `/qr` to pair a new WhatsApp account remotely from any browser.
+3. **Keep-Alive & Monitoring**:
+   - `GET /health`: Public health check probe (reporting socket status, uptime, and bot name) designed for uptime monitors (UptimeRobot, BetterUptime) without rate-limiting proxy IPs.
+   - `GET /logs?token=<ADMIN_AUTH_TOKEN>`: Protected live server logs inspection.
+   - `GET /session-bundle?token=<ADMIN_AUTH_TOKEN>`: Protected base64 session backup export.
+
+---
+
+## 🧪 Verification & Test Suites
+
+Run the full automated test suite:
+```bash
+npm test
+```
+
+This executes:
+- **`test_new_features.cjs`**: Verifies plain English intro flow, creator phone number privacy, owner kick/demote immunity, JID/WID sanitizer, and anti-generic response distillation.
+- **`test_boss_relay.mjs`**: Verifies owner recognition across groups and instant message relay dispatch.
+- **`test_group_admin.mjs`**: Verifies elevated admin privileges, anti-link deletion, and admin tool execution.
 
 ---
 
 ## 🤝 Acknowledgments & Credits
 
-- Built with love and grit by **Ademola** (2026).
-- Big shout-out to my brothers **Micah Okoh** and **Adeniran Glory** for the continuous inspiration and support.
-- Powered by the incredible open-source work of the **Baileys** community (`@whiskeysockets/baileys`).
+- Designed and built with dedication by **Ademola** (2026).
+- Sincere appreciation to my brothers **Micah Okoh** and **Adeniran Glory** for continuous inspiration.
+- Built on the open-source foundation of the **Baileys** community (`@whiskeysockets/baileys`).
 
 ---
-*Bot developing a bit of humanlike sentience...* 😂🤖
+*Forgelabs Assistant — Always sharp, witty, and reliable.* 🤝🔥
