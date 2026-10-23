@@ -257,7 +257,8 @@ export class PluginRegistry {
       text.includes('catch up') ||
       text.includes('missed') ||
       text.includes('replied to') ||
-      text.includes('reply to')
+      text.includes('reply to') ||
+      (text.includes('reply') && (text.includes('dm') || text.includes('ppl') || text.includes('people') || text.includes('contact') || text.includes('dms')))
     ) {
       selected.add('reply_unreplied_messages');
       selected.add('send_message_to_contact');

@@ -357,7 +357,7 @@ export class WhatsAppClient {
   private lastBackupAt = 0;
   private lastBackupHash = '';
   private static readonly BACKUP_MIN_INTERVAL_MS = 30_000;
-  private static readonly BACKUP_MAX_B64_CHARS = 60_000;
+  private static readonly BACKUP_MAX_B64_CHARS = 180_000;
 
   /**
    * Reads the freshest SESSION_BUNDLE_BASE64 straight from the Render API.
@@ -437,8 +437,10 @@ export class WhatsAppClient {
       const senderKeys = allFiles.filter((f) => f.startsWith('sender-key-')).sort(newestFirst);
       const appKeys = allFiles.filter((f) => f.startsWith('app-state-sync-key'));
 
-      const core = ['creds.json', ...appKeys];
-      const prunable = [...senderKeys.slice(0, 30), ...sessions.slice(0, 60), ...preKeys, ...sessions.slice(60), ...senderKeys.slice(30)];
+      // Signal `session-*` ratchets must NEVER be pruned: dropping them causes
+      // "MessageCounterError: Key used already or never filled" and undeliverable replies.
+      const core = ['creds.json', ...appKeys, ...sessions];
+      const prunable = [...senderKeys.slice(0, 30), ...preKeys, ...senderKeys.slice(30)];
 
       const read = (f: string): string | undefined => {
         const fp = path.join(config.paths.sessions, f);
@@ -1546,8 +1548,6 @@ export class WhatsAppClient {
         normalized.senderName;
 
     const incomingCharLen = (cleanedText || promptText || '').length;
-    // Use the paired phone-number address for LID DMs when Baileys provides it.
-    const replyChatJid = normalized.replyChatJid;
 
     const context: ExecutionContext = {
       sock,
@@ -1566,18 +1566,19 @@ export class WhatsAppClient {
           text,
           false,
           incomingCharLen,
-          normalized.isGroup
+          normalized.isGroup,
+          isOwner
         );
+        // Always reply to the exact chat the message arrived from (never rewrite @lid -> PN).
         const res = await OutboundSender.replyText(
           sock,
-          replyChatJid,
+          normalized.chatJid,
           text,
           safeQuoted,
           isOwner,
           false,
           undefined,
-          true,
-          normalized.chatJid
+          true
         );
         if (normalized.isGroup) {
           recordGroupInteraction(normalized.chatJid);
@@ -1626,7 +1627,7 @@ export class WhatsAppClient {
           // 1. Start active typing bubble immediately so users know the bot is actively crafting their reply
           stopTyping = antiBanEngine.startTypingHeartbeat(sock, normalized.chatJid);
           // 2. Light natural cadence pause (50ms in DM, 300-600ms in group)
-          await antiBanEngine.simulateReadingDelay(incomingCharLen, normalized.isGroup);
+          await antiBanEngine.simulateReadingDelay(incomingCharLen, normalized.isGroup, isOwner);
           await agentHarness.handleMessage(promptText, context);
 
           // 3. Autonomous Pattern-Based Sticker Engine:
