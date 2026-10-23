@@ -374,99 +374,169 @@ export class WhatsAppClient {
   }
 
   
+  private backupInFlight = false;
+  private backupQueued = false;
+  private lastBackupAt = 0;
+  private lastBackupHash = '';
+  private static readonly BACKUP_MIN_INTERVAL_MS = 30_000;
+  private static readonly BACKUP_MAX_B64_CHARS = 60_000;
+
+  /**
+   * Reads the freshest SESSION_BUNDLE_BASE64 straight from the Render API.
+   * process.env only holds the snapshot taken at the last *deploy*, so after a plain container
+   * restart (free-tier hibernate / host maintenance) it is stale or empty, which previously
+   * caused the bot to boot unlinked and sit in a pairing loop.
+   */
+  private async fetchLatestSessionBundle(): Promise<string | undefined> {
+    const apiKey = process.env.RENDER_API_KEY;
+    const serviceId = process.env.RENDER_SERVICE_ID;
+    if (apiKey && serviceId) {
+      try {
+        const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars/SESSION_BUNDLE_BASE64`, {
+          headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { value?: string };
+          if (data?.value && data.value.length > 100) {
+            console.log(`[WhatsAppClient] ☁️ Fetched latest session bundle from Render API (${data.value.length}b).`);
+            return data.value;
+          }
+        } else {
+          console.warn(`[WhatsAppClient] Render API bundle fetch returned ${res.status}; falling back to process.env snapshot.`);
+        }
+      } catch (err: any) {
+        console.warn('[WhatsAppClient] Render API bundle fetch failed; falling back to process.env snapshot:', err?.message || err);
+      }
+    }
+    return process.env.SESSION_BUNDLE_BASE64;
+  }
+
+  /**
+   * Persists the Signal/auth state to the Render env var. Debounced + single-flight so rapid
+   * creds/key updates collapse into one PUT, and pruned to a hard size cap so the bundle can never
+   * grow without bound again (it previously reached 117KB / 253 files and Render began rejecting writes).
+   */
   public async autoBackupSessionToRender(): Promise<void> {
     if (this.sessionBundleInvalidated) return;
+    if (this.backupInFlight) {
+      this.backupQueued = true;
+      return;
+    }
+    const sinceLast = Date.now() - this.lastBackupAt;
+    if (sinceLast < WhatsAppClient.BACKUP_MIN_INTERVAL_MS) {
+      if (!this.backupQueued) {
+        this.backupQueued = true;
+        const t = setTimeout(() => {
+          this.backupQueued = false;
+          void this.autoBackupSessionToRender();
+        }, WhatsAppClient.BACKUP_MIN_INTERVAL_MS - sinceLast + 250);
+        t.unref();
+      }
+      return;
+    }
+
     const credsFile = path.join(config.paths.sessions, 'creds.json');
     if (!fs.existsSync(credsFile)) return;
 
+    this.backupInFlight = true;
     try {
-      const rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
+      let rawCreds: any;
+      try {
+        rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
+      } catch {
+        return; // creds.json is mid-write; the next creds.update will trigger another backup
+      }
       if (!rawCreds?.registered && !rawCreds?.account && !rawCreds?.me?.lid) return;
 
       const zlib = await import('zlib');
       const allFiles = fs.readdirSync(config.paths.sessions);
-      const essentialFiles = new Set<string>();
-      essentialFiles.add('creds.json');
+      const mtimeOf = (f: string): number => {
+        try { return fs.statSync(path.join(config.paths.sessions, f)).mtimeMs; } catch { return 0; }
+      };
+      const newestFirst = (a: string, b: string) => mtimeOf(b) - mtimeOf(a);
 
-      // 1. App state sync keys
-      for (const f of allFiles) {
-        if (f.startsWith('app-state-sync-key')) essentialFiles.add(f);
-      }
-
-      // 2. ALL sender keys and sender key memory (vital for group message decryption!)
-      for (const f of allFiles) {
-        if (f.startsWith('sender-key-')) essentialFiles.add(f);
-      }
-
-      // 3. ALL pairwise session keys (vital for DM message decryption!)
-      for (const f of allFiles) {
-        if (f.startsWith('session-')) essentialFiles.add(f);
-      }
-
-      // 4. Pre-keys (sorted newest first, up to 60)
       const preKeys = allFiles
         .filter((f) => f.startsWith('pre-key-'))
-        .sort((a, b) => {
-          const numA = parseInt(a.replace(/[^0-9]/g, ''), 10) || 0;
-          const numB = parseInt(b.replace(/[^0-9]/g, ''), 10) || 0;
-          return numB - numA;
-        })
-        .slice(0, 75);
-      for (const f of preKeys) essentialFiles.add(f);
+        .sort((a, b) => (parseInt(b.replace(/[^0-9]/g, ''), 10) || 0) - (parseInt(a.replace(/[^0-9]/g, ''), 10) || 0))
+        .slice(0, 40);
+      const sessions = allFiles.filter((f) => f.startsWith('session-')).sort(newestFirst);
+      const senderKeys = allFiles.filter((f) => f.startsWith('sender-key-')).sort(newestFirst);
+      const appKeys = allFiles.filter((f) => f.startsWith('app-state-sync-key'));
 
+      // Core files that are never pruned
+      const core = ['creds.json', ...appKeys];
+      // Prunable files ordered by importance (most important first)
+      const prunable = [...senderKeys.slice(0, 30), ...sessions.slice(0, 60), ...preKeys, ...sessions.slice(60), ...senderKeys.slice(30)];
+
+      const read = (f: string): string | undefined => {
+        const fp = path.join(config.paths.sessions, f);
+        try { return fs.existsSync(fp) && fs.statSync(fp).isFile() ? fs.readFileSync(fp, 'utf8') : undefined; } catch { return undefined; }
+      };
       const filesMap: Record<string, string> = {};
-      for (const file of essentialFiles) {
-        const fullPath = path.join(config.paths.sessions, file);
-        if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
-          filesMap[file] = fs.readFileSync(fullPath, 'utf8');
-        }
+      for (const f of [...core, ...prunable]) {
+        const content = read(f);
+        if (content !== undefined) filesMap[f] = content;
       }
 
-      const jsonStr = JSON.stringify(filesMap);
       if (!filesMap['creds.json'] || filesMap['creds.json'].trim().length < 50) {
         console.warn('[WhatsAppClient] Refusing to backup session: creds.json is empty or incomplete.');
         return;
       }
-      let gzipped = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'));
-      let bundle = gzipped.toString('base64');
 
-      // Ensure bundle fits safely within Render env var threshold (32,768 bytes limit)
-      if (bundle.length > 30_000) {
-        for (const pk of [...preKeys].reverse()) {
-          delete filesMap[pk];
-          const prunedGz = zlib.gzipSync(Buffer.from(JSON.stringify(filesMap), 'utf8'));
-          bundle = prunedGz.toString('base64');
-          if (bundle.length <= 29_000) break;
+      const build = (): string => zlib.gzipSync(Buffer.from(JSON.stringify(filesMap), 'utf8'), { level: 9 }).toString('base64');
+      let bundle = build();
+      let dropped = 0;
+      if (bundle.length > WhatsAppClient.BACKUP_MAX_B64_CHARS) {
+        const dropOrder = [...prunable].reverse().filter((f) => filesMap[f] !== undefined);
+        for (let i = 0; i < dropOrder.length; i += 8) {
+          for (const f of dropOrder.slice(i, i + 8)) { delete filesMap[f]; dropped++; }
+          bundle = build();
+          if (bundle.length <= WhatsAppClient.BACKUP_MAX_B64_CHARS) break;
         }
       }
 
-      const apiKey = process.env.RENDER_API_KEY || '[REDACTED_RENDER_API_KEY]';
-      const serviceId = process.env.RENDER_SERVICE_ID || 'srv-db9jvcmq1p3s738hpa40';
+      const crypto = await import('crypto');
+      const hash = crypto.createHash('sha1').update(bundle).digest('hex');
+      if (hash === this.lastBackupHash) return;
+
+      const apiKey = process.env.RENDER_API_KEY;
+      const serviceId = process.env.RENDER_SERVICE_ID;
+      if (!apiKey || !serviceId) {
+        console.warn('[WhatsAppClient] RENDER_API_KEY / RENDER_SERVICE_ID not set; skipping remote session backup.');
+        return;
+      }
 
       const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars/SESSION_BUNDLE_BASE64`, {
         method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ value: bundle }),
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(15_000),
       });
+      this.lastBackupAt = Date.now();
 
       if (res.ok) {
-        this.lastBackupFileCount = Object.keys(filesMap).length;
+        this.lastBackupHash = hash;
+        this.lastBackupFileCount = allFiles.length;
         console.log(
-          `[WhatsAppClient] 💾 Successfully persisted authenticated session (${Object.keys(filesMap).length} files, ${bundle.length}b base64) to Render SESSION_BUNDLE_BASE64!`
+          `[WhatsAppClient] 💾 Session persisted to Render (${Object.keys(filesMap).length} files kept, ${dropped} pruned, ${bundle.length}b base64).`
         );
       } else {
-        console.warn(`[WhatsAppClient] Render session backup response: ${res.status}`);
+        const body = (await res.text().catch(() => '')).slice(0, 200);
+        console.warn(`[WhatsAppClient] Render session backup rejected: ${res.status} ${body}`);
       }
     } catch (err: any) {
-      console.warn('[WhatsAppClient] Auto backup to Render failed:', err.message);
+      console.warn('[WhatsAppClient] Auto backup to Render failed:', err?.message || err);
+    } finally {
+      this.backupInFlight = false;
+      if (this.backupQueued) {
+        this.backupQueued = false;
+        const wait = Math.max(500, WhatsAppClient.BACKUP_MIN_INTERVAL_MS - (Date.now() - this.lastBackupAt) + 250);
+        const t = setTimeout(() => void this.autoBackupSessionToRender(), wait);
+        t.unref();
+      }
     }
   }
-
   public isSocketOpen(): boolean {
     return Boolean(this.sock && (this.sock as any).ws?.isOpen);
   }
@@ -485,10 +555,11 @@ export class WhatsAppClient {
 
       // Hydrate session files from SESSION_BUNDLE_BASE64 on cloud containers (Render) if sessions/creds.json is missing and not invalidated
       const credsFile = path.join(config.paths.sessions, 'creds.json');
-      if (!fs.existsSync(credsFile) && process.env.SESSION_BUNDLE_BASE64 && !this.sessionBundleInvalidated) {
+      const hydrateSource = !fs.existsSync(credsFile) && !this.sessionBundleInvalidated ? await this.fetchLatestSessionBundle() : undefined;
+      if (!fs.existsSync(credsFile) && hydrateSource && !this.sessionBundleInvalidated) {
         try {
           const zlib = await import('zlib');
-          const rawBuf = Buffer.from(process.env.SESSION_BUNDLE_BASE64, 'base64');
+          const rawBuf = Buffer.from(hydrateSource, 'base64');
           const bundleJson =
             rawBuf[0] === 0x1f && rawBuf[1] === 0x8b
               ? zlib.gunzipSync(rawBuf).toString('utf8')
