@@ -58,6 +58,7 @@ export class WhatsAppClient {
   private sock: WASocket | null = null;
   private logger = pino({ level: 'silent' });
   private reconnectAttempts = 0;
+  private reconnectTimer: NodeJS.Timeout | null = null;
   private isConnecting = false;
   private keepAliveInterval: NodeJS.Timeout | null = null;
   private unrepliedScanInterval: NodeJS.Timeout | null = null;
@@ -517,11 +518,33 @@ export class WhatsAppClient {
     return Boolean(this.sock && (this.sock as any).ws?.isOpen);
   }
 
+  private cancelReconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  private scheduleReconnect(delayMs: number): void {
+    if (this.reconnectTimer) {
+      console.log('[WhatsAppClient] Reconnect already scheduled; ignoring duplicate close event.');
+      return;
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.start().catch((err: any) => {
+        console.error('[WhatsAppClient] Reconnect start failed:', err instanceof Error ? err.name : typeof err);
+      });
+    }, delayMs);
+    this.reconnectTimer.unref?.();
+  }
+
   public async start(): Promise<void> {
     if (this.isConnecting) {
       console.log('[WhatsAppClient] Connection attempt already in progress, skipping duplicate invocation.');
       return;
     }
+    this.cancelReconnect();
     this.isConnecting = true;
 
     try {
@@ -677,7 +700,10 @@ export class WhatsAppClient {
       });
 
       // Connection lifecycle management
-      this.sock.ev.on('connection.update', async (update) => {
+      const connectionSocket = this.sock;
+      if (!connectionSocket) throw new Error('WhatsApp socket was not created');
+      connectionSocket.ev.on('connection.update', async (update) => {
+        if (this.sock !== connectionSocket) return;
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
@@ -752,7 +778,7 @@ export class WhatsAppClient {
                 fs.rmSync(config.paths.sessions, { recursive: true, force: true });
               }
             } catch {}
-            setTimeout(() => this.start(), 1500);
+            this.scheduleReconnect(1500);
             return;
           }
 
@@ -764,7 +790,7 @@ export class WhatsAppClient {
                 console.log(
                   `[WhatsAppClient] 401 Disconnect / Connection Failure (attempt ${this.loggedOutRetryCount}/3). Waiting 5s in case of rolling deploy conflict...`
                 );
-                setTimeout(() => this.start(), 5000);
+                this.scheduleReconnect(5000);
                 return;
               }
               console.error(
@@ -781,7 +807,7 @@ export class WhatsAppClient {
                 fs.rmSync(config.paths.sessions, { recursive: true, force: true });
               }
             } catch {}
-            setTimeout(() => this.start(), 1000);
+            this.scheduleReconnect(1000);
             return;
           }
 
@@ -808,14 +834,14 @@ export class WhatsAppClient {
             errorMsg.includes('Connection Closed')
           ) {
             console.log(`[WhatsAppClient] Transient socket reset (code: ${statusCode}, reason: ${errorMsg || 'socket drop'}). Reconnecting in 800ms...`);
-            setTimeout(() => this.start(), 800);
+            this.scheduleReconnect(800);
             return;
           }
 
           // If Stream Errored (conflict), wait 5s before reconnecting so any older container/socket finishes closing
           if (isStreamConflict) {
             console.log('[WhatsAppClient] Stream conflict detected; waiting 5s before reconnecting...');
-            setTimeout(() => this.start(), 5000);
+            this.scheduleReconnect(5000);
             return;
           }
 
@@ -825,8 +851,9 @@ export class WhatsAppClient {
           console.log(
             `[WhatsAppClient] Auto-reconnecting (attempt #${this.reconnectAttempts}) in ${(delay / 1000).toFixed(1)}s...`
           );
-          setTimeout(() => this.start(), delay);
+          this.scheduleReconnect(delay);
         } else if (connection === 'open') {
+          this.cancelReconnect();
           this.reconnectAttempts = 0;
           this.loggedOutRetryCount = 0;
           this.pairingRequested = false;

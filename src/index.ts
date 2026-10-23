@@ -48,10 +48,26 @@ console.log = (...args: any[]) => {
   originalConsoleLog.apply(console, args);
 };
 
+function redactLibsignalSessionDump(args: any[]): any[] {
+  const label = typeof args[0] === 'string' ? args[0] : '';
+  if (/^(Opening session:|Closing session:|Removing old closed session:|Session already closed$)/.test(label)) {
+    return [label, '[session data redacted]'];
+  }
+  return args;
+}
+
+const originalConsoleInfo = console.info;
+console.info = (...args: any[]) => {
+  const safeArgs = redactLibsignalSessionDump(args);
+  recordLog('INFO', safeArgs);
+  originalConsoleInfo.apply(console, safeArgs);
+};
+
 const originalConsoleWarn = console.warn;
 console.warn = (...args: any[]) => {
-  recordLog('WARN', args);
-  originalConsoleWarn.apply(console, args);
+  const safeArgs = redactLibsignalSessionDump(args);
+  recordLog('WARN', safeArgs);
+  originalConsoleWarn.apply(console, safeArgs);
 };
 
 // Suppress noisy internal libsignal decrypt/Bad MAC dumps (Baileys handles Signal protocol retries automatically)
