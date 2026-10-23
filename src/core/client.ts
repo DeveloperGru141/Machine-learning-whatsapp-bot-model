@@ -664,6 +664,19 @@ export class WhatsAppClient {
       }
 
       const { state, saveCreds } = await useMultiFileAuthState(config.paths.sessions);
+      // Persist contact privacy tokens and LID mappings after Baileys writes them.
+      // These key-store updates do not emit `creds.update`, so without this hook
+      // newly learned trust data would be lost on the next ephemeral-container restart.
+      const persistSignalKeys = state.keys.set.bind(state.keys);
+      state.keys.set = async (data) => {
+        await persistSignalKeys(data);
+        if (
+          Object.keys(data).some((category) => category === 'tctoken' || category === 'lid-mapping') &&
+          this.isRegistered()
+        ) {
+          this.autoBackupSessionToRender();
+        }
+      };
       const { version, isLatest } = await fetchLatestBaileysVersion();
       console.log(`[WhatsAppClient] Starting Baileys v${version.join('.')} (Latest: ${isLatest})`);
 
