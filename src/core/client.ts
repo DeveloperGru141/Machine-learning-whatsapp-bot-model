@@ -56,7 +56,7 @@ export function formatPhoneNumberForPairing(num: string): string {
 
 export class WhatsAppClient {
   private sock: WASocket | null = null;
-  private logger = pino({ level: 'silent' });
+  private logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'warn' });
   private reconnectAttempts = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private isConnecting = false;
@@ -971,6 +971,23 @@ export class WhatsAppClient {
           console.error('[WhatsAppClient] Error processing messaging-history.set:', err.message);
         }
       });
+
+      // Raw protocol diagnostics for outbound delivery: server ACK/NACK (with error code) and raw receipts.
+      try {
+        const ws: any = (this.sock as any).ws;
+        ws?.on?.('CB:ack,class:message', (node: any) => {
+          const a = node?.attrs || {};
+          if (a.error || (a.id && OutboundSender.isDispatchedId(a.id))) {
+            console.log(`[WA-Ack] id=${String(a.id || '').slice(-8)} from=${a.from || '?'} error=${a.error || 'none'}`);
+          }
+        });
+        ws?.on?.('CB:receipt', (node: any) => {
+          const a = node?.attrs || {};
+          if (a.id && OutboundSender.isDispatchedId(a.id)) {
+            console.log(`[WA-Receipt] id=${String(a.id).slice(-8)} from=${a.from || '?'} participant=${a.participant || '-'} type=${a.type || 'delivery'}`);
+          }
+        });
+      } catch {}
 
       // Track WhatsApp message delivery receipts (SERVER_ACK ✓, DELIVERY_ACK ✓✓, READ ✓✓)
       this.sock.ev.on('messages.update', (updates) => {
