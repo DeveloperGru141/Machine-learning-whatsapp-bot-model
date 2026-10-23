@@ -1,6 +1,7 @@
 import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 import fs from 'fs';
 import { antiBanEngine } from '../security/anti-ban.js';
+import { restrictionGuard } from '../security/restriction-guard.js';
 import { chatLogger } from '../memory/chat-logger.js';
 
 let activeSocketGetter: (() => WASocket | null) | null = null;
@@ -74,6 +75,11 @@ export class OutboundSender {
     isProactiveCheckIn?: boolean,
     isReply: boolean = true
   ): boolean {
+    if (restrictionGuard.blocksJid(chatJid)) {
+      restrictionGuard.logSkip('outbound message');
+      return false;
+    }
+
     const isGroup = chatJid.endsWith('@g.us');
     const check = antiBanEngine.canSendOutbound({
       chatJid,

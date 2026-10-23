@@ -1,3 +1,4 @@
+import { restrictionGuard } from '../security/restriction-guard.js';
 import type { WASocket } from '@whiskeysockets/baileys';
 import { db } from '../memory/db.js';
 import { healthMonitor } from './health-monitor.js';
@@ -221,6 +222,10 @@ export class AnalyticsEngine {
     // Every 6 hours (6 * 60 * 60 * 1000 ms)
     this.reportInterval = setInterval(async () => {
       try {
+        if (restrictionGuard.isActive()) {
+          restrictionGuard.logSkip('periodic analytics report');
+          return;
+        }
         const summary = this.generateDailySummary();
         await sock.sendMessage(targetJid, { text: summary });
         console.log(`[AnalyticsEngine] Successfully sent periodic analytics report to ${targetJid}`);

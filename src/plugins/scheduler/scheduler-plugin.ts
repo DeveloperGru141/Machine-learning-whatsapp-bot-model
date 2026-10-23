@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { restrictionGuard } from '../../security/restriction-guard.js';
 import path from 'path';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -914,6 +915,11 @@ export class SchedulerPlugin implements IPlugin {
    */
   public async checkDueTasks(): Promise<void> {
     if (this.isProcessingDueTasks) {
+      return;
+    }
+    // Account restricted by WhatsApp: leave tasks pending (reminders, status posts, memes) so they run once it lifts.
+    if (restrictionGuard.isActive()) {
+      restrictionGuard.logSkip('scheduled tasks');
       return;
     }
     this.isProcessingDueTasks = true;

@@ -1,4 +1,5 @@
 import type { WASocket } from '@whiskeysockets/baileys';
+import { restrictionGuard } from '../../security/restriction-guard.js';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { db, logAutonomousAction } from '../../memory/db.js';
 import { OutboundSender } from '../../core/sender.js';
@@ -411,6 +412,10 @@ Drop a natural 1-2 sentence ${isContact ? 'check-in / hello' : 'reminder / follo
   public async runAutonomousCheckInCycle(): Promise<{ executed: boolean; summary: string }> {
     if (this.isProcessing) {
       return { executed: false, summary: 'Engagement cycle already running.' };
+    }
+    if (restrictionGuard.isActive()) {
+      restrictionGuard.logSkip('proactive engagement cycle');
+      return { executed: false, summary: 'Account is temporarily restricted by WhatsApp; proactive check-ins are paused.' };
     }
 
     const socket = this.sock || activeEngagementSocket;

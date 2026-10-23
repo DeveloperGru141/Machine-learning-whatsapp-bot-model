@@ -22,6 +22,7 @@ import { normalizeMessage, NormalizedMessage } from './normalizer.js';
 import { shouldRespondToMessage, recordGroupInteraction } from './filter.js';
 import { OutboundSender, setActiveSocketGetter, setDeliveryConfirmationWaiter } from './sender.js';
 import { chatLogger } from '../memory/chat-logger.js';
+import { restrictionGuard } from '../security/restriction-guard.js';
 import { agentHarness } from '../agent/harness.js';
 import { ExecutionContext } from '../plugins/types.js';
 import { patternMiner } from '../learning/pattern-miner.js';
@@ -57,6 +58,7 @@ export function formatPhoneNumberForPairing(num: string): string {
 export class WhatsAppClient {
   private sock: WASocket | null = null;
   private logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'warn' });
+  private refreshAccountStanding: (() => Promise<void>) | null = null;
   private reconnectAttempts = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private isConnecting = false;
@@ -712,6 +714,9 @@ export class WhatsAppClient {
         },
         shouldIgnoreJid: (jid) => jid?.endsWith('@broadcast') || jid?.includes('status@broadcast'),
       });
+      // Hold direct sends until this socket has checked WhatsApp account standing. This closes the
+      // reconnect window where the bot could otherwise retry DMs before learning a restriction is active.
+      restrictionGuard.beginVerification();
 
       // Initialize group welcome listener and scheduler background socket
       setActiveSocketGetter(() => this.sock);
@@ -734,9 +739,53 @@ export class WhatsAppClient {
       // Connection lifecycle management
       const connectionSocket = this.sock;
       if (!connectionSocket) throw new Error('WhatsApp socket was not created');
+
+      // Restriction guard: while WhatsApp has the account reach-out time-locked, hold back 1:1 and status
+      // sends instead of sending doomed messages (retries can extend the lock). Groups are unaffected.
+      const rawSendMessage = (connectionSocket as any).sendMessage.bind(connectionSocket);
+      (connectionSocket as any).sendMessage = async (jid: string, ...rest: any[]) => {
+        if (restrictionGuard.blocksJid(jid)) {
+          restrictionGuard.logSkip(`outbound send to ${jid.endsWith('@lid') ? 'LID chat' : jid === 'status@broadcast' ? 'status' : 'DM'}`);
+          return undefined;
+        }
+        return rawSendMessage(jid, ...rest);
+      };
+
+      let lastStandingRefreshAt = 0;
+      const refreshStanding = async (): Promise<void> => {
+        const s: any = connectionSocket;
+        if (this.sock !== connectionSocket) return;
+        if (Date.now() - lastStandingRefreshAt < 15_000) return;
+        lastStandingRefreshAt = Date.now();
+        if (typeof s?.fetchAccountReachoutTimelock !== 'function') {
+          console.warn('[AccountStanding] This Baileys socket cannot fetch reach-out standing; outbound pause remains until a standing update is available.');
+          restrictionGuard.retryLater();
+          return;
+        }
+        try {
+          const lock = await s.fetchAccountReachoutTimelock();
+          if (this.sock !== connectionSocket) return;
+          console.log(`[AccountStanding] reachoutTimelock active=${lock?.isActive} type=${lock?.enforcementType} ends=${lock?.timeEnforcementEnds?.toISOString?.() || lock?.timeEnforcementEnds || 'n/a'}`);
+          if (typeof lock?.isActive !== 'boolean') {
+            restrictionGuard.retryLater();
+            return;
+          }
+          restrictionGuard.apply(lock);
+        } catch (err: any) {
+          console.log(`[AccountStanding] check failed: ${err?.message || err}`);
+          restrictionGuard.retryLater();
+        }
+      };
+      restrictionGuard.setRefresher(refreshStanding);
+      this.refreshAccountStanding = refreshStanding;
       connectionSocket.ev.on('connection.update', async (update) => {
         if (this.sock !== connectionSocket) return;
         const { connection, lastDisconnect, qr } = update;
+
+        // Live restriction updates pushed by WhatsApp
+        if ((update as any).reachoutTimeLock) {
+          restrictionGuard.apply((update as any).reachoutTimeLock);
+        }
 
         if (qr) {
           this.latestQr = qr;
@@ -902,22 +951,19 @@ export class WhatsAppClient {
           this.syncGroups().catch((err) => console.warn('[WhatsAppClient] Error syncing groups on connect:', err?.message || err));
           console.log('✅ [WhatsAppClient] Connection established, contact replies cycle & server watchdog active!');
 
-          // Diagnose WhatsApp-side account restrictions (cause of ack error 463 on 1:1 sends).
+          // Check account standing immediately; the guard holds DMs until this confirms unlocked status.
           const diagSock: any = this.sock;
-          setTimeout(async () => {
+          void (async () => {
+            await this.refreshAccountStanding?.();
             try {
-              if (typeof diagSock?.fetchAccountReachoutTimelock === 'function') {
-                const lock = await diagSock.fetchAccountReachoutTimelock();
-                console.log(`[AccountStanding] reachoutTimelock active=${lock?.isActive} type=${lock?.enforcementType} ends=${lock?.timeEnforcementEnds?.toISOString?.() || 'n/a'}`);
-              }
-              if (typeof diagSock?.fetchNewChatMessageCap === 'function') {
+              if (this.sock === diagSock && typeof diagSock?.fetchNewChatMessageCap === 'function') {
                 const cap = await diagSock.fetchNewChatMessageCap();
                 console.log(`[AccountStanding] newChatCap=${JSON.stringify(cap)}`);
               }
             } catch (err: any) {
               console.log(`[AccountStanding] check failed: ${err?.message || err}`);
             }
-          }, 5000);
+          })();
         }
       });
 
@@ -1011,6 +1057,10 @@ export class WhatsAppClient {
           const a = node?.attrs || {};
           if (a.error || (a.id && OutboundSender.isDispatchedId(a.id))) {
             console.log(`[WA-Ack] id=${String(a.id || '').slice(-8)} from=${a.from || '?'} error=${a.error || 'none'}`);
+          }
+          // 463 = account restricted / missing privacy token: re-check standing so the pause engages.
+          if (String(a.error) === '463') {
+            this.refreshAccountStanding?.().catch(() => {});
           }
         });
         ws?.on?.('CB:receipt', (node: any) => {
@@ -1413,6 +1463,12 @@ export class WhatsAppClient {
 
     if (!shouldRespond) return;
 
+    // While WhatsApp has the account restricted, 1:1 replies would be rejected (and retries can extend
+    // the lock). Skip DM handling; the message is already logged and is answered by the catch-up scan later.
+    if (!normalized.isGroup && restrictionGuard.isActive()) {
+      restrictionGuard.logSkip('DM reply');
+      return;
+    }
     // Fast-Path for Bot Owner: Private DM View-Once Retrieval
     const isOwnerDmUser = userProfileManager.isOwner(normalized.senderJid, normalized.senderName);
     if (!normalized.isGroup && isOwnerDmUser && normalized.text) {
@@ -1995,6 +2051,14 @@ export class WhatsAppClient {
       };
     }
 
+    if (restrictionGuard.isActive()) {
+      restrictionGuard.logSkip('unreplied DM catch-up');
+      return {
+        repliedCount: 0,
+        summary: 'WhatsApp has temporarily restricted this account from sending direct messages, so DM replies are paused. They will resume automatically when the restriction ends.',
+      };
+    }
+
     this.isScanningUnreplied = true;
     console.log('[WhatsAppClient] 🔍 Checking for genuine unreplied 1-on-1 direct messages...');
 
@@ -2024,7 +2088,8 @@ export class WhatsAppClient {
 
         // 2. Only consider recent unreplied messages (within last 2 hours)
         // This prevents answering days-old historical chats while reliably catching messages sent during restarts
-        const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+        // Extended automatically to cover DMs that arrived while the account was restricted.
+        const twoHoursAgo = Math.min(Date.now() - 2 * 60 * 60 * 1000, restrictionGuard.catchupFrom() ?? Number.MAX_SAFE_INTEGER);
         if (chat.timestamp && chat.timestamp < twoHoursAgo) {
           return false;
         }

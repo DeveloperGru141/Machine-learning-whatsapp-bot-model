@@ -1,4 +1,5 @@
 import { WASocket } from '@whiskeysockets/baileys';
+import { restrictionGuard } from '../../security/restriction-guard.js';
 import { db, recordContactReminderSent, recordContactReminderFailed, isContactAlreadyReminded, getContactReminderStats } from '../../memory/db.js';
 import { contactService } from '../../memory/contact-service.js';
 import { OutboundSender } from '../../core/sender.js';
@@ -358,6 +359,13 @@ export class ContactReminderService {
     this.nextRunTimeout = setTimeout(async () => {
       if (!this.isRunning || this.isPaused) return;
 
+      // Account restricted by WhatsApp: hold the campaign (no sends, no failures recorded) and re-check later.
+      if (restrictionGuard.isActive()) {
+        restrictionGuard.logSkip('contact reminder campaign step');
+        this.scheduleNextStep(sock, delayMinSec, delayMaxSec, onlyInteracted, false);
+        return;
+      }
+
       try {
         const eligible = this.getEligibleContacts(onlyInteracted);
         if (eligible.length === 0) {
@@ -385,6 +393,10 @@ export class ContactReminderService {
           this.lastRecipientName = `${nextContact.displayName} (+${nextContact.phoneNumber})`;
           this.lastSentTimestamp = Date.now();
           console.log(`[ContactReminderService] ✅ Sent reminder to ${nextContact.displayName} (+${nextContact.phoneNumber}) [Batch: ${this.currentBatchSent}/${this.currentBatchGoal}]`);
+        } else if (restrictionGuard.isActive()) {
+          // The account may have become restricted after this campaign step began. Keep the
+          // contact eligible and let the next scheduled step check standing again.
+          restrictionGuard.logSkip('contact reminder dispatch');
         } else {
           recordContactReminderFailed(nextContact.jid, nextContact.phoneNumber, nextContact.displayName, 'Socket dispatch returned null');
           console.warn(`[ContactReminderService] ⚠️ Failed sending to ${nextContact.displayName} (+${nextContact.phoneNumber})`);
