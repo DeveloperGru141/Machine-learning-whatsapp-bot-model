@@ -20,7 +20,7 @@ import readline from 'readline';
 import { config, normalizePhoneNumber } from '../config/env.js';
 import { normalizeMessage, NormalizedMessage } from './normalizer.js';
 import { shouldRespondToMessage, recordGroupInteraction } from './filter.js';
-import { OutboundSender, setActiveSocketGetter } from './sender.js';
+import { OutboundSender, setActiveSocketGetter, setDeliveryConfirmationWaiter } from './sender.js';
 import { chatLogger } from '../memory/chat-logger.js';
 import { agentHarness } from '../agent/harness.js';
 import { ExecutionContext } from '../plugins/types.js';
@@ -189,12 +189,12 @@ export class WhatsAppClient {
       };
     }
 
-    const fallbackStatus = msgId ? 'SENT_TO_SERVER' : 'DISPATCHED';
+    const fallbackStatus = 'DISPATCHED';
     return {
-      confirmed: Boolean(msgId),
+      confirmed: false,
       status: fallbackStatus,
       statusLabel: formatLabel(fallbackStatus),
-      statusCode: msgId ? 2 : 1,
+      statusCode: 0,
       stanzaId: msgId,
       msgId,
       recipientJid,
@@ -653,6 +653,9 @@ export class WhatsAppClient {
 
       // Initialize group welcome listener and scheduler background socket
       setActiveSocketGetter(() => this.sock);
+      setDeliveryConfirmationWaiter((msgId, recipientJid, timeoutMs) =>
+        this.waitForDeliveryConfirmation(msgId, recipientJid, timeoutMs)
+      );
       setupGroupWelcome(this.sock);
       setSchedulerSocket(this.sock);
       setEngagementSocket(this.sock);

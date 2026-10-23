@@ -581,8 +581,12 @@ Combine the live tool data in the user's last message with your own knowledge an
         if (rawContent && rawContent.trim()) {
           const replyText = sanitizeAssistantResponse(rawContent);
           if (!replyText) return;
-          console.log(`[AgentHarness] 💬 Bot replied to ${context.senderName}: "${replyText.slice(0, 100)}..."`);
-          await context.replyText(replyText);
+          const outboundResult = await context.replyText(replyText);
+          if (outboundResult) {
+            console.log('[AgentHarness] WhatsApp accepted outbound reply.');
+          } else {
+            console.warn('[AgentHarness] Reply was suppressed before dispatch.');
+          }
           analyticsEngine.trackEvent('message_sent', { length: replyText.length }, context.chatJid, context.senderJid);
           this.recordFineTuningPair(
             messages[0]?.content || '',

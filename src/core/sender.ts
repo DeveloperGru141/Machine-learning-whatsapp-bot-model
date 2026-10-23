@@ -4,8 +4,24 @@ import { antiBanEngine } from '../security/anti-ban.js';
 import { chatLogger } from '../memory/chat-logger.js';
 
 let activeSocketGetter: (() => WASocket | null) | null = null;
+let deliveryConfirmationWaiter: ((
+  msgId: string,
+  recipientJid: string,
+  timeoutMs?: number
+) => Promise<{
+  confirmed: boolean;
+  status: 'DELIVERED_TO_DEVICE' | 'SENT_TO_SERVER' | 'READ' | 'DISPATCHED';
+  statusLabel: string;
+  statusCode: number;
+}>) | null = null;
 export function setActiveSocketGetter(getter: () => WASocket | null) {
   activeSocketGetter = getter;
+}
+
+export function setDeliveryConfirmationWaiter(
+  waiter: typeof deliveryConfirmationWaiter
+) {
+  deliveryConfirmationWaiter = waiter;
 }
 
 export class OutboundSender {
@@ -22,6 +38,30 @@ export class OutboundSender {
       const first = this.dispatchedIds.keys().next().value;
       if (first) this.dispatchedIds.delete(first);
     }
+  }
+
+  private static trackDeliveryConfirmation(result: any, chatJid: string): void {
+    const msgId = result?.key?.id;
+    const recipientType = chatJid.endsWith('@lid')
+      ? 'LID'
+      : chatJid.endsWith('@s.whatsapp.net')
+        ? 'phone JID'
+        : chatJid.endsWith('@g.us')
+          ? 'group'
+          : 'other';
+
+    if (!msgId || !deliveryConfirmationWaiter) {
+      console.warn('[OutboundSender] Message dispatch lacks a delivery monitor (recipient type: ' + recipientType + ').');
+      return;
+    }
+
+    void deliveryConfirmationWaiter(msgId, chatJid, 5000)
+      .then((info) => {
+        console.log('[OutboundSender] WhatsApp delivery status for ' + recipientType + ': ' + info.status + ' (stanza ' + msgId.slice(-8) + ').');
+      })
+      .catch((err: any) => {
+        console.warn('[OutboundSender] Delivery receipt tracking failed: ' + (err?.message || 'unknown error'));
+      });
   }
 
   /**
@@ -139,6 +179,7 @@ export class OutboundSender {
         const result = await currentSock.sendMessage(chatJid, payload, { quoted: safeQuoted });
         this.recordDispatchedId(result?.key?.id);
         chatLogger.logOutboundMessage(chatJid, cleanText);
+        this.trackDeliveryConfirmation(result, chatJid);
         return result;
       } catch (err: any) {
         if (safeQuoted) {
@@ -151,6 +192,7 @@ export class OutboundSender {
             const result = await currentSock.sendMessage(chatJid, payload);
             this.recordDispatchedId(result?.key?.id);
             chatLogger.logOutboundMessage(chatJid, cleanText);
+            this.trackDeliveryConfirmation(result, chatJid);
             return result;
           } catch (innerErr: any) {
             err = innerErr;
@@ -171,7 +213,9 @@ export class OutboundSender {
           if (freshSock && (freshSock as any).ws?.isOpen) {
             console.log(`[OutboundSender] 🔄 Retrying outbound to ${chatJid} via fresh reconnected socket...`);
             const retryResult = await freshSock.sendMessage(chatJid, { text: cleanText });
+            this.recordDispatchedId(retryResult?.key?.id);
             chatLogger.logOutboundMessage(chatJid, cleanText);
+            this.trackDeliveryConfirmation(retryResult, chatJid);
             return retryResult;
           }
         }
