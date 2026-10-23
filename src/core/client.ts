@@ -439,11 +439,13 @@ export class WhatsAppClient {
       const appKeys = allFiles.filter((f) => f.startsWith('app-state-sync-key'));
 
       const resetMarkers = allFiles.filter((f) => f.startsWith('reset-marker-'));
+      // Privacy tokens (tctoken) and LID<->PN maps are required for 1:1 sends; losing them on restart can trigger ack error 463.
+      const trustKeys = allFiles.filter((f) => f.startsWith('tctoken-') || f.startsWith('lid-mapping-'));
 
       // Signal `session-*` ratchets must NEVER be pruned: dropping them causes
       // "MessageCounterError: Key used already or never filled" and undeliverable replies.
       const core = ['creds.json', ...appKeys, ...resetMarkers, ...sessions];
-      const prunable = [...senderKeys.slice(0, 30), ...preKeys, ...senderKeys.slice(30)];
+      const prunable = [...trustKeys, ...senderKeys.slice(0, 30), ...preKeys, ...senderKeys.slice(30)];
 
       const read = (f: string): string | undefined => {
         const fp = path.join(config.paths.sessions, f);
@@ -886,6 +888,23 @@ export class WhatsAppClient {
           analyticsEngine.startPeriodicReports(this.sock!, ownerJid);
           this.syncGroups().catch((err) => console.warn('[WhatsAppClient] Error syncing groups on connect:', err?.message || err));
           console.log('✅ [WhatsAppClient] Connection established, contact replies cycle & server watchdog active!');
+
+          // Diagnose WhatsApp-side account restrictions (cause of ack error 463 on 1:1 sends).
+          const diagSock: any = this.sock;
+          setTimeout(async () => {
+            try {
+              if (typeof diagSock?.fetchAccountReachoutTimelock === 'function') {
+                const lock = await diagSock.fetchAccountReachoutTimelock();
+                console.log(`[AccountStanding] reachoutTimelock active=${lock?.isActive} type=${lock?.enforcementType} ends=${lock?.timeEnforcementEnds?.toISOString?.() || 'n/a'}`);
+              }
+              if (typeof diagSock?.fetchNewChatMessageCap === 'function') {
+                const cap = await diagSock.fetchNewChatMessageCap();
+                console.log(`[AccountStanding] newChatCap=${JSON.stringify(cap)}`);
+              }
+            } catch (err: any) {
+              console.log(`[AccountStanding] check failed: ${err?.message || err}`);
+            }
+          }, 5000);
         }
       });
 
