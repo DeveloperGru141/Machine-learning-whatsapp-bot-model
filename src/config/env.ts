@@ -15,7 +15,7 @@ const envSchema = z.object({
   GROQ_TEMPERATURE: z.coerce.number().default(0.7),
   GROQ_MAX_TOKENS: z.coerce.number().default(2048),
   GROQ_TOP_P: z.coerce.number().default(1),
-  GROQ_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).optional(),
+  GROQ_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('low'),
   BOT_NAME: z.string().default('Forgelabs assistant'),
   BOT_CREATOR: z.string().default('ADEMOLA'),
   BOT_PREFIX: z.string().default(''),
@@ -89,7 +89,7 @@ export const config = {
     temperature: Number(process.env.GROQ_TEMPERATURE ?? 0.7),
     maxTokens: Number(process.env.GROQ_MAX_TOKENS ?? 512),
     topP: Number(process.env.GROQ_TOP_P ?? 1),
-    reasoningEffort: (process.env.GROQ_REASONING_EFFORT as 'low' | 'medium' | 'high') || undefined,
+    reasoningEffort: process.env.GROQ_REASONING_EFFORT || 'low',
   },
   cerebras: {
     apiKey: process.env.CEREBRAS_API_KEY || '',

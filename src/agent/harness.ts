@@ -578,47 +578,19 @@ Combine the live tool data in the user's last message with your own knowledge an
           }
         }
 
-        let replyText = rawContent && rawContent.trim() ? sanitizeAssistantResponse(rawContent) : '';
-
-        // If direct response was empty or completely stripped by thought-filter, run fallback knowledge answer
-        if (!replyText || !replyText.trim()) {
-          console.warn('[AgentHarness] ⚠️ Direct LLM content was empty or stripped by thought-sanitizer. Triggering fail-safe fallback answer...');
-          const fallbackSystem = `${messages[0]?.content || ''}\n\nDeliver a direct, crisp 1-2 sentence reply in authentic Nigerian WhatsApp flow from your knowledge. Speak directly to ${context.senderName}. DO NOT output any thought process or <think> tags.`;
-          
-          try {
-            const fallbackRes = await llmClient.callGroqInternal({
-              messages: [
-                { role: 'system', content: fallbackSystem },
-                { role: 'user', content: `${context.senderName}: ${userMessage}` },
-              ],
-              model: 'qwen/qwen3.8-27b',
-              temperature: 0.7,
-              max_tokens: 256,
-            });
-            const rawFb = fallbackRes?.choices?.[0]?.message?.content || '';
-            replyText = sanitizeAssistantResponse(rawFb);
-          } catch (fbErr: any) {
-            console.warn('[AgentHarness] Fallback call failed:', fbErr.message);
-          }
-
-          // If still empty, use authentic conversational greeting so the user is NEVER left unanswered
-          if (!replyText || !replyText.trim()) {
-            const isOwner = context.senderName === 'Ademola' || config.bot.owners.some((o: string) => context.senderJid.startsWith(o.replace(/[^0-9]/g, '')));
-            replyText = isOwner
-              ? "Boss, I dey here steady! Wetin dey happen? 🤝"
-              : "How far! I dey active steady, wetin dey happen? 🤝";
-          }
+        if (rawContent && rawContent.trim()) {
+          const replyText = sanitizeAssistantResponse(rawContent);
+          if (!replyText) return;
+          console.log(`[AgentHarness] 💬 Bot replied to ${context.senderName}: "${replyText.slice(0, 100)}..."`);
+          await context.replyText(replyText);
+          analyticsEngine.trackEvent('message_sent', { length: replyText.length }, context.chatJid, context.senderJid);
+          this.recordFineTuningPair(
+            messages[0]?.content || '',
+            userMessage,
+            replyText,
+            []
+          );
         }
-
-        console.log(`[AgentHarness] 💬 Bot replied to ${context.senderName}: "${replyText.slice(0, 100)}..."`);
-        await context.replyText(replyText);
-        analyticsEngine.trackEvent('message_sent', { length: replyText.length }, context.chatJid, context.senderJid);
-        this.recordFineTuningPair(
-          messages[0]?.content || '',
-          userMessage,
-          replyText,
-          []
-        );
       }
     } catch (err: any) {
       console.error('[AgentHarness] Error in reasoning loop:', err.message || err);
@@ -809,11 +781,10 @@ Combine the live tool data in the user's last message with your own knowledge an
 export function sanitizeAssistantResponse(text: string): string {
   if (!text) return '';
   let cleaned = text
-    // Strip closed or unclosed <think>, <thought>, <reasoning>, <scratchpad> tags (model chain-of-thought tokens)
-    .replace(/<(?:think|thought|reasoning|scratchpad)>[\s\S]*?(?:<\/(?:think|thought|reasoning|scratchpad)>|$)/gi, '')
-    .replace(/<\/(?:think|thought|reasoning|scratchpad)>/gi, '')
-    .replace(/\[(?:think|thought|reasoning|scratchpad)\][\s\S]*?(?:\[\/(?:think|thought|reasoning|scratchpad)\]|$)/gi, '')
-    .replace(/\[\/(?:think|thought|reasoning|scratchpad)\]/gi, '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<\/think>/gi, '')
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+    .replace(/<\/thought>/gi, '')
     .replace(/<\/?function_calls>/gi, '')
     .replace(/<tool_call[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi, '')
     .replace(/<\/tool_call>/gi, '')
@@ -821,23 +792,20 @@ export function sanitizeAssistantResponse(text: string): string {
     .replace(/<\/?args>/gi, '')
     .replace(/<function=[^>]+>[\s\S]*?(?:<\/function>|$)/gi, '')
     .replace(/<\/function>/gi, '')
-    .replace(/^(?:thinking process|thought process|internal thought|reasoning|analysis|plan|drafting):\s*[\s\S]*?(?=\n\n|\n[A-Z]|$)/i, '')
-    .replace(/^(?:thought|thinking):\s*[\s\S]*?(?=\n\n|\n[A-Z]|$)/i, '')
+    .replace(/^(?:thinking process|thought|thinking):\s*[\s\S]*?(?=\n\n[^\n]+|\s*$)/i, '')
     .trim();
 
-  // Strip model scratchpad planning, character counting, and third-person meta-reasoning paragraphs
-  // e.g. "The context is a group chat where 'Ohms hub' shared a Huawei ICT Roadshow flyer..."
-  const paragraphs = cleaned.split(/\n\s*\n/);
-  const isMetaReasoningParagraph = (p: string): boolean => {
-    const trimmedP = p.trim();
-    if (/(?:count characters|make sure total characters|line\d+:.*count:|\bapprox:\s*each line length\b)/i.test(trimmedP)) {
-      return true;
+  // Strip model scratchpad planning / character counting reasoning (e.g. "We need bold titles... Let's count characters...")
+  if (/(?:count characters|let's craft|make sure total characters|line\d+:.*count:|\bapprox:\s*each line length\b)/i.test(cleaned)) {
+    const paragraphs = cleaned.split(/\n\s*\n/);
+    const filtered = paragraphs.filter(p => {
+      const trimmedP = p.trim();
+      return !/^(?:(?:we|e)?\s*need|make sure total|count characters|let's craft|let's write|line\d+:|blank line|now count characters|quote block:.*length:|probably something like)/i.test(trimmedP);
+    });
+    if (filtered.length > 0) {
+      cleaned = filtered.join('\n\n').trim();
     }
-    return /^(?:(?:the\s+)?context is|in this context|the situation is|this is a group chat where|in this group chat|the user is (?:asking|saying|trying|inquiring|requesting)|based on the (?:chat|recent) history|looking at the (?:context|chat|history)|analyzing the (?:context|chat|conversation)|here,\s*(?:the\s*)?(?:user|someone)|someone just dropped|my task is to|i should respond|i need to respond|let's analyze|let me analyze|we need to respond|(?:we|e)?\s*need\b|make sure total|let's craft|let's write|line\d+:|blank line|now count characters|quote block:.*length:|probably something like)/i.test(trimmedP);
-  };
-
-  const filtered = paragraphs.filter(p => !isMetaReasoningParagraph(p));
-  cleaned = filtered.join('\n\n').trim();
+  }
 
   // Defense-in-depth: Never let raw tool call JSON objects or fences reach WhatsApp chat
   if (

@@ -12,28 +12,28 @@ export interface NormalizedMessage {
 }
 
 /**
- * Recursively unwraps WhatsApp message wrappers (ephemeral, viewOnce, documentWithCaption, deviceSent, botInvoke, etc.)
+ * Recursively unwraps WhatsApp message wrappers (ephemeral, viewOnce, documentWithCaption, etc.)
  */
 export function unwrapMessage(msg: proto.IMessage | undefined | null): proto.IMessage | undefined | null {
   if (!msg) return null;
   let m: any = extractMessageContent(msg) || msg;
 
-  // Recursively peel wrappers up to 10 levels deep
-  for (let i = 0; i < 10; i++) {
+  // Recursively peel wrappers
+  while (
+    m?.ephemeralMessage?.message ||
+    m?.viewOnceMessage?.message ||
+    m?.viewOnceMessageV2?.message ||
+    m?.viewOnceMessageV2Extension?.message ||
+    m?.documentWithCaptionMessage?.message ||
+    m?.protocolMessage?.editedMessage
+  ) {
     const next =
-      m?.ephemeralMessage?.message ||
-      m?.viewOnceMessage?.message ||
-      m?.viewOnceMessageV2?.message ||
-      m?.viewOnceMessageV2Extension?.message ||
-      m?.documentWithCaptionMessage?.message ||
-      m?.protocolMessage?.editedMessage ||
-      m?.deviceSentMessage?.message ||
-      m?.botInvokeMessage?.message ||
-      m?.groupMentionedMessage?.message ||
-      m?.associatedChildMessage?.message ||
-      m?.editedMessage?.message;
-
-    if (!next) break;
+      m.ephemeralMessage?.message ||
+      m.viewOnceMessage?.message ||
+      m.viewOnceMessageV2?.message ||
+      m.viewOnceMessageV2Extension?.message ||
+      m.documentWithCaptionMessage?.message ||
+      m.protocolMessage?.editedMessage;
     m = extractMessageContent(next) || next;
   }
 
@@ -43,29 +43,9 @@ export function unwrapMessage(msg: proto.IMessage | undefined | null): proto.IMe
 export function normalizeMessage(msg: proto.IWebMessageInfo): NormalizedMessage | null {
   if (!msg.message || !msg.key.remoteJid) return null;
 
-  let chatJid = msg.key.remoteJid;
+  const chatJid = msg.key.remoteJid;
   const isGroup = chatJid.endsWith('@g.us');
-  let senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
-
-  // Resolve @lid to canonical phone number JID (@s.whatsapp.net) for seamless message delivery and primary device thread sync
-  if (!isGroup && chatJid.endsWith('@lid')) {
-    const rawId = chatJid.split('@')[0].split(':')[0];
-    if (rawId === '102409552584830') {
-      chatJid = '2348108574293@s.whatsapp.net';
-      senderJid = '2348108574293@s.whatsapp.net';
-    } else if ((msg.key as any).senderPn) {
-      chatJid = (msg.key as any).senderPn;
-      senderJid = (msg.key as any).senderPn;
-    }
-  } else if (isGroup && senderJid.endsWith('@lid')) {
-    const rawId = senderJid.split('@')[0].split(':')[0];
-    if (rawId === '102409552584830') {
-      senderJid = '2348108574293@s.whatsapp.net';
-    } else if ((msg.key as any).participantPn) {
-      senderJid = (msg.key as any).participantPn;
-    }
-  }
-
+  const senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
   const rawId = senderJid.split('@')[0].split(':')[0];
   const isLid = senderJid.endsWith('@lid') || rawId.length > 13;
   const fallbackName = isLid ? (isGroup ? 'Member' : 'Friend') : rawId;
@@ -118,23 +98,14 @@ export function normalizeMessage(msg: proto.IWebMessageInfo): NormalizedMessage 
     text = m.documentMessage.fileName || '[Document]';
     contentType = 'document';
     hasContent = true;
-  } else if (m.interactiveMessage?.body?.text) {
-    text = m.interactiveMessage.body.text;
-    hasContent = true;
   } else if (m.interactiveResponseMessage?.body?.text) {
     text = m.interactiveResponseMessage.body.text;
     hasContent = true;
-  } else if (m.buttonsResponseMessage?.selectedDisplayText || m.buttonsResponseMessage?.selectedButtonId) {
-    text = m.buttonsResponseMessage.selectedDisplayText || m.buttonsResponseMessage.selectedButtonId || '';
+  } else if (m.buttonsResponseMessage?.selectedButtonId) {
+    text = m.buttonsResponseMessage.selectedButtonId;
     hasContent = true;
-  } else if (m.templateButtonReplyMessage?.selectedDisplayText || m.templateButtonReplyMessage?.selectedId) {
-    text = m.templateButtonReplyMessage.selectedDisplayText || m.templateButtonReplyMessage.selectedId || '';
-    hasContent = true;
-  } else if (m.listResponseMessage?.title || m.listResponseMessage?.singleSelectReply?.selectedRowId) {
-    text = m.listResponseMessage.title || m.listResponseMessage.singleSelectReply?.selectedRowId || '';
-    hasContent = true;
-  } else if (m.pollCreationMessage?.name || m.pollCreationMessageV2?.name || m.pollCreationMessageV3?.name) {
-    text = m.pollCreationMessage?.name || m.pollCreationMessageV2?.name || m.pollCreationMessageV3?.name || '';
+  } else if (m.templateButtonReplyMessage?.selectedId) {
+    text = m.templateButtonReplyMessage.selectedId;
     hasContent = true;
   } else if (m.contactMessage?.displayName) {
     text = `[Contact: ${m.contactMessage.displayName}]`;

@@ -59,8 +59,6 @@ let activeSocket: WASocket | null = null;
 /**
  * Stores a reference to the active WhatsApp socket for background timer dispatches.
  */
-let lastUnauthWarnAt = 0;
-
 export function setSchedulerSocket(sock: WASocket): void {
   activeSocket = sock;
   schedulerPlugin.setSocket(sock);
@@ -923,21 +921,15 @@ export class SchedulerPlugin implements IPlugin {
 
       if (dueTasks.length === 0) return;
 
-      if (!socket || !socket.user?.id) {
-        // Throttled: this used to log 4 lines every 30s and flushed real diagnostics out of the 500-line log buffer.
-        const nowTs = Date.now();
-        if (nowTs - lastUnauthWarnAt > 10 * 60 * 1000) {
-          lastUnauthWarnAt = nowTs;
-          console.warn(
-            `[Scheduler] ${dueTasks.length} task(s) are due, but WhatsApp socket is not authenticated/connected. Will retry every cycle (this warning is throttled to once per 10 min).`
-          );
-        }
-        return;
-      }
-
       console.log(`[Scheduler] Found ${dueTasks.length} due task(s) to process.`);
 
       for (const task of dueTasks) {
+        if (!socket || !socket.user?.id) {
+          console.warn(
+            `[Scheduler] Task #${task.id} is due, but WhatsApp socket is not yet authenticated/connected. Will retry in next cycle.`
+          );
+          continue;
+        }
 
         try {
           // 1. Recurring 2-Hour Memes (with strict cooldown check)

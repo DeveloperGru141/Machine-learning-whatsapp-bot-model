@@ -214,8 +214,8 @@ export class AntiBanEngine {
       if (isBotAddedToGroup) {
         return { allowed: true }; // Permitted one-time self-introduction when bot is added
       }
-      if (isGroupMention || isReplyToInbound) {
-        return { allowed: true }; // Permitted reply to an @mention, quote, command prefix, or name callout
+      if (isGroupMention) {
+        return { allowed: true }; // Permitted reply to an @mention or quote
       }
       if (params.isProactiveCheckIn) {
         // Allowed if bot is member and has logged history in this group
@@ -233,21 +233,9 @@ export class AntiBanEngine {
     }
 
     // 2. Direct Message (DM) Evaluation
-    // Superuser / Bot Owners / Self-chat are always permitted
+    // Superuser / Bot Owners are always permitted
     const rawDigits = chatJid.split('@')[0].split(':')[0];
-    const pairingDigits = (config.bot.pairingPhoneNumber || '2347058967815').replace(/[^0-9]/g, '');
-    const isOwner =
-      config.bot.owners.includes(rawDigits) ||
-      config.bot.owners.includes(chatJid) ||
-      config.bot.owners.some((o: string) => o.includes(rawDigits)) ||
-      rawDigits === '83954564632610' ||
-      rawDigits === '2347058967815' ||
-      rawDigits === '102409552584830' ||
-      rawDigits === '2348108574293' ||
-      (Boolean(pairingDigits) && rawDigits === pairingDigits) ||
-      isOwnerCommand;
-
-    if (isOwner) {
+    if (config.bot.owners.includes(rawDigits) || config.bot.owners.includes(chatJid) || isOwnerCommand) {
       return { allowed: true };
     }
 
@@ -259,8 +247,8 @@ export class AntiBanEngine {
     // Otherwise, check SQLite chat_logs: Has this user ever initiated an inbound message?
     try {
       const inboundRecord = db
-        .prepare(`SELECT 1 FROM chat_logs WHERE (chat_jid = ? OR chat_jid LIKE ?) AND sender_jid != 'bot' LIMIT 1`)
-        .get(chatJid, `%${rawDigits}%`);
+        .prepare(`SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid != 'bot' LIMIT 1`)
+        .get(chatJid);
 
       if (inboundRecord) {
         return { allowed: true };

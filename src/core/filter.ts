@@ -40,27 +40,10 @@ export function shouldRespondToMessage(
   // Never respond to our own outbound messages UNLESS it is "Message Yourself" (owner testing the bot on the bot's phone)
   const cleanRemote = (msg.key.remoteJid || '').split('@')[0].split(':')[0];
   const botOwnDigits = (botJid || '').split('@')[0].split(':')[0] || '2347058967815';
-  const cleanLidId = (botLid || '').split(':')[0].split('@')[0];
-  const pairingDigits = (config.bot.pairingPhoneNumber || '').replace(/[^0-9]/g, '');
-
-  const isSelfChatJid = (jid?: string | null): boolean => {
-    if (!jid) return false;
-    const clean = jid.split('@')[0].split(':')[0];
-    return (
-      clean === botOwnDigits ||
-      clean === '2347058967815' ||
-      clean === '83954564632610' ||
-      (Boolean(cleanLidId) && clean === cleanLidId) ||
-      (Boolean(pairingDigits) && clean === pairingDigits)
-    );
-  };
-
-  const destJid = (msg.message as any)?.deviceSentMessage?.destinationJid;
   const isMessageToSelf =
     Boolean(msg.key.fromMe) &&
     !isGroup &&
-    isSelfChatJid(msg.key.remoteJid) &&
-    (!destJid || isSelfChatJid(destJid));
+    (cleanRemote === botOwnDigits || cleanRemote === '2347058967815' || cleanRemote === config.bot.pairingPhoneNumber);
 
   if (msg.key.fromMe && !isMessageToSelf) {
     return { shouldRespond: false, cleanedText: rawText };
@@ -82,6 +65,7 @@ export function shouldRespondToMessage(
 
   // Normalize bot identifiers across standard phone number and LID formats
   const cleanPhoneId = (botJid || '').split(':')[0].split('@')[0];
+  const cleanLidId = (botLid || '').split(':')[0].split('@')[0];
 
   const botPhoneStandard = cleanPhoneId ? `${cleanPhoneId}@s.whatsapp.net` : '';
   const botPhoneLid = cleanPhoneId ? `${cleanPhoneId}@lid` : '';
@@ -156,20 +140,17 @@ export function shouldRespondToMessage(
   // Check 3: Was the bot called by name or phone number in text?
   const textLower = (rawText || '').toLowerCase().trim();
   const botConfigName = (config.bot.name || 'forgelabs').toLowerCase();
+  const pairingDigits = (config.bot.pairingPhoneNumber || '07058967815').replace(/[^0-9]/g, '');
   const cleanPhoneDigits = cleanPhoneId || '2347058967815';
   const cleanLidDigits = cleanLidId || '83954564632610';
 
   const textTriggerRegex = new RegExp(
-    `(^|\\s|@)(${botConfigName}|forgelabs|assistant|bot|${cleanPhoneDigits}|${pairingDigits || '07058967815'}|${cleanLidDigits})\\b`,
+    `(^|\\s|@)(${botConfigName}|forgelabs|assistant|bot|${cleanPhoneDigits}|${pairingDigits}|${cleanLidDigits})\\b`,
     'i'
   );
   const isNameCalled = textTriggerRegex.test(textLower);
 
-  // Check 3b: Explicit bot command (e.g. .status, !ping, .help, /ask, .meme, .rvo)
-  const trimmed = (rawText || '').trim();
-  const isExplicitCommand = /^[!/.#$][a-zA-Z0-9_-]{2,}/.test(trimmed);
-
-  if (isMentioned || isQuoted || isNameCalled || isExplicitCommand) {
+  if (isMentioned || isQuoted || isNameCalled) {
     if (isGroup) {
       recordGroupInteraction(groupJid);
     }

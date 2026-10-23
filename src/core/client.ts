@@ -56,7 +56,7 @@ export function formatPhoneNumberForPairing(num: string): string {
 
 export class WhatsAppClient {
   private sock: WASocket | null = null;
-  private logger = pino({ level: 'warn' });
+  private logger = pino({ level: 'silent' });
   private reconnectAttempts = 0;
   private isConnecting = false;
   private keepAliveInterval: NodeJS.Timeout | null = null;
@@ -70,7 +70,6 @@ export class WhatsAppClient {
   private sessionStartedAt = Date.now();
   private attemptedCatchupKeys: Set<string> = new Set();
   private messageStore: Map<string, any> = new Map();
-  private lastBackupFileCount = 0;
   private deliveryStatusMap: Map<
     string,
     { status: 'SENT_TO_SERVER' | 'DELIVERED_TO_DEVICE' | 'READ'; statusCode: number; updatedAt: number; recipientJid: string }
@@ -220,31 +219,13 @@ export class WhatsAppClient {
     return Boolean(creds?.registered || creds?.account || creds?.me?.lid);
   }
 
-  public async clearRenderSessionBundle(): Promise<void> {
-    try {
-      const apiKey = process.env.RENDER_API_KEY || '[REDACTED_RENDER_API_KEY]';
-      const serviceId = process.env.RENDER_SERVICE_ID || 'srv-db9jvcmq1p3s738hpa40';
-      const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars/SESSION_BUNDLE_BASE64`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Accept': 'application/json',
-        },
-        signal: AbortSignal.timeout(10_000),
-      });
-      console.log(`[WhatsAppClient] 🗑️ Cleared SESSION_BUNDLE_BASE64 from Render environment variables (status: ${res.status}).`);
-    } catch (err: any) {
-      console.warn('[WhatsAppClient] Failed to clear Render session bundle:', err?.message || err);
-    }
-  }
-
   /**
    * Returns the current valid pairing code for the active socket, or performs a clean
    * session reset if forceReset is true (or if code is expired / none generated yet).
    * Never calls requestPairingCode twice on the same authState to avoid corrupting noise keys.
    */
   public async requestFreshPairingCode(forceReset: boolean = false): Promise<string | null> {
-    if (this.isRegistered() && !forceReset) {
+    if (this.isRegistered()) {
       return null;
     }
 
@@ -261,9 +242,6 @@ export class WhatsAppClient {
     // Clean session wipe & fresh socket start
     console.log('[WhatsAppClient] 🔄 Generating clean pairing session and fresh pairing code...');
     this.sessionBundleInvalidated = true;
-    if (forceReset) {
-      await this.clearRenderSessionBundle();
-    }
     try {
       if (this.sock) {
         this.sock.ev.removeAllListeners('connection.update');
@@ -286,8 +264,8 @@ export class WhatsAppClient {
     this.isConnecting = false;
     await this.start();
 
-    // Wait up to 20 seconds for the fresh socket's QR handshake to generate the single clean pairing code
-    for (let i = 0; i < 40; i++) {
+    // Wait up to 15 seconds for the fresh socket's QR handshake to generate the single clean pairing code
+    for (let i = 0; i < 30; i++) {
       if (this.latestPairingCode) {
         return this.latestPairingCode;
       }
@@ -374,169 +352,66 @@ export class WhatsAppClient {
   }
 
   
-  private backupInFlight = false;
-  private backupQueued = false;
-  private lastBackupAt = 0;
-  private lastBackupHash = '';
-  private static readonly BACKUP_MIN_INTERVAL_MS = 30_000;
-  private static readonly BACKUP_MAX_B64_CHARS = 60_000;
-
-  /**
-   * Reads the freshest SESSION_BUNDLE_BASE64 straight from the Render API.
-   * process.env only holds the snapshot taken at the last *deploy*, so after a plain container
-   * restart (free-tier hibernate / host maintenance) it is stale or empty, which previously
-   * caused the bot to boot unlinked and sit in a pairing loop.
-   */
-  private async fetchLatestSessionBundle(): Promise<string | undefined> {
-    const apiKey = process.env.RENDER_API_KEY;
-    const serviceId = process.env.RENDER_SERVICE_ID;
-    if (apiKey && serviceId) {
-      try {
-        const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars/SESSION_BUNDLE_BASE64`, {
-          headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
-          signal: AbortSignal.timeout(15_000),
-        });
-        if (res.ok) {
-          const data = (await res.json()) as { value?: string };
-          if (data?.value && data.value.length > 100) {
-            console.log(`[WhatsAppClient] ☁️ Fetched latest session bundle from Render API (${data.value.length}b).`);
-            return data.value;
-          }
-        } else {
-          console.warn(`[WhatsAppClient] Render API bundle fetch returned ${res.status}; falling back to process.env snapshot.`);
-        }
-      } catch (err: any) {
-        console.warn('[WhatsAppClient] Render API bundle fetch failed; falling back to process.env snapshot:', err?.message || err);
-      }
-    }
-    return process.env.SESSION_BUNDLE_BASE64;
-  }
-
-  /**
-   * Persists the Signal/auth state to the Render env var. Debounced + single-flight so rapid
-   * creds/key updates collapse into one PUT, and pruned to a hard size cap so the bundle can never
-   * grow without bound again (it previously reached 117KB / 253 files and Render began rejecting writes).
-   */
   public async autoBackupSessionToRender(): Promise<void> {
-    if (this.sessionBundleInvalidated) return;
-    if (this.backupInFlight) {
-      this.backupQueued = true;
-      return;
-    }
-    const sinceLast = Date.now() - this.lastBackupAt;
-    if (sinceLast < WhatsAppClient.BACKUP_MIN_INTERVAL_MS) {
-      if (!this.backupQueued) {
-        this.backupQueued = true;
-        const t = setTimeout(() => {
-          this.backupQueued = false;
-          void this.autoBackupSessionToRender();
-        }, WhatsAppClient.BACKUP_MIN_INTERVAL_MS - sinceLast + 250);
-        t.unref();
-      }
-      return;
-    }
-
     const credsFile = path.join(config.paths.sessions, 'creds.json');
     if (!fs.existsSync(credsFile)) return;
 
-    this.backupInFlight = true;
     try {
-      let rawCreds: any;
-      try {
-        rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
-      } catch {
-        return; // creds.json is mid-write; the next creds.update will trigger another backup
-      }
+      const rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
       if (!rawCreds?.registered && !rawCreds?.account && !rawCreds?.me?.lid) return;
 
       const zlib = await import('zlib');
       const allFiles = fs.readdirSync(config.paths.sessions);
-      const mtimeOf = (f: string): number => {
-        try { return fs.statSync(path.join(config.paths.sessions, f)).mtimeMs; } catch { return 0; }
-      };
-      const newestFirst = (a: string, b: string) => mtimeOf(b) - mtimeOf(a);
+      const essentialFiles = new Set<string>();
+      essentialFiles.add('creds.json');
+      for (const f of allFiles) {
+        if (f.startsWith('app-state-sync-key')) essentialFiles.add(f);
+      }
+      const preKeys = allFiles.filter((f) => f.startsWith('pre-key-')).slice(-20);
+      for (const f of preKeys) essentialFiles.add(f);
+      const sessionKeys = allFiles.filter((f) => f.startsWith('session-')).slice(-25);
+      for (const f of sessionKeys) essentialFiles.add(f);
 
-      const preKeys = allFiles
-        .filter((f) => f.startsWith('pre-key-'))
-        .sort((a, b) => (parseInt(b.replace(/[^0-9]/g, ''), 10) || 0) - (parseInt(a.replace(/[^0-9]/g, ''), 10) || 0))
-        .slice(0, 40);
-      const sessions = allFiles.filter((f) => f.startsWith('session-')).sort(newestFirst);
-      const senderKeys = allFiles.filter((f) => f.startsWith('sender-key-')).sort(newestFirst);
-      const appKeys = allFiles.filter((f) => f.startsWith('app-state-sync-key'));
-
-      // Core files that are never pruned
-      const core = ['creds.json', ...appKeys];
-      // Prunable files ordered by importance (most important first)
-      const prunable = [...senderKeys.slice(0, 30), ...sessions.slice(0, 60), ...preKeys, ...sessions.slice(60), ...senderKeys.slice(30)];
-
-      const read = (f: string): string | undefined => {
-        const fp = path.join(config.paths.sessions, f);
-        try { return fs.existsSync(fp) && fs.statSync(fp).isFile() ? fs.readFileSync(fp, 'utf8') : undefined; } catch { return undefined; }
-      };
       const filesMap: Record<string, string> = {};
-      for (const f of [...core, ...prunable]) {
-        const content = read(f);
-        if (content !== undefined) filesMap[f] = content;
+      for (const file of essentialFiles) {
+        const fullPath = path.join(config.paths.sessions, file);
+        if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+          filesMap[file] = fs.readFileSync(fullPath, 'utf8');
+        }
       }
 
+      const jsonStr = JSON.stringify(filesMap);
       if (!filesMap['creds.json'] || filesMap['creds.json'].trim().length < 50) {
         console.warn('[WhatsAppClient] Refusing to backup session: creds.json is empty or incomplete.');
         return;
       }
+      const gzipped = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'));
+      const bundle = gzipped.toString('base64');
 
-      const build = (): string => zlib.gzipSync(Buffer.from(JSON.stringify(filesMap), 'utf8'), { level: 9 }).toString('base64');
-      let bundle = build();
-      let dropped = 0;
-      if (bundle.length > WhatsAppClient.BACKUP_MAX_B64_CHARS) {
-        const dropOrder = [...prunable].reverse().filter((f) => filesMap[f] !== undefined);
-        for (let i = 0; i < dropOrder.length; i += 8) {
-          for (const f of dropOrder.slice(i, i + 8)) { delete filesMap[f]; dropped++; }
-          bundle = build();
-          if (bundle.length <= WhatsAppClient.BACKUP_MAX_B64_CHARS) break;
-        }
-      }
-
-      const crypto = await import('crypto');
-      const hash = crypto.createHash('sha1').update(bundle).digest('hex');
-      if (hash === this.lastBackupHash) return;
-
-      const apiKey = process.env.RENDER_API_KEY;
-      const serviceId = process.env.RENDER_SERVICE_ID;
-      if (!apiKey || !serviceId) {
-        console.warn('[WhatsAppClient] RENDER_API_KEY / RENDER_SERVICE_ID not set; skipping remote session backup.');
-        return;
-      }
+      const apiKey = process.env.RENDER_API_KEY || '[REDACTED_RENDER_API_KEY]';
+      const serviceId = process.env.RENDER_SERVICE_ID || 'srv-db9jvcmq1p3s738hpa40';
 
       const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars/SESSION_BUNDLE_BASE64`, {
         method: 'PUT',
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
         body: JSON.stringify({ value: bundle }),
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(10_000),
       });
-      this.lastBackupAt = Date.now();
 
       if (res.ok) {
-        this.lastBackupHash = hash;
-        this.lastBackupFileCount = allFiles.length;
-        console.log(
-          `[WhatsAppClient] 💾 Session persisted to Render (${Object.keys(filesMap).length} files kept, ${dropped} pruned, ${bundle.length}b base64).`
-        );
+        console.log(`[WhatsAppClient] 💾 Successfully persisted authenticated session (${Object.keys(filesMap).length} files) to Render SESSION_BUNDLE_BASE64!`);
       } else {
-        const body = (await res.text().catch(() => '')).slice(0, 200);
-        console.warn(`[WhatsAppClient] Render session backup rejected: ${res.status} ${body}`);
+        console.warn(`[WhatsAppClient] Render session backup response: ${res.status}`);
       }
     } catch (err: any) {
-      console.warn('[WhatsAppClient] Auto backup to Render failed:', err?.message || err);
-    } finally {
-      this.backupInFlight = false;
-      if (this.backupQueued) {
-        this.backupQueued = false;
-        const wait = Math.max(500, WhatsAppClient.BACKUP_MIN_INTERVAL_MS - (Date.now() - this.lastBackupAt) + 250);
-        const t = setTimeout(() => void this.autoBackupSessionToRender(), wait);
-        t.unref();
-      }
+      console.warn('[WhatsAppClient] Auto backup to Render failed:', err.message);
     }
   }
+
   public isSocketOpen(): boolean {
     return Boolean(this.sock && (this.sock as any).ws?.isOpen);
   }
@@ -555,11 +430,10 @@ export class WhatsAppClient {
 
       // Hydrate session files from SESSION_BUNDLE_BASE64 on cloud containers (Render) if sessions/creds.json is missing and not invalidated
       const credsFile = path.join(config.paths.sessions, 'creds.json');
-      const hydrateSource = !fs.existsSync(credsFile) && !this.sessionBundleInvalidated ? await this.fetchLatestSessionBundle() : undefined;
-      if (!fs.existsSync(credsFile) && hydrateSource && !this.sessionBundleInvalidated) {
+      if (!fs.existsSync(credsFile) && process.env.SESSION_BUNDLE_BASE64 && !this.sessionBundleInvalidated) {
         try {
           const zlib = await import('zlib');
-          const rawBuf = Buffer.from(hydrateSource, 'base64');
+          const rawBuf = Buffer.from(process.env.SESSION_BUNDLE_BASE64, 'base64');
           const bundleJson =
             rawBuf[0] === 0x1f && rawBuf[1] === 0x8b
               ? zlib.gunzipSync(rawBuf).toString('utf8')
@@ -666,16 +540,7 @@ export class WhatsAppClient {
         msgRetryCounterCache,
         getMessage: async (key) => {
           if (key.id) {
-            const inMem = this.messageStore.get(key.id);
-            if (inMem) return inMem;
-            try {
-              const row = db
-                .prepare(`SELECT message_text FROM chat_logs WHERE message_id = ? LIMIT 1`)
-                .get(key.id) as any;
-              if (row?.message_text) {
-                return { conversation: row.message_text };
-              }
-            } catch {}
+            return this.messageStore.get(key.id);
           }
           return undefined;
         },
@@ -822,30 +687,12 @@ export class WhatsAppClient {
           this.pairingRequested = false;
           this.latestPairingCode = null;
           this.latestQr = null;
-          this.sessionBundleInvalidated = false;
           healthMonitor.setConnectionStatus(true);
           if (this.isRegistered()) { this.autoBackupSessionToRender(); }
           this.startKeepAlive();
           this.startUnrepliedScanner();
 
           const ownerJid = config.bot.owners[0] || '';
-          if (ownerJid && (this.sock as any)?.assertSessions) {
-            (this.sock as any).assertSessions([ownerJid], false).catch(() => {});
-            try {
-              this.sock?.presenceSubscribe?.(ownerJid);
-              this.sock?.sendPresenceUpdate?.('available');
-            } catch {}
-          }
-
-          // Replenish prekeys on WhatsApp servers to prevent "Invalid PreKey ID" and failed handshake from new/group senders
-          try {
-            console.log('[WhatsAppClient] 🔑 Syncing and replenishing prekeys on WhatsApp server...');
-            await (this.sock as any)?.uploadPreKeys?.(50);
-            console.log('[WhatsAppClient] ✅ Server prekeys successfully replenished (50 fresh prekeys).');
-          } catch (err: any) {
-            console.warn('[WhatsAppClient] Note on prekey replenishment:', err?.message || err);
-          }
-
           healthMonitor.startMonitoring(this.sock!, ownerJid);
           analyticsEngine.startPeriodicReports(this.sock!, ownerJid);
           this.syncGroups().catch((err) => console.warn('[WhatsAppClient] Error syncing groups on connect:', err?.message || err));
@@ -931,8 +778,8 @@ export class WhatsAppClient {
         }
       });
 
-      // Track WhatsApp message delivery receipts (SERVER_ACK ✓, DELIVERY_ACK ✓✓, READ ✓✓) and handle delayed/decrypted updates
-      this.sock.ev.on('messages.update', async (updates) => {
+      // Track WhatsApp message delivery receipts (SERVER_ACK ✓, DELIVERY_ACK ✓✓, READ ✓✓)
+      this.sock.ev.on('messages.update', (updates) => {
         try {
           for (const u of updates) {
             const msgId = u.key?.id;
@@ -941,24 +788,8 @@ export class WhatsAppClient {
             if (msgId && status >= 2) {
               this.recordDeliveryStatus(msgId, remoteJid, status);
             }
-
-            // If this update contains a decrypted message or edited message that wasn't available on upsert:
-            if (u.update?.message && !u.key?.fromMe) {
-              const fullMsg: proto.IWebMessageInfo = {
-                key: u.key,
-                message: u.update.message,
-                messageTimestamp: (u.update as any).messageTimestamp || Math.floor(Date.now() / 1000),
-                pushName: (u.update as any).pushName,
-              };
-              console.log(
-                `[messages.update] 🔄 Decrypted/edited message update received for ${u.key?.remoteJid} (id: ${u.key?.id})`
-              );
-              await this.processIncomingMessage(fullMsg);
-            }
           }
-        } catch (err: any) {
-          console.warn('[messages.update] Error processing update:', err.message);
-        }
+        } catch {}
       });
 
       this.sock.ev.on('message-receipt.update', (receipts) => {
@@ -1045,26 +876,10 @@ export class WhatsAppClient {
 
       // Message handler
       this.sock.ev.on('messages.upsert', async (m) => {
-        const first = m.messages[0];
-        console.log(
-          `[messages.upsert] 📥 Received ${m.messages.length} msg(s) (type: ${m.type}) from ${first?.key?.remoteJid} (fromMe: ${first?.key?.fromMe})`
-        );
         for (const msg of m.messages) {
           await this.processIncomingMessage(msg);
         }
       });
-
-      // Periodic session backup check: if new keys/sessions appeared on disk, sync to Render
-      const sessionBackupTimer = setInterval(async () => {
-        try {
-          if (!this.isRegistered() || !fs.existsSync(config.paths.sessions)) return;
-          const currentCount = fs.readdirSync(config.paths.sessions).length;
-          if (currentCount !== this.lastBackupFileCount && this.lastBackupFileCount > 0) {
-            await this.autoBackupSessionToRender();
-          }
-        } catch {}
-      }, 45_000);
-      sessionBackupTimer.unref();
     } finally {
       this.isConnecting = false;
     }
@@ -1095,9 +910,6 @@ export class WhatsAppClient {
         upsertKnownGroup(group.id, group.subject, group.participants?.length || 0, isAdmin);
       }
       console.log(`[WhatsAppClient] 👥 Synced ${Object.keys(participating).length} participating groups into memory.`);
-      if (this.isRegistered()) {
-        await this.autoBackupSessionToRender();
-      }
     } catch (err: any) {
       console.warn('[WhatsAppClient] Failed to fetch participating groups:', err?.message || err);
     }
@@ -1117,19 +929,9 @@ export class WhatsAppClient {
     }
 
     // Safely parse timestamp even if deserialized as protobuf Long object
-    let rawTs: any = (msg.messageTimestamp as any)?.toNumber
-      ? (msg.messageTimestamp as any).toNumber()
-      : ((msg.messageTimestamp as any)?.low ?? msg.messageTimestamp);
-
-    let msgTime = Number(rawTs);
-    if (!isNaN(msgTime) && msgTime > 0) {
-      if (msgTime < 1e11) {
-        msgTime *= 1000;
-      }
-    } else {
-      msgTime = Date.now();
-    }
-    const effectiveMsgTime = Math.min(msgTime, Date.now());
+    const rawTs = (msg.messageTimestamp as any)?.low ?? msg.messageTimestamp;
+    const msgTime = Number(rawTs) * 1000;
+    const effectiveMsgTime = !isNaN(msgTime) && msgTime > 0 ? Math.min(msgTime, Date.now()) : Date.now();
 
     // 1. Check if this is an automated outbound message sent by OutboundSender
     const isBotDispatched = Boolean(msg.key?.id && OutboundSender.isDispatchedId(msg.key.id));
@@ -1143,43 +945,10 @@ export class WhatsAppClient {
     // 2. Distinguish "Message Yourself" (user testing on their own WhatsApp phone) vs user texting a 3rd party
     const cleanRemote = (msg.key?.remoteJid || '').split('@')[0].split(':')[0];
     const botOwnDigits = (this.sock?.user?.id || '').split('@')[0].split(':')[0] || '2347058967815';
-    const botOwnLidDigits = (this.sock?.user?.lid || '').split('@')[0].split(':')[0];
-    const credsMeId = (this.sock?.authState?.creds?.me?.id || '').split('@')[0].split(':')[0];
-    const credsMeLid = (this.sock?.authState?.creds?.me?.lid || '').split('@')[0].split(':')[0];
-    const pairingDigits = (config.bot.pairingPhoneNumber || '').replace(/[^0-9]/g, '');
-
-    const isSelfChatJid = (jid?: string | null): boolean => {
-      if (!jid) return false;
-      const clean = jid.split('@')[0].split(':')[0];
-      return (
-        clean === botOwnDigits ||
-        clean === '2347058967815' ||
-        clean === '83954564632610' ||
-        (Boolean(botOwnLidDigits) && clean === botOwnLidDigits) ||
-        (Boolean(credsMeId) && clean === credsMeId) ||
-        (Boolean(credsMeLid) && clean === credsMeLid) ||
-        (Boolean(pairingDigits) && clean === pairingDigits)
-      );
-    };
-
-    const destJid = (msg.message as any)?.deviceSentMessage?.destinationJid;
     const isMessageToSelf =
       Boolean(msg.key?.fromMe) &&
       !msg.key?.remoteJid?.endsWith('@g.us') &&
-      isSelfChatJid(msg.key?.remoteJid) &&
-      (!destJid || isSelfChatJid(destJid));
-
-    const rawKeys = msg.message ? Object.keys(msg.message) : [];
-    console.log(
-      `[processIncomingMessage] 🔍 id=${msg.key?.id} fromMe=${msg.key?.fromMe} remote=${msg.key?.remoteJid} isSelf=${isMessageToSelf} keys=[${rawKeys.join(',')}] stub=${msg.messageStubType || 0} params=${JSON.stringify(msg.messageStubParameters || [])}`
-    );
-    if (msg.messageStubType === 2) {
-      console.warn(`[processIncomingMessage] ⚠️ Message arrived as un-decrypted ciphertext (stub=2) from ${msg.key?.remoteJid}; awaiting retry/sender-key handshake...`);
-      const targetSender = msg.key?.participant || msg.key?.remoteJid;
-      if (targetSender && !msg.key?.fromMe && (this.sock as any)?.assertSessions) {
-        (this.sock as any).assertSessions([targetSender], false).catch(() => {});
-      }
-    }
+      (cleanRemote === botOwnDigits || cleanRemote === '2347058967815' || cleanRemote === config.bot.pairingPhoneNumber);
 
     // If fromMe and NOT Message Yourself, the owner is manually texting someone else: do not intervene!
     if (msg.key?.fromMe && !isMessageToSelf) {
@@ -1189,7 +958,7 @@ export class WhatsAppClient {
       const normalized = normalizeMessage(msg);
       if (normalized && (normalized.text || normalized.contentType)) {
         chatLogger.logMessage({
-          chatJid: destJid || normalized.chatJid,
+          chatJid: normalized.chatJid,
           senderJid: 'bot',
           senderName: config.bot.name,
           isGroup: normalized.isGroup,
@@ -1212,12 +981,7 @@ export class WhatsAppClient {
     await this.interceptViewOnceMessage(msg);
 
     const normalized = normalizeMessage(msg);
-    if (!normalized) {
-      if (rawKeys.length > 0 && !rawKeys.includes('protocolMessage') && !rawKeys.includes('senderKeyDistributionMessage')) {
-        console.log(`[processIncomingMessage] ℹ️ Message unwrapped but produced no normalized content: keys=[${rawKeys.join(',')}]`);
-      }
-      return;
-    }
+    if (!normalized) return;
 
     // If Message Yourself, set sender to the owner so owner recognition triggers properly
     if (isMessageToSelf) {
@@ -1253,10 +1017,10 @@ export class WhatsAppClient {
     batchLearner.recordExchange(normalized.chatJid, normalized.senderJid);
 
     // Historical Backlog Evaluation:
-    // Strictly ignore any message older than 10 minutes for immediate live trigger (accommodates Render redeploys),
+    // Strictly ignore any message older than 2 minutes for immediate live trigger,
     // and ONLY consider offline DMs that arrived DURING this session (never historical sync from before startup)
-    if (!isNaN(msgTime) && msgTime > 0 && Date.now() - msgTime > 600_000) {
-      if (!normalized.isGroup && msgTime >= this.sessionStartedAt - 10 * 60 * 1000) {
+    if (!isNaN(msgTime) && msgTime > 0 && Date.now() - msgTime > 120_000) {
+      if (!normalized.isGroup && msgTime >= this.sessionStartedAt - 5 * 60 * 1000) {
         this.scheduleUnrepliedScan(12_000);
       }
       return;
@@ -1363,14 +1127,7 @@ export class WhatsAppClient {
       botLid
     );
 
-    if (!shouldRespond) {
-      if (normalized.isGroup) {
-        console.log(
-          `[Filter] 🔇 Ignored message from ${normalized.senderName} in group ${normalized.chatJid}: "${normalized.text?.slice(0, 40) || ''}"`
-        );
-      }
-      return;
-    }
+    if (!shouldRespond) return;
 
     // Fast-Path for Bot Owner: Private DM View-Once Retrieval
     const isOwnerDmUser = userProfileManager.isOwner(normalized.senderJid, normalized.senderName);
@@ -1615,28 +1372,18 @@ export class WhatsAppClient {
       isGroup: normalized.isGroup,
       rawMessage: msg,
       replyText: async (text: string) => {
-        const targetChatJid = OutboundSender.resolveDeliveryJid(normalized.chatJid);
-        const safeQuoted = targetChatJid.endsWith('@lid') ? undefined : msg;
+        const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
 
         // Simulate authentic human typing presence scaled to incoming message length, reply length, and chat type
         await antiBanEngine.simulateTypingPresence(
           sock,
-          targetChatJid,
+          normalized.chatJid,
           text,
           false,
           incomingCharLen,
           normalized.isGroup
         );
-        const res = await OutboundSender.replyText(
-          sock,
-          targetChatJid,
-          text,
-          safeQuoted,
-          isOwnerUser,
-          false,
-          undefined,
-          true
-        );
+        const res = await OutboundSender.replyText(sock, normalized.chatJid, text, safeQuoted);
         if (normalized.isGroup) {
           recordGroupInteraction(normalized.chatJid);
         }
@@ -1645,21 +1392,21 @@ export class WhatsAppClient {
       sendSticker: async (bufferOrPath: Buffer | string, mentions?: string[]) =>
         OutboundSender.sendSticker(
           sock,
-          OutboundSender.resolveDeliveryJid(normalized.chatJid),
+          normalized.chatJid,
           bufferOrPath,
           msg,
           mentions || (normalized.isGroup && normalized.senderJid ? [normalized.senderJid] : undefined)
         ),
       sendImage: (bufferOrUrl: Buffer | string, caption?: string) =>
-        OutboundSender.sendImage(sock, OutboundSender.resolveDeliveryJid(normalized.chatJid), bufferOrUrl, caption, msg),
+        OutboundSender.sendImage(sock, normalized.chatJid, bufferOrUrl, caption, msg),
       sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) =>
-        OutboundSender.sendAudio(sock, OutboundSender.resolveDeliveryJid(normalized.chatJid), bufferOrUrl, isVoiceNote, msg),
+        OutboundSender.sendAudio(sock, normalized.chatJid, bufferOrUrl, isVoiceNote, msg),
       sendVideo: (bufferOrUrl: Buffer | string, caption?: string) =>
-        OutboundSender.sendVideo(sock, OutboundSender.resolveDeliveryJid(normalized.chatJid), bufferOrUrl, caption, msg),
+        OutboundSender.sendVideo(sock, normalized.chatJid, bufferOrUrl, caption, msg),
       sendContact: (displayName: string, phoneNumber: string) =>
-        OutboundSender.sendContact(sock, OutboundSender.resolveDeliveryJid(normalized.chatJid), displayName, phoneNumber, msg),
+        OutboundSender.sendContact(sock, normalized.chatJid, displayName, phoneNumber, msg),
       sendPoll: (question: string, options: string[], selectableCount?: number) =>
-        OutboundSender.sendPoll(sock, OutboundSender.resolveDeliveryJid(normalized.chatJid), question, options, selectableCount, msg),
+        OutboundSender.sendPoll(sock, normalized.chatJid, question, options, selectableCount, msg),
     };
 
     // 4. Dispatch via Concurrency Queue (Anti-Crash & Human-Like Rate Limiting)
@@ -1670,9 +1417,8 @@ export class WhatsAppClient {
       execute: async () => {
         let stopTyping: (() => void) | null = null;
         try {
-          const targetChatJid = OutboundSender.resolveDeliveryJid(normalized.chatJid);
           // 1. Start active typing bubble immediately so users know the bot is actively crafting their reply
-          stopTyping = antiBanEngine.startTypingHeartbeat(sock, targetChatJid);
+          stopTyping = antiBanEngine.startTypingHeartbeat(sock, normalized.chatJid);
           // 2. Light natural cadence pause (50ms in DM, 300-600ms in group)
           await antiBanEngine.simulateReadingDelay(incomingCharLen, normalized.isGroup);
           await agentHarness.handleMessage(promptText, context);
@@ -2086,7 +1832,7 @@ export class WhatsAppClient {
           rawMessage: syntheticMsg,
           replyText: async (text: string) => {
             await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, false, userMsgLen, false);
-            return OutboundSender.replyText(sock, chat.chatJid, text, undefined, isOwner, false, undefined, true);
+            return OutboundSender.replyText(sock, chat.chatJid, text, undefined);
           },
           sendSticker: async (bufferOrPath: Buffer | string) =>
             OutboundSender.sendSticker(sock, chat.chatJid, bufferOrPath, undefined),
