@@ -471,7 +471,12 @@ export class WhatsAppClient {
       const hash = crypto.createHash('sha1').update(bundle).digest('hex');
       if (hash === this.lastBackupHash) return;
 
-      const apiKey = process.env.RENDER_API_KEY || '[REDACTED_RENDER_API_KEY]';
+      const apiKey = process.env.RENDER_API_KEY;
+      if (!apiKey) {
+        console.warn('[WhatsAppClient] Render session backup skipped: RENDER_API_KEY is not configured.');
+        this.lastBackupAt = Date.now();
+        return;
+      }
       const serviceId = process.env.RENDER_SERVICE_ID || 'srv-db9jvcmq1p3s738hpa40';
 
       const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars/SESSION_BUNDLE_BASE64`, {

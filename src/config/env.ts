@@ -105,12 +105,12 @@ export const config = {
     pairingPhoneNumber: normalizePhoneNumber(process.env.PAIRING_PHONE_NUMBER || '07058967815'),
   },
   huggingface: {
-    apiKey: process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || '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',
+    apiKey: process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || '',
     model: process.env.HUGGINGFACE_MODEL || 'black-forest-labs/FLUX.1-Krea-dev',
     provider: process.env.HUGGINGFACE_PROVIDER || 'fal-ai',
   },
   elevenlabs: {
-    apiKey: process.env.ELEVENLABS_API_KEY || 'sk_272f012b27920530590cc1c553ec251b537e94fb261814f2',
+    apiKey: process.env.ELEVENLABS_API_KEY || '',
     voiceId: process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB',
     modelId: process.env.ELEVENLABS_MODEL_ID || 'eleven_multilingual_v2',
   },
