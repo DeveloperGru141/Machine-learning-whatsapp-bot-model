@@ -1514,6 +1514,17 @@ export class WhatsAppClient {
         normalized.senderName;
 
     const incomingCharLen = (cleanedText || promptText || '').length;
+    const senderPn = (msg.key as any)?.senderPn;
+    const replyChatJid =
+      normalized.chatJid.endsWith('@lid') &&
+      typeof senderPn === 'string' &&
+      senderPn.endsWith('@s.whatsapp.net')
+        ? senderPn
+        : normalized.chatJid;
+
+    if (replyChatJid !== normalized.chatJid) {
+      console.log('[WhatsAppClient] Routing LID reply using the mapped phone JID.');
+    }
 
     const context: ExecutionContext = {
       sock,
@@ -1534,7 +1545,17 @@ export class WhatsAppClient {
           incomingCharLen,
           normalized.isGroup
         );
-        const res = await OutboundSender.replyText(sock, normalized.chatJid, text, safeQuoted, isOwner, false, undefined, true);
+        const res = await OutboundSender.replyText(
+          sock,
+          replyChatJid,
+          text,
+          safeQuoted,
+          isOwner,
+          false,
+          undefined,
+          true,
+          normalized.chatJid
+        );
         if (normalized.isGroup) {
           recordGroupInteraction(normalized.chatJid);
         }

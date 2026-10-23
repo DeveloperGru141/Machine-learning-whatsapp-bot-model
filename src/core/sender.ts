@@ -157,7 +157,8 @@ export class OutboundSender {
     isOwnerCommand?: boolean,
     isProactiveCheckIn?: boolean,
     mentions?: string[],
-    isReply: boolean = true
+    isReply: boolean = true,
+    logChatJid?: string
   ): Promise<any> {
     if (!this.checkSafety(chatJid, quoted, isOwnerCommand, isProactiveCheckIn, isReply)) return null;
 
@@ -178,7 +179,7 @@ export class OutboundSender {
         }
         const result = await currentSock.sendMessage(chatJid, payload, { quoted: safeQuoted });
         this.recordDispatchedId(result?.key?.id);
-        chatLogger.logOutboundMessage(chatJid, cleanText);
+        chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText);
         this.trackDeliveryConfirmation(result, chatJid);
         return result;
       } catch (err: any) {
@@ -191,7 +192,7 @@ export class OutboundSender {
             }
             const result = await currentSock.sendMessage(chatJid, payload);
             this.recordDispatchedId(result?.key?.id);
-            chatLogger.logOutboundMessage(chatJid, cleanText);
+            chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText);
             this.trackDeliveryConfirmation(result, chatJid);
             return result;
           } catch (innerErr: any) {
@@ -214,7 +215,7 @@ export class OutboundSender {
             console.log(`[OutboundSender] 🔄 Retrying outbound to ${chatJid} via fresh reconnected socket...`);
             const retryResult = await freshSock.sendMessage(chatJid, { text: cleanText });
             this.recordDispatchedId(retryResult?.key?.id);
-            chatLogger.logOutboundMessage(chatJid, cleanText);
+            chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText);
             this.trackDeliveryConfirmation(retryResult, chatJid);
             return retryResult;
           }
