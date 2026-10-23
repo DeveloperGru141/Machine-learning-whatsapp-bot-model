@@ -1024,10 +1024,37 @@ export class WhatsAppClient {
         } catch {}
       });
 
-      // Message handler
-      this.sock.ev.on('messages.upsert', async (m) => {
-        for (const msg of m.messages) {
-          await this.processIncomingMessage(msg);
+      // Message handler. Log only aggregate metadata so we can distinguish missing
+      // Baileys events from messages dropped later, without logging message text or JIDs.
+      this.sock.ev.on('messages.upsert', async (event) => {
+        const messages = event.messages || [];
+        const incoming = messages.filter((msg) => !msg.key?.fromMe);
+        const incomingDms = incoming.filter((msg) => {
+          const jid = msg.key?.remoteJid || '';
+          return Boolean(jid) && !jid.endsWith('@g.us') && !jid.includes('broadcast') && !jid.endsWith('@newsletter');
+        });
+        const dmLids = incomingDms.filter((msg) => msg.key?.remoteJid?.endsWith('@lid')).length;
+        const dmPns = incomingDms.filter((msg) => msg.key?.remoteJid?.endsWith('@s.whatsapp.net')).length;
+        const groups = incoming.filter((msg) => msg.key?.remoteJid?.endsWith('@g.us')).length;
+        const missingContent = incoming.filter((msg) => !msg.message).length;
+        console.log(
+          `[BaileysInbound] upsert type=${event.type || 'unknown'} batch=${messages.length} inboundDm=${incomingDms.length} dmLid=${dmLids} dmPn=${dmPns} groups=${groups} missingContent=${missingContent}`
+        );
+
+        for (const msg of messages) {
+          try {
+            await this.processIncomingMessage(msg);
+          } catch (err: any) {
+            const errorName = err instanceof Error ? err.name : typeof err;
+            const chatType = msg.key?.remoteJid?.endsWith('@g.us')
+              ? 'group'
+              : msg.key?.remoteJid?.endsWith('@lid')
+                ? 'lid_dm'
+                : msg.key?.remoteJid?.endsWith('@s.whatsapp.net')
+                  ? 'phone_dm'
+                  : 'other';
+            console.error(`[BaileysInbound] process failed chatType=${chatType} errorType=${errorName}`);
+          }
         }
       });
     } finally {
