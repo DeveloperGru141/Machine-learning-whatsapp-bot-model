@@ -450,6 +450,7 @@ export class ContactService {
             AND chat_jid NOT LIKE '%broadcast%'
             AND chat_jid NOT LIKE '2347058967815%'
             AND chat_jid NOT LIKE '2349014896714%'
+            AND chat_jid NOT LIKE '230652813291679%'
             AND NOT (
               sender_jid = 'bot'
               AND (

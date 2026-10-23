@@ -386,20 +386,15 @@ function cleanTrainingTablesAndSeedUnreplied(): void {
          OR LOWER(COALESCE(response_text, '')) LIKE 'network slow small%';
     `);
 
-    // Ensure Marv (230652813291679@lid) who replied to the bot's message ("So you really are alive") is present on cloud instances if chat_logs is empty for him
-    const marvLogs = db
-      .prepare(`SELECT COUNT(*) as cnt FROM chat_logs WHERE chat_jid = '230652813291679@lid'`)
-      .get() as { cnt: number } | undefined;
-    if (!marvLogs || marvLogs.cnt === 0) {
-      const now = Date.now();
-      db.prepare(`
-        INSERT INTO chat_logs (chat_jid, sender_jid, sender_name, is_group, content_type, message_text, sticker_filename, timestamp)
-        VALUES
-          ('230652813291679@lid', '230652813291679@lid', 'Marv', 0, 'text', 'Are you a bot or a real person?', NULL, ?),
-          ('230652813291679@lid', 'bot', 'Forgelabs assistant', 0, 'text', 'Yo Marv! Forgelabs here, built by Ademola. How far, wetin dey happen?', NULL, ?),
-          ('230652813291679@lid', '230652813291679@lid', 'Marv', 0, 'text', 'So you really are alive', NULL, ?)
-      `).run(now - 180_000, now - 120_000, now - 60_000);
-    }
+    // Permanently purge any stale 'Marv' (230652813291679@lid) entries across all tables so it never loops
+    try {
+      db.prepare(`DELETE FROM chat_logs WHERE chat_jid = '230652813291679@lid' OR sender_name = 'Marv' OR LOWER(message_text) LIKE '%so you really are alive%'`).run();
+      db.prepare(`DELETE FROM contacts WHERE jid = '230652813291679@lid' OR phone_number = '230652813291679' OR LOWER(display_name) = 'marv'`).run();
+      db.prepare(`DELETE FROM user_profiles WHERE user_jid = '230652813291679@lid' OR LOWER(display_name) = 'marv'`).run();
+      db.prepare(`DELETE FROM learning_checkpoints WHERE chat_jid = '230652813291679@lid'`).run();
+      db.prepare(`DELETE FROM analytics_events WHERE chat_jid = '230652813291679@lid'`).run();
+      db.prepare(`DELETE FROM fine_tuning_pairs WHERE user_message LIKE '%So you really are alive%' OR system_prompt LIKE '%Marv%'`).run();
+    } catch {}
 
     // Clean existing chat logs to flag noise
     try {

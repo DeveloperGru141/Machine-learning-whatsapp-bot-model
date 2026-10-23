@@ -1868,7 +1868,9 @@ export class WhatsAppClient {
           chatDigits === ownPhone ||
           chatDigits === ownSockDigits ||
           chatDigits === '2349014896714' ||
-          chatDigits === '2347058967815'
+          chatDigits === '2347058967815' ||
+          chatDigits === '230652813291679' ||
+          chat.chatJid.includes('230652813291679')
         ) {
           return false;
         }
