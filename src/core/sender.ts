@@ -55,7 +55,7 @@ export class OutboundSender {
       return;
     }
 
-    void deliveryConfirmationWaiter(msgId, chatJid, 5000)
+    void deliveryConfirmationWaiter(msgId, chatJid, 30_000)
       .then((info) => {
         console.log('[OutboundSender] WhatsApp delivery status for ' + recipientType + ': ' + info.status + ' (stanza ' + msgId.slice(-8) + ').');
       })

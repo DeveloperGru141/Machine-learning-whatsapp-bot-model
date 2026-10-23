@@ -962,6 +962,9 @@ export class WhatsAppClient {
             const msgId = u.key?.id;
             const remoteJid = u.key?.remoteJid || '';
             const status = Number(u.update?.status || 0);
+            if (msgId && u.key?.fromMe && OutboundSender.isDispatchedId(msgId)) {
+              console.log(`[Receipt] messages.update id=${msgId.slice(-8)} chat=${remoteJid} status=${status}`);
+            }
             if (msgId && status >= 2) {
               this.recordDeliveryStatus(msgId, remoteJid, status);
             }
@@ -976,6 +979,9 @@ export class WhatsAppClient {
             const remoteJid = r.key?.remoteJid || '';
             const receipt = r.receipt;
             const status = receipt?.readTimestamp ? 4 : receipt?.receiptTimestamp ? 3 : 2;
+            if (msgId && OutboundSender.isDispatchedId(msgId)) {
+              console.log(`[Receipt] message-receipt.update id=${msgId.slice(-8)} chat=${remoteJid} user=${receipt?.userJid || '?'} status=${status}`);
+            }
             if (msgId) {
               this.recordDeliveryStatus(msgId, remoteJid, status);
             }
