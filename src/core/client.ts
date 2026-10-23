@@ -1519,8 +1519,8 @@ export class WhatsAppClient {
         normalized.senderName;
 
     const incomingCharLen = (cleanedText || promptText || '').length;
-    // Baileys v7 prefers the chat's native LID address; its Signal repository handles PN/LID mapping.
-    const replyChatJid = normalized.chatJid;
+    // Use the paired phone-number address for LID DMs when Baileys provides it.
+    const replyChatJid = normalized.replyChatJid;
 
     const context: ExecutionContext = {
       sock,

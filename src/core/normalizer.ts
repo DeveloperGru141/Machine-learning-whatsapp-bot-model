@@ -2,6 +2,7 @@ import { extractMessageContent, type WAMessage, type proto } from '@whiskeysocke
 
 export interface NormalizedMessage {
   chatJid: string;
+  replyChatJid: string;
   senderJid: string;
   senderName: string;
   isGroup: boolean;
@@ -45,6 +46,10 @@ export function normalizeMessage(msg: WAMessage): NormalizedMessage | null {
 
   const chatJid = msg.key.remoteJid;
   const isGroup = chatJid.endsWith('@g.us');
+  // Prefer the phone-number address for outbound replies to LID DMs when available.
+  const replyChatJid = !isGroup && chatJid.endsWith('@lid') && msg.key.remoteJidAlt?.endsWith('@s.whatsapp.net')
+    ? msg.key.remoteJidAlt
+    : chatJid;
   const senderJid = isGroup ? (msg.key.participant || chatJid) : chatJid;
   const rawId = senderJid.split('@')[0].split(':')[0];
   const isLid = senderJid.endsWith('@lid') || rawId.length > 13;
@@ -121,6 +126,7 @@ export function normalizeMessage(msg: WAMessage): NormalizedMessage | null {
 
   return {
     chatJid,
+    replyChatJid,
     senderJid,
     senderName,
     isGroup,
