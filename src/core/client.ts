@@ -438,9 +438,11 @@ export class WhatsAppClient {
       const senderKeys = allFiles.filter((f) => f.startsWith('sender-key-')).sort(newestFirst);
       const appKeys = allFiles.filter((f) => f.startsWith('app-state-sync-key'));
 
+      const resetMarkers = allFiles.filter((f) => f.startsWith('reset-marker-'));
+
       // Signal `session-*` ratchets must NEVER be pruned: dropping them causes
       // "MessageCounterError: Key used already or never filled" and undeliverable replies.
-      const core = ['creds.json', ...appKeys, ...sessions];
+      const core = ['creds.json', ...appKeys, ...resetMarkers, ...sessions];
       const prunable = [...senderKeys.slice(0, 30), ...preKeys, ...senderKeys.slice(30)];
 
       const read = (f: string): string | undefined => {
@@ -575,11 +577,26 @@ export class WhatsAppClient {
           );
 
           if (filesMap['creds.json'] && isUsable) {
+            // One-time recovery: stale pairwise Signal sessions for the owner can make DM replies
+            // get accepted by the server but never decrypt on the owner's devices. Skip them on the
+            // first boot that lacks the marker so Baileys negotiates fresh sessions (groups unaffected).
+            const resetMarker = 'reset-marker-owner-sessions-v1';
+            const needsOwnerReset = filesMap[resetMarker] === undefined;
+            const ownerSessionRe = /^session-(102409552584830|2348108574293)[_.@]/;
+            let skippedOwnerSessions = 0;
             for (const [fileName, fileContent] of Object.entries(filesMap)) {
               const safeName = path.basename(fileName);
+              if (needsOwnerReset && ownerSessionRe.test(safeName)) {
+                skippedOwnerSessions++;
+                continue;
+              }
               fs.writeFileSync(path.join(config.paths.sessions, safeName), fileContent, 'utf8');
             }
-            console.log(`[WhatsAppClient] 🔑 Hydrated ${Object.keys(filesMap).length} session files from SESSION_BUNDLE_BASE64.`);
+            if (needsOwnerReset) {
+              fs.writeFileSync(path.join(config.paths.sessions, resetMarker), new Date().toISOString(), 'utf8');
+              console.log(`[WhatsAppClient] ♻️ One-time owner session reset: dropped ${skippedOwnerSessions} stale owner Signal session(s).`);
+            }
+            console.log(`[WhatsAppClient] 🔑 Hydrated ${Object.keys(filesMap).length - skippedOwnerSessions} session files from SESSION_BUNDLE_BASE64.`);
           } else {
             console.warn('[WhatsAppClient] SESSION_BUNDLE_BASE64 is unlinked or incomplete; skipping hydration to await fresh pairing.');
           }
