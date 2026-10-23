@@ -1,4 +1,4 @@
-import type { WASocket, proto } from '@whiskeysockets/baileys';
+import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 import { db } from '../memory/db.js';
 
 export class MessageReactor {
@@ -109,7 +109,7 @@ export class MessageReactor {
    */
   public async reactToMessage(
     sock: WASocket,
-    msg: proto.IWebMessageInfo,
+    msg: WAMessage,
     emoji: string
   ): Promise<void> {
     if (!msg.key?.remoteJid) return;

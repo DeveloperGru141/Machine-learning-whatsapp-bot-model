@@ -1,4 +1,4 @@
-import type { WASocket, proto } from '@whiskeysockets/baileys';
+import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 
 export interface ExecutionContext {
   sock: WASocket;
@@ -6,7 +6,7 @@ export interface ExecutionContext {
   senderJid: string;
   senderName: string;
   isGroup: boolean;
-  rawMessage?: proto.IWebMessageInfo;
+  rawMessage?: WAMessage;
   replyText: (text: string) => Promise<any>;
   sendSticker?: (bufferOrPath: Buffer | string, mentions?: string[]) => Promise<any>;
   sendImage: (bufferOrUrl: Buffer | string, caption?: string) => Promise<any>;

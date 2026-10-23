@@ -1,10 +1,15 @@
 import fs from 'fs';
 import path from 'path';
+import { dirname } from 'node:path';
 import { pathToFileURL } from 'url';
+import { fileURLToPath } from 'node:url';
 import { PluginRegistry, pluginRegistry } from './registry.js';
 import { BotTool, ExecutionContext, IPlugin, ToolResult } from './types.js';
 import { config } from '../config/env.js';
 import { userProfileManager } from '../memory/user-profiles.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 export class PluginHotReloader {
   private pluginPaths: Map<string, string> = new Map([

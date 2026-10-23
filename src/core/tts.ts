@@ -3,11 +3,13 @@ import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { createRequire } from 'node:module';
 import { config } from '../config/env.js';
 import { getBotSetting } from '../memory/db.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
 
 let ffmpegPath: string | null = null;
 try {

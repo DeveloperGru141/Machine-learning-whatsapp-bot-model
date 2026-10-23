@@ -1,4 +1,4 @@
-import type { proto } from '@whiskeysockets/baileys';
+import type { WAMessage } from '@whiskeysockets/baileys';
 import { unwrapMessage } from './normalizer.js';
 import { config } from '../config/env.js';
 import { db } from '../memory/db.js';
@@ -30,7 +30,7 @@ export function recordGroupInteraction(groupJid: string): void {
 }
 
 export function shouldRespondToMessage(
-  msg: proto.IWebMessageInfo,
+  msg: WAMessage,
   botJid: string,
   rawText: string,
   botLid?: string

@@ -1,7 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
+import { createRequire } from 'node:module';
 import { config } from '../config/env.js';
 import fs from 'fs';
 import path from 'path';
+
+const require = createRequire(import.meta.url);
 
 // Ensure data directory exists
 const dbDir = path.dirname(config.paths.database);

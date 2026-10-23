@@ -1,6 +1,9 @@
 import fs from 'fs';
 import path from 'path';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { WASocket } from '@whiskeysockets/baileys';
+const __dirname = dirname(fileURLToPath(import.meta.url));
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import {
   insertScheduledTask,

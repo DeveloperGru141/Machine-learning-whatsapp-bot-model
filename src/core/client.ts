@@ -2,9 +2,9 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  WASocket,
-  proto,
   Browsers,
+  type WAMessage,
+  type WASocket,
 } from '@whiskeysockets/baileys';
 import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied, saveChannelQuote, saveChannelMeme, setBotSetting } from '../memory/db.js';
 import { parseQuoteFromText, WHATSAPP_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-quotes-service.js';
@@ -854,7 +854,7 @@ export class WhatsAppClient {
           }
 
           // Also collect any embedded messages inside chat objects (e.g. unread DM conversations)
-          const allSyncMessages: proto.IWebMessageInfo[] = [...(messages || [])];
+          const allSyncMessages: WAMessage[] = [...(messages || [])] as WAMessage[];
           if (chats && chats.length > 0) {
             for (const chat of chats) {
               if (chat.id && !chat.id.endsWith('@g.us') && (chat.name || (chat as any).notify)) {
@@ -1064,7 +1064,7 @@ export class WhatsAppClient {
    * Processes a single incoming Baileys message through normalization, passive analytics,
    * security/spam checks, self-introduction, and LLM reasoning.
    */
-  public async processIncomingMessage(msg: proto.IWebMessageInfo): Promise<void> {
+  public async processIncomingMessage(msg: WAMessage): Promise<void> {
     if (msg.key?.id && msg.message) {
       this.messageStore.set(msg.key.id, msg.message);
       if (this.messageStore.size > 2000) {
@@ -1514,17 +1514,8 @@ export class WhatsAppClient {
         normalized.senderName;
 
     const incomingCharLen = (cleanedText || promptText || '').length;
-    const senderPn = (msg.key as any)?.senderPn;
-    const replyChatJid =
-      normalized.chatJid.endsWith('@lid') &&
-      typeof senderPn === 'string' &&
-      senderPn.endsWith('@s.whatsapp.net')
-        ? senderPn
-        : normalized.chatJid;
-
-    if (replyChatJid !== normalized.chatJid) {
-      console.log('[WhatsAppClient] Routing LID reply using the mapped phone JID.');
-    }
+    // Baileys v7 prefers the chat's native LID address; its Signal repository handles PN/LID mapping.
+    const replyChatJid = normalized.chatJid;
 
     const context: ExecutionContext = {
       sock,
@@ -1642,7 +1633,7 @@ export class WhatsAppClient {
    * Anti-ViewOnce Vault Interceptor:
    * Detects View-Once media on arrival and saves the decrypted buffer to disk before it expires.
    */
-  private async interceptViewOnceMessage(msg: proto.IWebMessageInfo): Promise<void> {
+  private async interceptViewOnceMessage(msg: WAMessage): Promise<void> {
     try {
       const rawM = msg.message;
       if (!rawM) return;
@@ -1693,7 +1684,7 @@ export class WhatsAppClient {
         {
           key: msg.key,
           message: inner,
-        } as proto.IWebMessageInfo,
+        } as WAMessage,
         'buffer',
         {}
       )) as Buffer;
@@ -1721,7 +1712,7 @@ export class WhatsAppClient {
   }
 
   private async handleIncomingSticker(
-    msg: proto.IWebMessageInfo,
+    msg: WAMessage,
     normalized: NormalizedMessage
   ): Promise<void> {
     if (!this.sock) return;
@@ -1765,7 +1756,7 @@ export class WhatsAppClient {
    * Ingests real-time messages from followed WhatsApp Channels (Memes & Quotes📖).
    * Automatically downloads and saves any accompanying media (images/videos) alongside captions.
    */
-  private async handleNewsletterMessage(msg: proto.IWebMessageInfo): Promise<void> {
+  private async handleNewsletterMessage(msg: WAMessage): Promise<void> {
     try {
       const channelJid = msg.key?.remoteJid || '';
       const msgId = msg.key?.id || String(Date.now());
@@ -1986,7 +1977,7 @@ export class WhatsAppClient {
         await antiBanEngine.simulateReadingDelay(userMsgLen, false);
 
         // 2. Construct synthetic message for context
-        const syntheticMsg: proto.IWebMessageInfo = {
+        const syntheticMsg: WAMessage = {
           key: {
             remoteJid: chat.chatJid,
             fromMe: false,

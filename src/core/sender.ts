@@ -1,4 +1,4 @@
-import type { WASocket, proto } from '@whiskeysockets/baileys';
+import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 import fs from 'fs';
 import { antiBanEngine } from '../security/anti-ban.js';
 import { chatLogger } from '../memory/chat-logger.js';
@@ -69,7 +69,7 @@ export class OutboundSender {
    */
   private static checkSafety(
     chatJid: string,
-    quoted?: proto.IWebMessageInfo,
+    quoted?: WAMessage,
     isOwnerCommand?: boolean,
     isProactiveCheckIn?: boolean,
     isReply: boolean = true
@@ -96,7 +96,7 @@ export class OutboundSender {
    * in WhatsApp multi-device 1-on-1 direct chats. In group chats (@g.us), multi-device handles
    * participant quoting natively.
    */
-  private static sanitizeQuoted(chatJid: string, quoted?: proto.IWebMessageInfo): proto.IWebMessageInfo | undefined {
+  private static sanitizeQuoted(chatJid: string, quoted?: WAMessage): WAMessage | undefined {
     if (!quoted) return undefined;
     if (
       chatJid.endsWith('@lid') ||
@@ -153,7 +153,7 @@ export class OutboundSender {
     sock: WASocket,
     chatJid: string,
     text: string,
-    quoted?: proto.IWebMessageInfo,
+    quoted?: WAMessage,
     isOwnerCommand?: boolean,
     isProactiveCheckIn?: boolean,
     mentions?: string[],
@@ -229,7 +229,7 @@ export class OutboundSender {
     sock: WASocket,
     chatJid: string,
     bufferOrPath: Buffer | string,
-    quoted?: proto.IWebMessageInfo,
+    quoted?: WAMessage,
     mentions?: string[],
     isReply: boolean = true
   ): Promise<any> {
@@ -277,7 +277,7 @@ export class OutboundSender {
     chatJid: string,
     bufferOrUrl: Buffer | string,
     caption?: string,
-    quoted?: proto.IWebMessageInfo,
+    quoted?: WAMessage,
     isReply: boolean = true
   ): Promise<any> {
     if (!this.checkSafety(chatJid, quoted, false, false, isReply)) return null;
@@ -314,7 +314,7 @@ export class OutboundSender {
     chatJid: string,
     bufferOrUrl: Buffer | string,
     isVoiceNote: boolean = false,
-    quoted?: proto.IWebMessageInfo,
+    quoted?: WAMessage,
     isReply: boolean = true
   ): Promise<any> {
     if (!this.checkSafety(chatJid, quoted, false, false, isReply)) return null;
@@ -370,7 +370,7 @@ export class OutboundSender {
     chatJid: string,
     bufferOrUrl: Buffer | string,
     caption?: string,
-    quoted?: proto.IWebMessageInfo,
+    quoted?: WAMessage,
     isReply: boolean = true
   ): Promise<any> {
     if (!this.checkSafety(chatJid, quoted, false, false, isReply)) return null;
@@ -411,7 +411,7 @@ export class OutboundSender {
     chatJid: string,
     displayName: string,
     phoneNumber: string,
-    quoted?: proto.IWebMessageInfo,
+    quoted?: WAMessage,
     isReply: boolean = true
   ): Promise<any> {
     if (!this.checkSafety(chatJid, quoted, false, false, isReply)) return null;
@@ -445,7 +445,7 @@ export class OutboundSender {
     question: string,
     options: string[],
     selectableCount: number = 1,
-    quoted?: proto.IWebMessageInfo
+    quoted?: WAMessage
   ): Promise<any> {
     if (!this.checkSafety(chatJid, quoted)) return null;
 

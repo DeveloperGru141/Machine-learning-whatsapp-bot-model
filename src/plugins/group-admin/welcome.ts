@@ -22,11 +22,13 @@ export function setupGroupWelcome(sock: WASocket): void {
       const botLid = sock.user?.lid || '';
       const botLidNormalized = botLid ? botLid.split(':')[0] + '@lid' : '';
 
-      const isBotTargeted = (p: string) =>
-        p === botNumber ||
-        (botId && p === botId) ||
-        (botLid && p === botLid) ||
-        (botLidNormalized && p === botLidNormalized);
+      const isBotTargeted = (participant: (typeof update.participants)[number]) => {
+        const p = participant.id;
+        return p === botNumber ||
+          (botId && p === botId) ||
+          (botLid && p === botLid) ||
+          (botLidNormalized && p === botLidNormalized);
+      };
 
       // 1. When the bot is added to a group, send the introduction and sync group in database
       if (update.action === 'add') {

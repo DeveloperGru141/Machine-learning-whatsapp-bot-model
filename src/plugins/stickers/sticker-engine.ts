@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import type { proto } from '@whiskeysockets/baileys';
+import type { WAMessage } from '@whiskeysockets/baileys';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { db } from '../../memory/db.js';
 import { classifyStickerVibe } from '../../core/vision.js';
@@ -212,7 +212,7 @@ class StickerEngine {
    * and selects a matching sticker from the catalog with the exact same emotional vibe.
    */
   public async getStickerForIncomingSticker(
-    msg: proto.IWebMessageInfo,
+    msg: WAMessage,
     chatJid: string
   ): Promise<StickerMatch | null> {
     this.initialize();

@@ -1,4 +1,4 @@
-import { extractMessageContent, type proto } from '@whiskeysockets/baileys';
+import { extractMessageContent, type WAMessage, type proto } from '@whiskeysockets/baileys';
 
 export interface NormalizedMessage {
   chatJid: string;
@@ -8,7 +8,7 @@ export interface NormalizedMessage {
   text: string;
   contentType: 'text' | 'sticker' | 'image' | 'audio' | 'document' | 'video';
   stickerFilename?: string;
-  raw: proto.IWebMessageInfo;
+  raw: WAMessage;
 }
 
 /**
@@ -40,7 +40,7 @@ export function unwrapMessage(msg: proto.IMessage | undefined | null): proto.IMe
   return m;
 }
 
-export function normalizeMessage(msg: proto.IWebMessageInfo): NormalizedMessage | null {
+export function normalizeMessage(msg: WAMessage): NormalizedMessage | null {
   if (!msg.message || !msg.key.remoteJid) return null;
 
   const chatJid = msg.key.remoteJid;

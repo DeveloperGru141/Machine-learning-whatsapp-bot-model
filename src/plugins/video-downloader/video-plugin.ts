@@ -3,8 +3,10 @@ import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { createRequire } from 'node:module';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { config } from '../../config/env.js';
+const require = createRequire(import.meta.url);
 
 let ffmpegPath: string = '';
 try {
