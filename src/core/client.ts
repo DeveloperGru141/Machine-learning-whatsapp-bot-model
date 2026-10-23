@@ -216,7 +216,7 @@ export class WhatsAppClient {
 
   public isRegistered(): boolean {
     const creds = this.sock?.authState?.creds;
-    return Boolean(creds?.registered || creds?.account || creds?.me?.lid);
+    return Boolean(creds?.registered === true || (creds?.me?.id && creds?.me?.lid && !creds?.pairingEphemeralKeyPair));
   }
 
   /**
@@ -419,7 +419,8 @@ export class WhatsAppClient {
       } catch {
         return;
       }
-      if (!rawCreds?.registered && !rawCreds?.account && !rawCreds?.me?.lid) return;
+      const isFullyPaired = Boolean(rawCreds?.registered === true || (rawCreds?.me?.id && rawCreds?.me?.lid && !rawCreds?.pairingEphemeralKeyPair));
+      if (!isFullyPaired) return;
 
       const zlib = await import('zlib');
       const allFiles = fs.readdirSync(config.paths.sessions);
@@ -533,15 +534,24 @@ export class WhatsAppClient {
               ? zlib.gunzipSync(rawBuf).toString('utf8')
               : rawBuf.toString('utf8');
           const filesMap = JSON.parse(bundleJson) as Record<string, string>;
-          // Guard: Only hydrate if creds.json is non-empty and valid JSON!
-          if (filesMap['creds.json'] && filesMap['creds.json'].trim().length > 10) {
+          // Guard: Only hydrate if creds.json is non-empty, valid JSON, and fully registered!
+          let parsedCreds: any = null;
+          try {
+            parsedCreds = JSON.parse(filesMap['creds.json'] || '{}');
+          } catch {}
+          const isUsable = Boolean(
+            parsedCreds?.registered === true ||
+              (parsedCreds?.me?.id && parsedCreds?.me?.lid && !parsedCreds?.pairingEphemeralKeyPair)
+          );
+
+          if (filesMap['creds.json'] && isUsable) {
             for (const [fileName, fileContent] of Object.entries(filesMap)) {
               const safeName = path.basename(fileName);
               fs.writeFileSync(path.join(config.paths.sessions, safeName), fileContent, 'utf8');
             }
             console.log(`[WhatsAppClient] 🔑 Hydrated ${Object.keys(filesMap).length} session files from SESSION_BUNDLE_BASE64.`);
           } else {
-            console.warn('[WhatsAppClient] SESSION_BUNDLE_BASE64 has empty or corrupt creds.json; skipping hydration to await fresh pairing.');
+            console.warn('[WhatsAppClient] SESSION_BUNDLE_BASE64 is unlinked or incomplete; skipping hydration to await fresh pairing.');
           }
         } catch (err: any) {
           console.warn('[WhatsAppClient] Failed to hydrate SESSION_BUNDLE_BASE64:', err.message);
@@ -558,7 +568,7 @@ export class WhatsAppClient {
             this.pairingRequested = false;
           } else {
             const rawCreds = JSON.parse(content);
-            const isFullyPaired = Boolean(rawCreds?.registered || rawCreds?.account || (rawCreds?.me?.id && rawCreds?.me?.lid));
+            const isFullyPaired = Boolean(rawCreds?.registered === true || (rawCreds?.me?.id && rawCreds?.me?.lid && !rawCreds?.pairingEphemeralKeyPair));
             const existingPhone = (rawCreds?.me?.id || '').split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
             const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '07058967815');
 
@@ -706,12 +716,10 @@ export class WhatsAppClient {
           healthMonitor.setConnectionStatus(false);
           const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
           const errorMsg = (lastDisconnect?.error as any)?.message || (lastDisconnect?.error as any)?.output?.payload?.message || '';
-          const isStreamConflict = errorMsg.includes('conflict') || errorMsg.includes('Stream Errored') || errorMsg.includes('Connection Failure');
-          const isRegistered = Boolean(this.sock?.authState?.creds?.registered || this.sock?.authState?.creds?.account || this.sock?.authState?.creds?.me?.lid);
+          const isStreamConflict = errorMsg.includes('conflict') || errorMsg.includes('Stream Errored');
+          const isRegistered = this.isRegistered();
           const isExplicitLogout =
-            isRegistered &&
             statusCode === DisconnectReason.loggedOut &&
-            !isStreamConflict &&
             (errorMsg.toLowerCase().includes('logged out') || (lastDisconnect?.error as any)?.output?.payload?.message === 'Logged Out');
 
           console.log(
@@ -735,6 +743,35 @@ export class WhatsAppClient {
               }
             } catch {}
             setTimeout(() => this.start(), 1500);
+            return;
+          }
+
+          // Handle 401 Disconnect / Connection Failure
+          if (statusCode === 401 || statusCode === DisconnectReason.loggedOut || errorMsg.includes('Connection Failure')) {
+            if (isRegistered) {
+              this.loggedOutRetryCount++;
+              if (this.loggedOutRetryCount <= 3) {
+                console.log(
+                  `[WhatsAppClient] 401 Disconnect / Connection Failure (attempt ${this.loggedOutRetryCount}/3). Waiting 5s in case of rolling deploy conflict...`
+                );
+                setTimeout(() => this.start(), 5000);
+                return;
+              }
+              console.error(
+                '🚨 [WhatsAppClient] Session credentials permanently rejected by WhatsApp (401 Unauthorized after 3 retries). Clearing invalid credentials and generating clean pairing code ADEM1234...'
+              );
+            }
+            this.sessionBundleInvalidated = true;
+            this.loggedOutRetryCount = 0;
+            this.pairingRequested = false;
+            this.latestPairingCode = null;
+            this.latestQr = null;
+            try {
+              if (fs.existsSync(config.paths.sessions)) {
+                fs.rmSync(config.paths.sessions, { recursive: true, force: true });
+              }
+            } catch {}
+            setTimeout(() => this.start(), 1000);
             return;
           }
 
