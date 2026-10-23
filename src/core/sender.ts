@@ -27,13 +27,19 @@ export class OutboundSender {
   /**
    * Verifies outbound safety with the Anti-Ban Engine before dispatching.
    */
-  private static checkSafety(chatJid: string, quoted?: proto.IWebMessageInfo, isOwnerCommand?: boolean, isProactiveCheckIn?: boolean): boolean {
+  private static checkSafety(
+    chatJid: string,
+    quoted?: proto.IWebMessageInfo,
+    isOwnerCommand?: boolean,
+    isProactiveCheckIn?: boolean,
+    isReply: boolean = true
+  ): boolean {
     const isGroup = chatJid.endsWith('@g.us');
     const check = antiBanEngine.canSendOutbound({
       chatJid,
       isGroup,
-      isReplyToInbound: Boolean(quoted),
-      isGroupMention: Boolean(quoted),
+      isReplyToInbound: isReply || Boolean(quoted),
+      isGroupMention: isReply || Boolean(quoted),
       isOwnerCommand,
       isProactiveCheckIn,
     });
@@ -110,9 +116,10 @@ export class OutboundSender {
     quoted?: proto.IWebMessageInfo,
     isOwnerCommand?: boolean,
     isProactiveCheckIn?: boolean,
-    mentions?: string[]
+    mentions?: string[],
+    isReply: boolean = true
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted, isOwnerCommand, isProactiveCheckIn)) return null;
+    if (!this.checkSafety(chatJid, quoted, isOwnerCommand, isProactiveCheckIn, isReply)) return null;
 
     const cleanText = this.sanitizeOutboundText(text);
     if (!cleanText || !cleanText.trim()) {
@@ -178,9 +185,10 @@ export class OutboundSender {
     chatJid: string,
     bufferOrPath: Buffer | string,
     quoted?: proto.IWebMessageInfo,
-    mentions?: string[]
+    mentions?: string[],
+    isReply: boolean = true
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted)) return null;
+    if (!this.checkSafety(chatJid, quoted, false, false, isReply)) return null;
 
     const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
     const buffer = typeof bufferOrPath === 'string'
@@ -224,9 +232,10 @@ export class OutboundSender {
     chatJid: string,
     bufferOrUrl: Buffer | string,
     caption?: string,
-    quoted?: proto.IWebMessageInfo
+    quoted?: proto.IWebMessageInfo,
+    isReply: boolean = true
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted)) return null;
+    if (!this.checkSafety(chatJid, quoted, false, false, isReply)) return null;
 
     const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
     const content = Buffer.isBuffer(bufferOrUrl)
@@ -260,9 +269,10 @@ export class OutboundSender {
     chatJid: string,
     bufferOrUrl: Buffer | string,
     isVoiceNote: boolean = false,
-    quoted?: proto.IWebMessageInfo
+    quoted?: proto.IWebMessageInfo,
+    isReply: boolean = true
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted)) return null;
+    if (!this.checkSafety(chatJid, quoted, false, false, isReply)) return null;
 
     const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
     const content = Buffer.isBuffer(bufferOrUrl)
@@ -315,9 +325,10 @@ export class OutboundSender {
     chatJid: string,
     bufferOrUrl: Buffer | string,
     caption?: string,
-    quoted?: proto.IWebMessageInfo
+    quoted?: proto.IWebMessageInfo,
+    isReply: boolean = true
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted)) return null;
+    if (!this.checkSafety(chatJid, quoted, false, false, isReply)) return null;
 
     const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
     const content = Buffer.isBuffer(bufferOrUrl)
@@ -355,9 +366,10 @@ export class OutboundSender {
     chatJid: string,
     displayName: string,
     phoneNumber: string,
-    quoted?: proto.IWebMessageInfo
+    quoted?: proto.IWebMessageInfo,
+    isReply: boolean = true
   ): Promise<any> {
-    if (!this.checkSafety(chatJid, quoted)) return null;
+    if (!this.checkSafety(chatJid, quoted, false, false, isReply)) return null;
 
     const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
     const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');

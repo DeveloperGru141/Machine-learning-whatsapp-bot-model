@@ -352,41 +352,123 @@ export class WhatsAppClient {
   }
 
   
+  private backupInFlight = false;
+  private backupQueued = false;
+  private lastBackupAt = 0;
+  private lastBackupHash = '';
+  private static readonly BACKUP_MIN_INTERVAL_MS = 30_000;
+  private static readonly BACKUP_MAX_B64_CHARS = 60_000;
+
+  /**
+   * Reads the freshest SESSION_BUNDLE_BASE64 straight from the Render API.
+   * process.env only holds the snapshot taken at the last deploy, so after a container
+   * restart or rolling deploy it is stale or empty.
+   */
+  private async fetchLatestSessionBundle(): Promise<string | undefined> {
+    const apiKey = process.env.RENDER_API_KEY;
+    const serviceId = process.env.RENDER_SERVICE_ID;
+    if (apiKey && serviceId) {
+      try {
+        const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars/SESSION_BUNDLE_BASE64`, {
+          headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { value?: string };
+          if (data?.value && data.value.length > 100) {
+            console.log(`[WhatsAppClient] ☁️ Fetched latest session bundle from Render API (${data.value.length}b).`);
+            return data.value;
+          }
+        } else {
+          console.warn(`[WhatsAppClient] Render API bundle fetch returned ${res.status}; falling back to process.env snapshot.`);
+        }
+      } catch (err: any) {
+        console.warn('[WhatsAppClient] Render API bundle fetch failed; falling back to process.env snapshot:', err?.message || err);
+      }
+    }
+    return process.env.SESSION_BUNDLE_BASE64;
+  }
+
   public async autoBackupSessionToRender(): Promise<void> {
+    if (this.sessionBundleInvalidated) return;
+    if (this.backupInFlight) {
+      this.backupQueued = true;
+      return;
+    }
+    const sinceLast = Date.now() - this.lastBackupAt;
+    if (sinceLast < WhatsAppClient.BACKUP_MIN_INTERVAL_MS) {
+      if (!this.backupQueued) {
+        this.backupQueued = true;
+        const t = setTimeout(() => {
+          this.backupQueued = false;
+          void this.autoBackupSessionToRender();
+        }, WhatsAppClient.BACKUP_MIN_INTERVAL_MS - sinceLast + 250);
+        t.unref();
+      }
+      return;
+    }
+
     const credsFile = path.join(config.paths.sessions, 'creds.json');
     if (!fs.existsSync(credsFile)) return;
 
+    this.backupInFlight = true;
     try {
-      const rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
+      let rawCreds: any;
+      try {
+        rawCreds = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
+      } catch {
+        return;
+      }
       if (!rawCreds?.registered && !rawCreds?.account && !rawCreds?.me?.lid) return;
 
       const zlib = await import('zlib');
       const allFiles = fs.readdirSync(config.paths.sessions);
-      const essentialFiles = new Set<string>();
-      essentialFiles.add('creds.json');
-      for (const f of allFiles) {
-        if (f.startsWith('app-state-sync-key')) essentialFiles.add(f);
-      }
-      const preKeys = allFiles.filter((f) => f.startsWith('pre-key-')).slice(-20);
-      for (const f of preKeys) essentialFiles.add(f);
-      const sessionKeys = allFiles.filter((f) => f.startsWith('session-')).slice(-25);
-      for (const f of sessionKeys) essentialFiles.add(f);
+      const mtimeOf = (f: string): number => {
+        try { return fs.statSync(path.join(config.paths.sessions, f)).mtimeMs; } catch { return 0; }
+      };
+      const newestFirst = (a: string, b: string) => mtimeOf(b) - mtimeOf(a);
 
+      const preKeys = allFiles
+        .filter((f) => f.startsWith('pre-key-'))
+        .sort((a, b) => (parseInt(b.replace(/[^0-9]/g, ''), 10) || 0) - (parseInt(a.replace(/[^0-9]/g, ''), 10) || 0))
+        .slice(0, 40);
+      const sessions = allFiles.filter((f) => f.startsWith('session-')).sort(newestFirst);
+      const senderKeys = allFiles.filter((f) => f.startsWith('sender-key-')).sort(newestFirst);
+      const appKeys = allFiles.filter((f) => f.startsWith('app-state-sync-key'));
+
+      const core = ['creds.json', ...appKeys];
+      const prunable = [...senderKeys.slice(0, 30), ...sessions.slice(0, 60), ...preKeys, ...sessions.slice(60), ...senderKeys.slice(30)];
+
+      const read = (f: string): string | undefined => {
+        const fp = path.join(config.paths.sessions, f);
+        try { return fs.existsSync(fp) && fs.statSync(fp).isFile() ? fs.readFileSync(fp, 'utf8') : undefined; } catch { return undefined; }
+      };
       const filesMap: Record<string, string> = {};
-      for (const file of essentialFiles) {
-        const fullPath = path.join(config.paths.sessions, file);
-        if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
-          filesMap[file] = fs.readFileSync(fullPath, 'utf8');
-        }
+      for (const f of [...core, ...prunable]) {
+        const content = read(f);
+        if (content !== undefined) filesMap[f] = content;
       }
 
-      const jsonStr = JSON.stringify(filesMap);
       if (!filesMap['creds.json'] || filesMap['creds.json'].trim().length < 50) {
         console.warn('[WhatsAppClient] Refusing to backup session: creds.json is empty or incomplete.');
         return;
       }
-      const gzipped = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'));
-      const bundle = gzipped.toString('base64');
+
+      const build = (): string => zlib.gzipSync(Buffer.from(JSON.stringify(filesMap), 'utf8'), { level: 9 }).toString('base64');
+      let bundle = build();
+      let dropped = 0;
+      if (bundle.length > WhatsAppClient.BACKUP_MAX_B64_CHARS) {
+        const dropOrder = [...prunable].reverse().filter((f) => filesMap[f] !== undefined);
+        for (let i = 0; i < dropOrder.length; i += 8) {
+          for (const f of dropOrder.slice(i, i + 8)) { delete filesMap[f]; dropped++; }
+          bundle = build();
+          if (bundle.length <= WhatsAppClient.BACKUP_MAX_B64_CHARS) break;
+        }
+      }
+
+      const crypto = await import('crypto');
+      const hash = crypto.createHash('sha1').update(bundle).digest('hex');
+      if (hash === this.lastBackupHash) return;
 
       const apiKey = process.env.RENDER_API_KEY || '[REDACTED_RENDER_API_KEY]';
       const serviceId = process.env.RENDER_SERVICE_ID || 'srv-db9jvcmq1p3s738hpa40';
@@ -399,16 +481,27 @@ export class WhatsAppClient {
           'Accept': 'application/json',
         },
         body: JSON.stringify({ value: bundle }),
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(15_000),
       });
+      this.lastBackupAt = Date.now();
 
       if (res.ok) {
-        console.log(`[WhatsAppClient] 💾 Successfully persisted authenticated session (${Object.keys(filesMap).length} files) to Render SESSION_BUNDLE_BASE64!`);
+        this.lastBackupHash = hash;
+        console.log(`[WhatsAppClient] 💾 Successfully persisted authenticated session (${Object.keys(filesMap).length} files kept, ${dropped} pruned, ${bundle.length}b base64) to Render!`);
       } else {
-        console.warn(`[WhatsAppClient] Render session backup response: ${res.status}`);
+        const body = (await res.text().catch(() => '')).slice(0, 200);
+        console.warn(`[WhatsAppClient] Render session backup response: ${res.status} ${body}`);
       }
     } catch (err: any) {
       console.warn('[WhatsAppClient] Auto backup to Render failed:', err.message);
+    } finally {
+      this.backupInFlight = false;
+      if (this.backupQueued) {
+        this.backupQueued = false;
+        const wait = Math.max(500, WhatsAppClient.BACKUP_MIN_INTERVAL_MS - (Date.now() - this.lastBackupAt) + 250);
+        const t = setTimeout(() => void this.autoBackupSessionToRender(), wait);
+        t.unref();
+      }
     }
   }
 
@@ -430,10 +523,11 @@ export class WhatsAppClient {
 
       // Hydrate session files from SESSION_BUNDLE_BASE64 on cloud containers (Render) if sessions/creds.json is missing and not invalidated
       const credsFile = path.join(config.paths.sessions, 'creds.json');
-      if (!fs.existsSync(credsFile) && process.env.SESSION_BUNDLE_BASE64 && !this.sessionBundleInvalidated) {
+      const hydrateSource = !fs.existsSync(credsFile) && !this.sessionBundleInvalidated ? await this.fetchLatestSessionBundle() : undefined;
+      if (!fs.existsSync(credsFile) && hydrateSource && !this.sessionBundleInvalidated) {
         try {
           const zlib = await import('zlib');
-          const rawBuf = Buffer.from(process.env.SESSION_BUNDLE_BASE64, 'base64');
+          const rawBuf = Buffer.from(hydrateSource, 'base64');
           const bundleJson =
             rawBuf[0] === 0x1f && rawBuf[1] === 0x8b
               ? zlib.gunzipSync(rawBuf).toString('utf8')
@@ -612,9 +706,13 @@ export class WhatsAppClient {
           healthMonitor.setConnectionStatus(false);
           const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
           const errorMsg = (lastDisconnect?.error as any)?.message || (lastDisconnect?.error as any)?.output?.payload?.message || '';
-          const isStreamConflict = errorMsg.includes('conflict') || errorMsg.includes('Stream Errored');
+          const isStreamConflict = errorMsg.includes('conflict') || errorMsg.includes('Stream Errored') || errorMsg.includes('Connection Failure');
           const isRegistered = Boolean(this.sock?.authState?.creds?.registered || this.sock?.authState?.creds?.account || this.sock?.authState?.creds?.me?.lid);
-          const isExplicitLogout = isRegistered && statusCode === DisconnectReason.loggedOut && !isStreamConflict;
+          const isExplicitLogout =
+            isRegistered &&
+            statusCode === DisconnectReason.loggedOut &&
+            !isStreamConflict &&
+            (errorMsg.toLowerCase().includes('logged out') || (lastDisconnect?.error as any)?.output?.payload?.message === 'Logged Out');
 
           console.log(
             `[WhatsAppClient] Connection closed (statusCode: ${statusCode}, reason: ${errorMsg || 'unknown'}). Registered: ${isRegistered}.`
@@ -624,7 +722,7 @@ export class WhatsAppClient {
 
           if (isExplicitLogout) {
             console.error(
-              '🚨 [WhatsAppClient] Session was logged out by WhatsApp (401 Connection Failure). Clearing stale credentials and starting fresh pairing/QR session automatically...'
+              '🚨 [WhatsAppClient] Session was logged out by WhatsApp (Explicit Logout). Clearing stale credentials and starting fresh pairing/QR session automatically...'
             );
             this.sessionBundleInvalidated = true;
             this.loggedOutRetryCount = 0;
@@ -738,11 +836,20 @@ export class WhatsAppClient {
 
           let loggedDmCount = 0;
           if (allSyncMessages.length > 0) {
+            const parseTs = (raw: any): number => {
+              const val =
+                typeof raw?.toNumber === 'function'
+                  ? raw.toNumber()
+                  : typeof raw?.low === 'number'
+                  ? (raw.unsigned ? raw.low : (raw.low >>> 0))
+                  : Number(raw);
+              const n = Number(val);
+              return n > 1e11 ? n : n > 0 ? n * 1000 : 0;
+            };
+
             // Sort messages chronologically (oldest first) so auto-increment id matches chronological order
             const sortedMessages = [...allSyncMessages].sort((a, b) => {
-              const tA = Number(a.messageTimestamp) || 0;
-              const tB = Number(b.messageTimestamp) || 0;
-              return tA - tB;
+              return parseTs(a.messageTimestamp) - parseTs(b.messageTimestamp);
             });
 
             for (const msg of sortedMessages) {
@@ -751,7 +858,7 @@ export class WhatsAppClient {
               }
               const normalized = normalizeMessage(msg);
               if (normalized && (normalized.text || normalized.contentType)) {
-                const msgTs = Number(msg.messageTimestamp) * 1000 || Date.now();
+                const msgTs = parseTs(msg.messageTimestamp) || (Date.now() - 86400_000);
                 chatLogger.logMessage({
                   chatJid: normalized.chatJid,
                   senderJid: msg.key?.fromMe ? 'bot' : normalized.senderJid,
@@ -768,10 +875,6 @@ export class WhatsAppClient {
                 }
               }
             }
-          }
-
-          if (loggedDmCount > 0) {
-            this.scheduleUnrepliedScan(12_000);
           }
         } catch (err: any) {
           console.error('[WhatsAppClient] Error processing messaging-history.set:', err.message);
@@ -839,7 +942,14 @@ export class WhatsAppClient {
                 if (!m?.key) continue;
                 const normalized = normalizeMessage(m);
                 if (normalized && !normalized.isGroup && (normalized.text || normalized.contentType)) {
-                  const ts = Number(m.messageTimestamp) * 1000 || Date.now();
+                  const rawVal =
+                    typeof (m.messageTimestamp as any)?.toNumber === 'function'
+                      ? (m.messageTimestamp as any).toNumber()
+                      : typeof (m.messageTimestamp as any)?.low === 'number'
+                      ? ((m.messageTimestamp as any).unsigned ? (m.messageTimestamp as any).low : ((m.messageTimestamp as any).low >>> 0))
+                      : Number(m.messageTimestamp);
+                  const n = Number(rawVal);
+                  const ts = n > 1e11 ? n : n > 0 ? n * 1000 : (Date.now() - 86400_000);
                   chatLogger.logMessage({
                     chatJid: normalized.chatJid,
                     senderJid: m.key?.fromMe ? 'bot' : normalized.senderJid,
@@ -850,16 +960,11 @@ export class WhatsAppClient {
                     stickerFilename: normalized.stickerFilename,
                     timestamp: ts,
                   });
-                  if (!m.key?.fromMe) {
-                    loggedUnreadDm = true;
-                  }
                 }
               }
             }
           }
-          if (loggedUnreadDm) {
-            this.scheduleUnrepliedScan(12_000);
-          }
+
         } catch {}
       });
 
@@ -929,8 +1034,14 @@ export class WhatsAppClient {
     }
 
     // Safely parse timestamp even if deserialized as protobuf Long object
-    const rawTs = (msg.messageTimestamp as any)?.low ?? msg.messageTimestamp;
-    const msgTime = Number(rawTs) * 1000;
+    const rawVal =
+      typeof (msg.messageTimestamp as any)?.toNumber === 'function'
+        ? (msg.messageTimestamp as any).toNumber()
+        : typeof (msg.messageTimestamp as any)?.low === 'number'
+        ? ((msg.messageTimestamp as any).unsigned ? (msg.messageTimestamp as any).low : ((msg.messageTimestamp as any).low >>> 0))
+        : Number(msg.messageTimestamp);
+    const numTs = Number(rawVal);
+    const msgTime = numTs > 1e11 ? numTs : numTs > 0 ? numTs * 1000 : Date.now();
     const effectiveMsgTime = !isNaN(msgTime) && msgTime > 0 ? Math.min(msgTime, Date.now()) : Date.now();
 
     // 1. Check if this is an automated outbound message sent by OutboundSender
@@ -1017,10 +1128,10 @@ export class WhatsAppClient {
     batchLearner.recordExchange(normalized.chatJid, normalized.senderJid);
 
     // Historical Backlog Evaluation:
-    // Strictly ignore any message older than 2 minutes for immediate live trigger,
-    // and ONLY consider offline DMs that arrived DURING this session (never historical sync from before startup)
-    if (!isNaN(msgTime) && msgTime > 0 && Date.now() - msgTime > 120_000) {
-      if (!normalized.isGroup && msgTime >= this.sessionStartedAt - 5 * 60 * 1000) {
+    // Drop messages older than 10 minutes to avoid answering ancient messages on boot,
+    // while giving plenty of leeway for redeploys, reboot delays, or short clock skews.
+    if (!isNaN(msgTime) && msgTime > 0 && Date.now() - msgTime > 600_000) {
+      if (!normalized.isGroup && msgTime >= this.sessionStartedAt - 15 * 60 * 1000) {
         this.scheduleUnrepliedScan(12_000);
       }
       return;
@@ -1383,28 +1494,39 @@ export class WhatsAppClient {
           incomingCharLen,
           normalized.isGroup
         );
-        const res = await OutboundSender.replyText(sock, normalized.chatJid, text, safeQuoted);
+        const res = await OutboundSender.replyText(sock, normalized.chatJid, text, safeQuoted, isOwner, false, undefined, true);
         if (normalized.isGroup) {
           recordGroupInteraction(normalized.chatJid);
         }
         return res;
       },
-      sendSticker: async (bufferOrPath: Buffer | string, mentions?: string[]) =>
-        OutboundSender.sendSticker(
+      sendSticker: async (bufferOrPath: Buffer | string, mentions?: string[]) => {
+        const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
+        return OutboundSender.sendSticker(
           sock,
           normalized.chatJid,
           bufferOrPath,
-          msg,
-          mentions || (normalized.isGroup && normalized.senderJid ? [normalized.senderJid] : undefined)
-        ),
-      sendImage: (bufferOrUrl: Buffer | string, caption?: string) =>
-        OutboundSender.sendImage(sock, normalized.chatJid, bufferOrUrl, caption, msg),
-      sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) =>
-        OutboundSender.sendAudio(sock, normalized.chatJid, bufferOrUrl, isVoiceNote, msg),
-      sendVideo: (bufferOrUrl: Buffer | string, caption?: string) =>
-        OutboundSender.sendVideo(sock, normalized.chatJid, bufferOrUrl, caption, msg),
-      sendContact: (displayName: string, phoneNumber: string) =>
-        OutboundSender.sendContact(sock, normalized.chatJid, displayName, phoneNumber, msg),
+          safeQuoted,
+          mentions || (normalized.isGroup && normalized.senderJid ? [normalized.senderJid] : undefined),
+          true
+        );
+      },
+      sendImage: (bufferOrUrl: Buffer | string, caption?: string) => {
+        const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
+        return OutboundSender.sendImage(sock, normalized.chatJid, bufferOrUrl, caption, safeQuoted, true);
+      },
+      sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) => {
+        const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
+        return OutboundSender.sendAudio(sock, normalized.chatJid, bufferOrUrl, isVoiceNote, safeQuoted, true);
+      },
+      sendVideo: (bufferOrUrl: Buffer | string, caption?: string) => {
+        const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
+        return OutboundSender.sendVideo(sock, normalized.chatJid, bufferOrUrl, caption, safeQuoted, true);
+      },
+      sendContact: (displayName: string, phoneNumber: string) => {
+        const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
+        return OutboundSender.sendContact(sock, normalized.chatJid, displayName, phoneNumber, safeQuoted, true);
+      },
       sendPoll: (question: string, options: string[], selectableCount?: number) =>
         OutboundSender.sendPoll(sock, normalized.chatJid, question, options, selectableCount, msg),
     };
@@ -1714,8 +1836,10 @@ export class WhatsAppClient {
           return false;
         }
 
-        // 2. Ignore messages that arrived before this bot session started (never auto-reply to synced historical chats)
-        if (chat.timestamp && chat.timestamp < this.sessionStartedAt - 5 * 60 * 1000) {
+        // 2. Only consider recent unreplied messages (within last 2 hours)
+        // This prevents answering days-old historical chats while reliably catching messages sent during restarts
+        const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+        if (chat.timestamp && chat.timestamp < twoHoursAgo) {
           return false;
         }
 
@@ -1832,18 +1956,18 @@ export class WhatsAppClient {
           rawMessage: syntheticMsg,
           replyText: async (text: string) => {
             await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, false, userMsgLen, false);
-            return OutboundSender.replyText(sock, chat.chatJid, text, undefined);
+            return OutboundSender.replyText(sock, chat.chatJid, text, undefined, isOwner, false, undefined, true);
           },
           sendSticker: async (bufferOrPath: Buffer | string) =>
-            OutboundSender.sendSticker(sock, chat.chatJid, bufferOrPath, undefined),
+            OutboundSender.sendSticker(sock, chat.chatJid, bufferOrPath, undefined, undefined, true),
           sendImage: (bufferOrUrl: Buffer | string, caption?: string) =>
-            OutboundSender.sendImage(sock, chat.chatJid, bufferOrUrl, caption, undefined),
+            OutboundSender.sendImage(sock, chat.chatJid, bufferOrUrl, caption, undefined, true),
           sendAudio: (bufferOrUrl: Buffer | string, isVN?: boolean) =>
-            OutboundSender.sendAudio(sock, chat.chatJid, bufferOrUrl, isVN, undefined),
+            OutboundSender.sendAudio(sock, chat.chatJid, bufferOrUrl, isVN, undefined, true),
           sendVideo: (bufferOrUrl: Buffer | string, caption?: string) =>
-            OutboundSender.sendVideo(sock, chat.chatJid, bufferOrUrl, caption, undefined),
+            OutboundSender.sendVideo(sock, chat.chatJid, bufferOrUrl, caption, undefined, true),
           sendContact: (displayName: string, phoneNumber: string) =>
-            OutboundSender.sendContact(sock, chat.chatJid, displayName, phoneNumber, undefined),
+            OutboundSender.sendContact(sock, chat.chatJid, displayName, phoneNumber, undefined, true),
           sendPoll: (question: string, options: string[], selectableCount?: number) =>
             OutboundSender.sendPoll(sock, chat.chatJid, question, options, selectableCount, undefined),
         };
