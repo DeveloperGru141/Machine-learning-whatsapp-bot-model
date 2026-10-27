@@ -32,7 +32,7 @@ export class ChatLogger {
     WHERE filename = ?
   `);
 
-  public logMessage(input: LogMessageInput): void {
+  public logMessage(input: LogMessageInput): number | null {
     try {
       let sanitizedText: string | null = null;
       let hasSensitive = false;
@@ -43,7 +43,7 @@ export class ChatLogger {
       }
       const isNoise = (hasSensitive || chatCleaner.isNoise(sanitizedText, input.contentType)) ? 1 : 0;
 
-      this.insertLogStmt.run(
+      const result = this.insertLogStmt.run(
         input.chatJid,
         input.senderJid,
         input.senderName,
@@ -60,14 +60,18 @@ export class ChatLogger {
       if (input.contentType === 'sticker' && input.stickerFilename) {
         this.learnStickerPatternFromContext(input.chatJid, input.stickerFilename);
       }
+      return Number(result.lastInsertRowid);
     } catch (err) {
       console.error('Failed to log message:', err);
+      return null;
     }
   }
 
-  public logOutboundMessage(chatJid: string, text: string): void {
+  public logOutboundMessage(chatJid: string, text: string, messageId?: string | null): void {
     try {
-      const scrubbed = sensitiveDataFilter.scrubSensitiveText(text).scrubbedText;
+      const scrubResult = sensitiveDataFilter.scrubSensitiveText(text);
+      const scrubbed = scrubResult.scrubbedText;
+      const isNoise = scrubResult.isSensitive || chatCleaner.isNoise(scrubbed, 'text');
       this.insertLogStmt.run(
         chatJid,
         'bot',
@@ -76,12 +80,92 @@ export class ChatLogger {
         'text',
         scrubbed,
         null,
-        0,
+        isNoise ? 1 : 0,
         Date.now(),
-        null
+        messageId ?? null
       );
     } catch (err) {
       console.error('Failed to log outbound message:', err);
+    }
+  }
+
+  public logOutboundMedia(chatJid: string, contentType: string, messageId?: string | null): void {
+    try {
+      this.insertLogStmt.run(
+        chatJid,
+        'bot',
+        config.bot.name,
+        chatJid.endsWith('@g.us') ? 1 : 0,
+        contentType,
+        null,
+        null,
+        0,
+        Date.now(),
+        messageId ?? null
+      );
+    } catch (err) {
+      console.error('Failed to log outbound media:', err);
+    }
+  }
+
+  public parseTrainingConsentDirective(text: string): boolean | null {
+    const command = (text || '').trim().toLowerCase().replace(/^\//, '!');
+    if (/^!?training\s+(?:consent|opt[ -]?in|allow)$/.test(command)) return true;
+    if (/^!?training\s+(?:forget|revoke|opt[ -]?out|stop)$/.test(command)) return false;
+    return null;
+  }
+
+  public setTrainingConsent(userJid: string, optedIn: boolean): void {
+    if (!userJid) return;
+    const alias = db.prepare('SELECT contact_jid FROM contact_jid_aliases WHERE alias_jid = ? LIMIT 1')
+      .get(userJid) as { contact_jid: string } | undefined;
+    const consentJid = alias?.contact_jid || userJid;
+    db.prepare(`
+      INSERT INTO training_consents (user_jid, opted_in, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(user_jid) DO UPDATE SET opted_in = excluded.opted_in, updated_at = excluded.updated_at
+    `).run(consentJid, optedIn ? 1 : 0, Date.now());
+  }
+
+  public claimUnrepliedAttempt(inboundLogId: number, chatJid: string, now = Date.now()): boolean {
+    try {
+      const result = db.prepare(`
+        INSERT INTO dm_reply_attempts (
+          inbound_log_id, chat_jid, status, attempts, last_attempt_at, next_attempt_at, last_error, completed_at
+        ) VALUES (?, ?, 'in_progress', 1, ?, 0, NULL, NULL)
+        ON CONFLICT(inbound_log_id) DO UPDATE SET
+          status = 'in_progress',
+          attempts = dm_reply_attempts.attempts + 1,
+          last_attempt_at = excluded.last_attempt_at,
+          last_error = NULL,
+          completed_at = NULL
+        WHERE dm_reply_attempts.status != 'sent'
+          AND dm_reply_attempts.next_attempt_at <= ?
+          AND (dm_reply_attempts.status != 'in_progress' OR dm_reply_attempts.last_attempt_at < ?)
+      `).run(inboundLogId, chatJid, now, now, now - 10 * 60_000);
+      return Number(result.changes) > 0;
+    } catch (err) {
+      console.warn('[ChatLogger] Could not claim unreplied DM attempt:', err);
+      return false;
+    }
+  }
+
+  public finishUnrepliedAttempt(inboundLogId: number, sent: boolean, error?: string, now = Date.now()): void {
+    try {
+      const row = db.prepare('SELECT attempts FROM dm_reply_attempts WHERE inbound_log_id = ?')
+        .get(inboundLogId) as { attempts: number } | undefined;
+      const attempts = Math.max(1, Number(row?.attempts || 1));
+      const retryDelay = Math.min(30 * 60_000, 60_000 * 2 ** Math.min(attempts - 1, 5));
+      const safeError = error
+        ? sensitiveDataFilter.scrubSensitiveText(error).scrubbedText.replace(/\s+/g, ' ').slice(0, 200)
+        : 'No outbound response was dispatched';
+      db.prepare(`
+        UPDATE dm_reply_attempts
+        SET status = ?, next_attempt_at = ?, last_error = ?, completed_at = ?
+        WHERE inbound_log_id = ?
+      `).run(sent ? 'sent' : 'failed', sent ? 0 : now + retryDelay, sent ? null : safeError, sent ? now : null, inboundLogId);
+    } catch (err) {
+      console.warn('[ChatLogger] Could not finish unreplied DM attempt:', err);
     }
   }
 

@@ -171,7 +171,7 @@ export class RagEngine {
       const words = queryLower.split(/\s+/).filter((w) => w.length > 3);
       if (words.length > 0) {
         const keyword = words[0];
-        const logMatches = memoryService.searchChatLogs(keyword, chatJid);
+        const logMatches = memoryService.searchChatLogs(keyword, chatJid ? [chatJid] : []);
         for (const lm of logMatches.slice(0, 2)) {
           if (lm.message_text && !documents.some((d) => d.snippet.includes(lm.message_text))) {
             documents.push({

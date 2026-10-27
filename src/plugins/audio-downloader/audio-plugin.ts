@@ -4,6 +4,7 @@ import { analyzeVoiceNote } from '../../core/transcription.js';
 import { getBotSetting, setBotSetting } from '../../memory/db.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
 import { config } from '../../config/env.js';
+import { OutboundSender } from '../../core/sender.js';
 
 export class AudioDownloaderPlugin implements IPlugin {
   name = 'AudioDownloader';
@@ -14,20 +15,20 @@ export class AudioDownloaderPlugin implements IPlugin {
     {
       name: 'send_voice_note',
       description:
-        'Synthesizes and sends a warm, natural, human-like voice note (audio message) in clear, fluent, articulate English directly to the WhatsApp chat using Neural TTS. Deliver voice note messages strictly in clear, professional, natural English (NO Pidgin, no slang). Use whenever someone asks for a voice note, asks you to speak, say something with voice, send a vn, or when a voice note reply is appropriate.',
+        'Synthesizes and sends a WhatsApp voice note using Neural TTS. Use this tool whenever the person asks you to record, make, leave, or send a voice note, voice message, VN, or audio message. Speak in the recipient’s current or saved preferred language and register; do not force English.',
       parameters: {
         type: 'object',
         properties: {
           message: {
             type: 'string',
-            description: 'The natural spoken message in clear, fluent English (NO Pidgin) to synthesize and send as a WhatsApp voice note.',
+            description: 'The final natural spoken reply in the recipient’s preferred language. Include only the user-facing message, never internal analysis or tool instructions.',
           },
         },
         required: ['message'],
       },
       execute: async (args: { message: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
-          const rawMessage = (args.message || '').trim();
+          const rawMessage = OutboundSender.sanitizeOutboundText(args.message || '').trim();
           if (!rawMessage) {
             return { success: false, message: 'Please provide the message text to speak in the voice note.' };
           }

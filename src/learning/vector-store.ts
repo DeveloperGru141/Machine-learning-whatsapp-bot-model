@@ -147,7 +147,7 @@ export class VectorStore {
   /**
    * Searches past group banter using local vector semantic search.
    */
-  public searchBanter(query: string, chatJid?: string, topK: number = 3): BanterSearchResult[] {
+  public searchBanter(query: string, chatJid?: string | string[], topK: number = 3): BanterSearchResult[] {
     if (!query || query.trim().length < 2) return [];
 
     try {
@@ -156,7 +156,11 @@ export class VectorStore {
       // Fetch candidates from group_banter_vectors
       let sql = `SELECT id, chat_jid, sender_name, message_text, context_text, vibe, embedding, timestamp FROM group_banter_vectors`;
       const params: any[] = [];
-      if (chatJid) {
+      if (Array.isArray(chatJid)) {
+        if (chatJid.length === 0) return [];
+        sql += ` WHERE chat_jid IN (${chatJid.map(() => '?').join(', ')})`;
+        params.push(...chatJid);
+      } else if (chatJid) {
         sql += ` WHERE chat_jid = ?`;
         params.push(chatJid);
       }

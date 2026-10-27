@@ -129,7 +129,9 @@ export class OutboundSender {
       .replace(/<(think|thought|analysis|reasoning|scratchpad|tool_call|function)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
       .replace(/<(think|thought|analysis|reasoning|scratchpad|tool_call|function)\b[^>]*>[\s\S]*$/gi, '')
       .replace(/<\/?(?:think|thought|analysis|reasoning|scratchpad|tool_call|function)\b[^>]*>/gi, '')
-      .replace(/(?:^|\n)\s*(?:analysis|thought|reasoning|chain of thought)\s*:\s*[\s\S]*$/i, '')
+      .replace(/^\s*(?:\[(?:analysis|thought|reasoning|scratchpad)\]|(?:private\s+)?(?:analysis|thought|reasoning|chain of thought|scratchpad))\s*[:：]\s*[\s\S]*?(?=\n\s*\n|\n\s*(?:final|answer)\s*[:：]|$)/i, '')
+      .replace(/^\s*(?:final|answer)\s*[:：]\s*/i, '')
+      .replace(/^\s*(?:let me think(?: through this)?|let['’]s (?:think|reason|analy[sz]e)|i need to (?:think|reason|analy[sz]e)|step[- ]by[- ]step reasoning)\b[^\n]*(?:\n(?!\s*$)[^\n]*)*(?=\n\s*\n|$)/i, '')
       .replace(/\b(?:reasoning_content|chain_of_thought)\s*[:=][\s\S]*$/gi, '');
 
     // 1. Scrub internal WhatsApp JIDs and domains
@@ -163,6 +165,28 @@ export class OutboundSender {
     return cleaned;
   }
 
+  /** Last-line sanitizer for text fields sent through any socket/plugin path. */
+  public static sanitizeOutgoingPayload(payload: any): any {
+    const visibleTextKeys = new Set([
+      'text', 'caption', 'conversation', 'title', 'description', 'footer', 'body',
+      'header', 'contenttext', 'buttontext', 'pollname', 'name', 'values',
+      'option', 'placeholder', 'subtitle',
+    ]);
+    const visit = (value: any, key = ''): any => {
+      if (typeof value === 'string') {
+        return visibleTextKeys.has(key.toLowerCase()) ? this.sanitizeOutboundText(value) : value;
+      }
+      if (!value || typeof value !== 'object' || Buffer.isBuffer(value) || ArrayBuffer.isView(value)) return value;
+      if (Array.isArray(value)) return value.map((item) => visit(item, key));
+      const result: Record<string, any> = {};
+      for (const [childKey, childValue] of Object.entries(value)) {
+        result[childKey] = visit(childValue, childKey);
+      }
+      return result;
+    };
+    return visit(payload);
+  }
+
   public static async replyText(
     sock: WASocket,
     chatJid: string,
@@ -193,7 +217,7 @@ export class OutboundSender {
         }
         const result = await currentSock.sendMessage(chatJid, payload, { quoted: safeQuoted });
         this.recordDispatchedId(result?.key?.id);
-        chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText);
+        chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText, result?.key?.id);
         this.trackDeliveryConfirmation(result, chatJid);
         return result;
       } catch (err: any) {
@@ -206,7 +230,7 @@ export class OutboundSender {
             }
             const result = await currentSock.sendMessage(chatJid, payload);
             this.recordDispatchedId(result?.key?.id);
-            chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText);
+            chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText, result?.key?.id);
             this.trackDeliveryConfirmation(result, chatJid);
             return result;
           } catch (innerErr: any) {
@@ -229,7 +253,7 @@ export class OutboundSender {
             console.log(`[OutboundSender] 🔄 Retrying outbound to ${chatJid} via fresh reconnected socket...`);
             const retryResult = await freshSock.sendMessage(chatJid, { text: cleanText });
             this.recordDispatchedId(retryResult?.key?.id);
-            chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText);
+            chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText, retryResult?.key?.id);
             this.trackDeliveryConfirmation(retryResult, chatJid);
             return retryResult;
           }
@@ -271,12 +295,14 @@ export class OutboundSender {
           safeQuoted ? { quoted: safeQuoted } : undefined
         );
         this.recordDispatchedId(res?.key?.id);
+        chatLogger.logOutboundMedia(chatJid, 'sticker', res?.key?.id);
         return res;
       } catch (err: any) {
         console.warn(`[OutboundSender] sendSticker with quoted failed (${err.message}), retrying directly with mentions...`);
         try {
           const res = await currentSock.sendMessage(chatJid, payload);
           this.recordDispatchedId(res?.key?.id);
+          chatLogger.logOutboundMedia(chatJid, 'sticker', res?.key?.id);
           return res;
         } catch (retryErr: any) {
           console.error(`[OutboundSender] Failed to send sticker directly to ${chatJid}:`, retryErr.message);
@@ -310,12 +336,14 @@ export class OutboundSender {
           { quoted: safeQuoted }
         );
         this.recordDispatchedId(res?.key?.id);
+        chatLogger.logOutboundMedia(chatJid, 'image', res?.key?.id);
         return res;
       } catch (err: any) {
         if (safeQuoted) {
           console.warn(`[OutboundSender] sendImage with quoted failed (${err.message}), retrying directly...`);
           const res = await sock.sendMessage(chatJid, { image: content, caption: cleanCaption });
           this.recordDispatchedId(res?.key?.id);
+          chatLogger.logOutboundMedia(chatJid, 'image', res?.key?.id);
           return res;
         }
         throw err;
@@ -362,6 +390,7 @@ export class OutboundSender {
           { quoted: safeQuoted }
         );
         this.recordDispatchedId(res?.key?.id);
+        chatLogger.logOutboundMedia(chatJid, 'audio', res?.key?.id);
         return res;
       } catch (err: any) {
         if (safeQuoted) {
@@ -372,6 +401,7 @@ export class OutboundSender {
             ptt: isVoiceNote,
           });
           this.recordDispatchedId(res?.key?.id);
+          chatLogger.logOutboundMedia(chatJid, 'audio', res?.key?.id);
           return res;
         }
         throw err;
@@ -397,7 +427,7 @@ export class OutboundSender {
 
     return antiBanEngine.scheduleDispatch(chatJid, async () => {
       try {
-        return await sock.sendMessage(
+        const res = await sock.sendMessage(
           chatJid,
           {
             video: content,
@@ -406,14 +436,20 @@ export class OutboundSender {
           },
           { quoted: safeQuoted }
         );
+        this.recordDispatchedId(res?.key?.id);
+        chatLogger.logOutboundMedia(chatJid, 'video', res?.key?.id);
+        return res;
       } catch (err: any) {
         if (safeQuoted) {
           console.warn(`[OutboundSender] sendVideo with quoted failed (${err.message}), retrying directly...`);
-          return await sock.sendMessage(chatJid, {
+          const res = await sock.sendMessage(chatJid, {
             video: content,
             caption: cleanCaption,
             mimetype: 'video/mp4',
           });
+          this.recordDispatchedId(res?.key?.id);
+          chatLogger.logOutboundMedia(chatJid, 'video', res?.key?.id);
+          return res;
         }
         throw err;
       }
@@ -440,7 +476,7 @@ export class OutboundSender {
       'END:VCARD';
 
     return antiBanEngine.scheduleDispatch(chatJid, async () => {
-      return await sock.sendMessage(
+      const res = await sock.sendMessage(
         chatJid,
         {
           contacts: {
@@ -450,6 +486,9 @@ export class OutboundSender {
         },
         { quoted: safeQuoted }
       );
+      this.recordDispatchedId(res?.key?.id);
+      chatLogger.logOutboundMedia(chatJid, 'contact', res?.key?.id);
+      return res;
     });
   }
 
@@ -483,7 +522,7 @@ export class OutboundSender {
         safeQuoted ? { quoted: safeQuoted } : undefined
       );
       this.recordDispatchedId(res?.key?.id);
-      chatLogger.logOutboundMessage(chatJid, `[Poll] ${question} (Options: ${cleanOptions.join(', ')})`);
+      chatLogger.logOutboundMessage(chatJid, `[Poll] ${question} (Options: ${cleanOptions.join(', ')})`, res?.key?.id);
       return res;
     });
   }

@@ -48,7 +48,7 @@ function formatDateForEspn(d: Date): string {
 export async function queryGoogleNewsRss(
   query: string,
   limit: number = 4
-): Promise<Array<{ title: string; date: string; snippet?: string }>> {
+): Promise<Array<{ title: string; date: string; snippet?: string; url?: string }>> {
   try {
     const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
     const res = await fetch(url, {
@@ -62,14 +62,15 @@ export async function queryGoogleNewsRss(
     if (!res.ok) return [];
 
     const xml = await res.text();
-    const items: Array<{ title: string; date: string; snippet?: string }> = [];
-    const itemRegex = /<item>[\s\S]*?<title>([\s\S]*?)<\/title>[\s\S]*?<pubDate>([\s\S]*?)<\/pubDate>(?:[\s\S]*?<description>([\s\S]*?)<\/description>)?/gi;
+    const items: Array<{ title: string; date: string; snippet?: string; url?: string }> = [];
+    const itemRegex = /<item>[\s\S]*?<title>([\s\S]*?)<\/title>[\s\S]*?<link>([\s\S]*?)<\/link>[\s\S]*?<pubDate>([\s\S]*?)<\/pubDate>(?:[\s\S]*?<description>([\s\S]*?)<\/description>)?/gi;
 
     let match: RegExpExecArray | null;
     while ((match = itemRegex.exec(xml)) !== null && items.length < limit) {
       const rawTitle = match[1] || '';
-      const rawDate = match[2] || '';
-      const rawDesc = match[3] || '';
+      const rawUrl = match[2] || '';
+      const rawDate = match[3] || '';
+      const rawDesc = match[4] || '';
 
       const cleanTitle = rawTitle
         .replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1')
@@ -86,12 +87,17 @@ export async function queryGoogleNewsRss(
         .replace(/&quot;/g, '"')
         .replace(/&#39;/g, "'")
         .trim();
+      const cleanUrl = rawUrl
+        .replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1')
+        .replace(/&amp;/g, '&')
+        .trim();
 
       if (cleanTitle.length > 5) {
         items.push({
           title: cleanTitle,
           date: rawDate.trim(),
           snippet: cleanDesc.length > 20 ? cleanDesc.slice(0, 200) : undefined,
+          url: /^https?:\/\//i.test(cleanUrl) ? cleanUrl : undefined,
         });
       }
     }
@@ -301,19 +307,22 @@ export class WebSearchPlugin implements IPlugin {
           console.log(`[WebSearch] Performing web lookup: "${rawQuery}"`);
 
           const lower = rawQuery.toLowerCase();
+          const requiresLiveLookup = /\b(?:today|tonight|right now|currently|current|latest|most recent|this season|season to date|so far this season|current season|as of now|this year|this week|this month|live score|live scores|up to date|how many\s+(?:goals?|points?|wins?|losses?|assists?|appearances?|matches|games|titles|records))\b/i.test(rawQuery);
 
           // 0. Autonomous Local RAG Interceptor: If this is an internal query matching local user facts, contacts, or group rules, return local data immediately
-          try {
-            const ragCheck = await ragEngine.retrieveContext(rawQuery, ctx.chatJid, ctx.senderJid, 3);
-            if (ragCheck.hasMatches && ragCheck.documents.some((d) => d.relevanceScore >= 0.5)) {
-              console.log(`[WebSearch] 🎯 Local RAG match found for "${rawQuery}". Suppressing external web search.`);
-              return {
-                success: true,
-                message: `[Internal Verified Database Match - No Web Search Needed]:\n${ragCheck.formattedContext}\n\n[State the answer clearly and directly from this internal verified data without searching the web.]`,
-                data: ragCheck.documents,
-              };
-            }
-          } catch {}
+          if (!requiresLiveLookup) {
+            try {
+              const ragCheck = await ragEngine.retrieveContext(rawQuery, ctx.chatJid, ctx.senderJid, 3);
+              if (ragCheck.hasMatches && ragCheck.documents.some((d) => d.relevanceScore >= 0.5)) {
+                console.log(`[WebSearch] 🎯 Local RAG match found for "${rawQuery}". Suppressing external web search.`);
+                return {
+                  success: true,
+                  message: `[Internal Verified Database Match - No Web Search Needed]:\n${ragCheck.formattedContext}\n\n[State the answer clearly and directly from this internal verified data without searching the web.]`,
+                  data: ragCheck.documents,
+                };
+              }
+            } catch {}
+          }
 
           // Auto-detect football score queries: delegate to football score engine
           if (
@@ -394,6 +403,28 @@ export class WebSearchPlugin implements IPlugin {
             if (htmlRes.ok) {
               const html = await htmlRes.text();
               const snippets: string[] = [];
+              const searchResults: Array<{ title: string; url: string }> = [];
+
+              const titleRegex = /<a\b(?=[^>]*\bclass=["'][^"']*result__a[^"']*["'])(?=[^>]*\bhref=["']([^"']+)["'])[^>]*>([\s\S]*?)<\/a>/gi;
+              let titleMatch: RegExpExecArray | null;
+              while ((titleMatch = titleRegex.exec(html)) !== null && searchResults.length < 5) {
+                const title = titleMatch[2]
+                  .replace(/<[^>]+>/g, '')
+                  .replace(/&quot;/g, '"')
+                  .replace(/&#x27;/g, "'")
+                  .replace(/&amp;/g, '&')
+                  .replace(/&lt;/g, '<')
+                  .replace(/&gt;/g, '>')
+                  .replace(/\s+/g, ' ')
+                  .trim();
+                let url = titleMatch[1].replace(/&amp;/g, '&');
+                try {
+                  const parsed = new URL(url, 'https://duckduckgo.com');
+                  url = parsed.searchParams.get('uddg') || parsed.href;
+                  if (!/^https?:\/\//i.test(url)) url = parsed.href;
+                } catch {}
+                if (title && /^https?:\/\//i.test(url)) searchResults.push({ title, url });
+              }
 
               // Extract snippet blocks from DDG HTML search results
               const snippetRegex = /<a\s+class="result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
@@ -416,10 +447,14 @@ export class WebSearchPlugin implements IPlugin {
 
               if (snippets.length > 0) {
                 console.log(`[WebSearch] Found ${snippets.length} web snippet(s) for "${rawQuery}"`);
+                const formatted = snippets.map((snippet, index) => {
+                  const source = searchResults[index];
+                  return `${index + 1}. ${source ? `${source.title}: ` : ''}${snippet}${source ? ` (Source: ${source.url})` : ''}`;
+                }).join('\n\n');
                 return {
                   success: true,
-                  message: `Live Web Search Results for "${rawQuery}":\n` + snippets.map((s, i) => `${i + 1}. ${s}`).join('\n\n') + '\n\n[Search complete. Provide direct concise answer now.]',
-                  data: snippets,
+                  message: `Live Web Search Results for "${rawQuery}":\n${formatted}\n\n[Search complete. Use only these current results for changing facts and include a source link when useful.]`,
+                  data: snippets.map((snippet, index) => ({ ...searchResults[index], snippet })),
                 };
               }
             }
@@ -433,7 +468,7 @@ export class WebSearchPlugin implements IPlugin {
             if (newsItems.length > 0) {
               console.log(`[WebSearch] Found ${newsItems.length} news snippet(s) via Google News RSS for "${rawQuery}"`);
               const formattedNews = newsItems
-                .map((n, i) => `${i + 1}. ${n.title} (${n.date})${n.snippet ? `\n   ${n.snippet}` : ''}`)
+                .map((n, i) => `${i + 1}. ${n.title} (${n.date})${n.snippet ? `\n   ${n.snippet}` : ''}${n.url ? `\n   Source: ${n.url}` : ''}`)
                 .join('\n\n');
               return {
                 success: true,
@@ -443,59 +478,62 @@ export class WebSearchPlugin implements IPlugin {
             }
           } catch {}
 
-          // 4. Fallback: Wikipedia REST summary
-          try {
-            const cleanTopic = rawQuery.replace(/^(who is|what is|whats the|define|tell me about)\s+/i, '').trim();
-            const wikiRes = await fetch(
-              `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(cleanTopic)}`,
-              {
-                headers: { 'User-Agent': 'WhatsAppBot/1.0' },
-                signal: AbortSignal.timeout(3000),
-              }
-            );
-            if (wikiRes.ok) {
-              const wikiData = (await wikiRes.json()) as any;
-              if (wikiData.extract) {
-                return {
-                  success: true,
-                  message: `Wikipedia Summary for "${cleanTopic}":\n${wikiData.extract}`,
-                  data: [wikiData.extract],
-                };
-              }
-            }
-          } catch {}
-
-          // 5. Fallback: DuckDuckGo Instant Answer API
-          try {
-            const encodedQuery = encodeURIComponent(rawQuery);
-            const url = `https://api.duckduckgo.com/?q=${encodedQuery}&format=json&no_html=1&skip_disambig=1`;
-            const res = await fetch(url, {
-              headers: { 'User-Agent': 'WhatsAppBot/1.0' },
-              signal: AbortSignal.timeout(3000),
-            });
-
-            if (res.ok) {
-              const data = (await res.json()) as any;
-              const results: string[] = [];
-
-              if (data.AbstractText) results.push(data.AbstractText);
-              if (data.Answer) results.push(data.Answer);
-
-              if (Array.isArray(data.RelatedTopics)) {
-                for (const topic of data.RelatedTopics.slice(0, 3)) {
-                  if (topic.Text) results.push(topic.Text);
+          // Static encyclopedic fallbacks are not acceptable evidence for changing facts.
+          if (!requiresLiveLookup) {
+            // 4. Fallback: Wikipedia REST summary
+            try {
+              const cleanTopic = rawQuery.replace(/^(who is|what is|whats the|define|tell me about)\s+/i, '').trim();
+              const wikiRes = await fetch(
+                `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(cleanTopic)}`,
+                {
+                  headers: { 'User-Agent': 'WhatsAppBot/1.0' },
+                  signal: AbortSignal.timeout(3000),
+                }
+              );
+              if (wikiRes.ok) {
+                const wikiData = (await wikiRes.json()) as any;
+                if (wikiData.extract) {
+                  return {
+                    success: true,
+                    message: `Wikipedia Summary for "${cleanTopic}":\n${wikiData.extract}`,
+                    data: [wikiData.extract],
+                  };
                 }
               }
+            } catch {}
 
-              if (results.length > 0) {
-                return {
-                  success: true,
-                  message: `Search Summary for "${rawQuery}":\n${results.join('\n')}`,
-                  data: results,
-                };
+            // 5. Fallback: DuckDuckGo Instant Answer API
+            try {
+              const encodedQuery = encodeURIComponent(rawQuery);
+              const url = `https://api.duckduckgo.com/?q=${encodedQuery}&format=json&no_html=1&skip_disambig=1`;
+              const res = await fetch(url, {
+                headers: { 'User-Agent': 'WhatsAppBot/1.0' },
+                signal: AbortSignal.timeout(3000),
+              });
+
+              if (res.ok) {
+                const data = (await res.json()) as any;
+                const results: string[] = [];
+
+                if (data.AbstractText) results.push(data.AbstractText);
+                if (data.Answer) results.push(data.Answer);
+
+                if (Array.isArray(data.RelatedTopics)) {
+                  for (const topic of data.RelatedTopics.slice(0, 3)) {
+                    if (topic.Text) results.push(topic.Text);
+                  }
+                }
+
+                if (results.length > 0) {
+                  return {
+                    success: true,
+                    message: `Search Summary for "${rawQuery}":\n${results.join('\n')}`,
+                    data: results,
+                  };
+                }
               }
-            }
-          } catch {}
+            } catch {}
+          }
 
           // Safe, anti-hallucination termination
           return {

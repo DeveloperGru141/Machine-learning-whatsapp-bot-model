@@ -192,7 +192,15 @@ export class PluginRegistry {
       text.includes('news') ||
       text.includes('latest') ||
       text.includes('current') ||
-      text.includes('update on')
+      text.includes('update on') ||
+      text.includes('this season') ||
+      text.includes('season to date') ||
+      text.includes('so far this season') ||
+      text.includes('goals scored') ||
+      text.includes('how many goals') ||
+      text.includes('scored this season') ||
+      text.includes('current stats') ||
+      text.includes('latest stats')
     ) {
       selected.add('web_search');
     }
@@ -379,6 +387,12 @@ export class PluginRegistry {
       text.includes('said in the group') ||
       text.includes('chat section') ||
       text.includes('across chat') ||
+      text.includes('somewhere else') ||
+      text.includes('in another chat') ||
+      text.includes('from another chat') ||
+      text.includes('elsewhere') ||
+      text.includes('across whatsapp') ||
+      text.includes('across my chats') ||
       text.includes('other chat') ||
       text.includes('other group') ||
       text.includes('contribute') ||

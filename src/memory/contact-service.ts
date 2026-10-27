@@ -485,54 +485,63 @@ export class ContactService {
   }
 
   /**
-   * Retrieves all non-group chats where the latest recorded message was from a user (awaiting bot reply).
-   * Orders by newest timestamp first so active/recent unreplied DMs are answered promptly.
+   * Retrieves the newest eligible inbound message per direct chat when no valid bot reply follows it.
+   * Returns oldest outstanding messages first so a long backlog is processed fairly.
    */
-  public getUnrepliedChats(): UnrepliedChat[] {
+  public getUnrepliedChats(
+    afterTimestamp: number = Date.now() - 30 * 24 * 60 * 60 * 1000,
+    limit: number = 100,
+    now: number = Date.now()
+  ): UnrepliedChat[] {
     try {
       const sql = `
-        WITH LastPerChat AS (
-          SELECT 
-            id,
-            chat_jid,
-            sender_jid,
-            sender_name,
-            is_group,
-            content_type,
-            message_text,
-            timestamp,
-            ROW_NUMBER() OVER (PARTITION BY chat_jid ORDER BY timestamp DESC, id DESC) as rn
-          FROM chat_logs
-          WHERE is_group = 0
-            AND chat_jid NOT LIKE '%@g.us'
-            AND chat_jid NOT LIKE '%broadcast%'
-            AND chat_jid NOT LIKE '2347058967815%'
-            AND chat_jid NOT LIKE '2349014896714%'
-            AND chat_jid NOT LIKE '230652813291679%'
-            AND NOT (
-              sender_jid = 'bot'
-              AND (
-                COALESCE(message_text, '') LIKE 'network slow small%'
-                OR COALESCE(message_text, '') LIKE '%<tool_call>%'
-                OR COALESCE(message_text, '') LIKE '⚠️%'
-              )
-            )
+        WITH latest_inbound AS (
+          SELECT l.id, l.chat_jid, l.sender_jid, l.sender_name, l.content_type, l.message_text, l.timestamp, l.is_noise,
+                 ROW_NUMBER() OVER (PARTITION BY l.chat_jid ORDER BY l.timestamp DESC, l.id DESC) AS rn
+          FROM chat_logs l
+          WHERE l.is_group = 0
+            AND l.sender_jid != 'bot'
+            AND l.chat_jid NOT LIKE '%@g.us'
+            AND l.chat_jid NOT LIKE '%broadcast%'
+            AND l.chat_jid NOT LIKE '2347058967815%'
+            AND l.chat_jid NOT LIKE '2349014896714%'
+            AND l.chat_jid NOT LIKE '230652813291679%'
+            AND l.timestamp >= ?
         )
-        SELECT * FROM LastPerChat
-        WHERE rn = 1 
-          AND sender_jid != 'bot'
-          AND (
-            (message_text IS NOT NULL AND TRIM(message_text) != '')
-            OR content_type IN ('audio', 'image', 'video', 'document', 'sticker')
+        SELECT l.*
+        FROM latest_inbound l
+        LEFT JOIN dm_reply_attempts a ON a.inbound_log_id = l.id
+        WHERE l.rn = 1
+          AND COALESCE(l.is_noise, 0) = 0
+          AND ((l.message_text IS NOT NULL AND TRIM(l.message_text) != '')
+            OR l.content_type IN ('audio', 'image', 'video', 'document', 'sticker', 'contact'))
+          AND (a.inbound_log_id IS NULL OR (
+            a.status != 'sent'
+            AND a.next_attempt_at <= ?
+          AND (a.status != 'in_progress' OR a.last_attempt_at < ?)
+          ))
+          AND NOT EXISTS (
+            SELECT 1 FROM chat_logs b
+            WHERE b.chat_jid = l.chat_jid
+              AND b.sender_jid = 'bot'
+              AND (b.timestamp > l.timestamp OR (b.timestamp = l.timestamp AND b.id > l.id))
+              AND (
+                (b.message_text IS NOT NULL AND TRIM(b.message_text) != ''
+                  AND LOWER(b.message_text) NOT LIKE 'network slow small%'
+                  AND LOWER(b.message_text) NOT LIKE 'take a breather%'
+                  AND LOWER(b.message_text) NOT LIKE '%<tool_call>%'
+                  AND b.message_text NOT LIKE '⚠️%')
+                OR b.content_type IN ('audio', 'image', 'video', 'document', 'sticker', 'contact', 'poll'))
           )
-        ORDER BY timestamp DESC;
+        ORDER BY l.timestamp ASC, l.id ASC
+        LIMIT ?;
       `;
-      const rows = db.prepare(sql).all() as Array<{
+      const rows = db.prepare(sql).all(afterTimestamp, now, now - 10 * 60_000, Math.min(Math.max(limit, 1), 250)) as Array<{
         id: number;
         chat_jid: string;
         sender_jid: string;
-        sender_name: string;
-        message_text: string;
+        sender_name: string | null;
+        message_text: string | null;
         timestamp: number;
         content_type: string;
       }>;
@@ -540,7 +549,7 @@ export class ContactService {
       return rows.map((r) => {
         let fallbackText = '[User sent a message]';
         if (r.content_type === 'audio') {
-          fallbackText = '[User sent a voice note — reply to them with a warm, natural English voice note]';
+          fallbackText = '[User sent a voice note — respond in their current or saved preferred language]';
         } else if (r.content_type === 'image') {
           fallbackText = '[User sent an image — acknowledge it warmly]';
         } else if (r.content_type === 'sticker') {

@@ -1,7 +1,6 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { memoryService } from '../../memory/memory-service.js';
-import { db, getRecentAutonomousActions, findKnownGroup } from '../../memory/db.js';
-import { userProfileManager } from '../../memory/user-profiles.js';
+import { db, findKnownGroup } from '../../memory/db.js';
 import { vectorStore } from '../../learning/vector-store.js';
 
 export class MemoryPlugin implements IPlugin {
@@ -12,7 +11,7 @@ export class MemoryPlugin implements IPlugin {
   tools: BotTool[] = [
     {
       name: 'search_memory',
-      description: 'Searches the database of past conversations, messages, and facts discussed previously in this chat.',
+      description: 'Searches past messages in this chat. Set all_chats=true to also search chats and groups where you have participated. Chats you were not part of are outside your memory scope.',
       parameters: {
         type: 'object',
         properties: {
@@ -20,11 +19,18 @@ export class MemoryPlugin implements IPlugin {
             type: 'string',
             description: 'Keywords, topic, or question to search the chat history for.',
           },
+          all_chats: {
+            type: 'boolean',
+            description: 'Also search other chats and groups where you have participated.',
+          },
         },
         required: ['query'],
       },
-      execute: async (args: { query: string }, ctx: ExecutionContext): Promise<ToolResult> => {
-        const matches = memoryService.searchChatLogs(args.query, ctx.chatJid);
+      execute: async (args: { query: string; all_chats?: boolean }, ctx: ExecutionContext): Promise<ToolResult> => {
+        const chatJids = args.all_chats
+          ? memoryService.getChatsForParticipant(ctx.senderJid, ctx.chatJid)
+          : [ctx.chatJid];
+        const matches = memoryService.searchChatLogs(args.query, chatJids);
         if (matches.length === 0) {
           return {
             success: true,
@@ -85,7 +91,7 @@ export class MemoryPlugin implements IPlugin {
     {
       name: 'get_cross_chat_activity',
       description:
-        'Provides situational awareness of what the bot has been doing across all WhatsApp chats and groups: recent conversations, group interactions, admin moderation, and dispatched actions. Use when the owner or user asks what you have been doing across chats, which groups you are in, or what happened recently.',
+        'Recalls recent activity and completed bot actions in this chat and other chats or groups where you have participated. Chats you were not part of are outside your memory scope.',
       parameters: {
         type: 'object',
         properties: {
@@ -96,19 +102,25 @@ export class MemoryPlugin implements IPlugin {
         },
       },
       execute: async (args: { limit?: number }, _ctx: ExecutionContext): Promise<ToolResult> => {
-        const isOwner = userProfileManager.isOwner(_ctx.senderJid);
-
         try {
           const limit = Math.min(Math.max(Number(args.limit) || 20, 5), 50);
+          const chatJids = memoryService.getChatsForParticipant(_ctx.senderJid, _ctx.chatJid);
+          const chatPlaceholders = chatJids.map(() => '?').join(', ');
 
-          // 1. Fetch recent exchanges across chats
+          // Only include chats where the requester has participated.
           const logs = db.prepare(`
             SELECT chat_jid, sender_name, sender_jid, message_text, is_group, timestamp
             FROM chat_logs
-            WHERE message_text NOT LIKE 'network slow small%'
+            WHERE chat_jid IN (${chatPlaceholders})
+              AND COALESCE(is_noise, 0) = 0
+              AND message_text NOT LIKE 'network slow small%'
               AND message_text NOT LIKE 'Take a breather small%'
+              AND LOWER(message_text) NOT LIKE '%<think%'
+              AND LOWER(message_text) NOT LIKE '%<analysis%'
+              AND LOWER(message_text) NOT LIKE '%<reasoning%'
+              AND LOWER(message_text) NOT LIKE '%<tool_call%'
             ORDER BY id DESC LIMIT ?
-          `).all(limit) as Array<{
+          `).all(...chatJids, limit) as Array<{
             chat_jid: string;
             sender_name: string | null;
             sender_jid: string;
@@ -116,8 +128,16 @@ export class MemoryPlugin implements IPlugin {
             is_group: number;
             timestamp: number;
           }>;
+          const recentActions = db.prepare(`
+            SELECT id, action_type, target_chat, target_name, summary, timestamp
+            FROM autonomous_actions
+            WHERE target_chat IN (${chatPlaceholders})
+            ORDER BY id DESC LIMIT 5
+          `).all(...chatJids) as Array<{
+            id: number; action_type: string; target_chat: string; target_name: string; summary: string; timestamp: number;
+          }>;
 
-          if (logs.length === 0) {
+          if (logs.length === 0 && recentActions.length === 0) {
             return {
               success: true,
               message: 'No recent activity recorded yet in memory logs.',
@@ -139,9 +159,7 @@ export class MemoryPlugin implements IPlugin {
               existing.count++;
               groupsActive.set(l.chat_jid, existing);
             } else {
-              const name = isOwner
-                ? (l.sender_name || (l.sender_jid === 'bot' ? 'Assistant' : 'Contact'))
-                : 'Community User';
+              const name = l.sender_name || (l.sender_jid === 'bot' ? 'Assistant' : 'Contact');
               const existing = dmsActive.get(l.chat_jid) || { count: 0, name, lastText: text, lastTime: time };
               existing.count++;
               dmsActive.set(l.chat_jid, existing);
@@ -150,27 +168,29 @@ export class MemoryPlugin implements IPlugin {
 
           const groupSummaries: string[] = [];
           for (const [_jid, data] of groupsActive.entries()) {
-            const textSnippet = isOwner ? `: "${data.lastText}"` : '';
-            groupSummaries.push(`- Group "${data.subject}": ${data.count} recent message(s)${textSnippet}`);
+            groupSummaries.push(`- Group "${data.subject}": ${data.count} recent message(s): "${data.lastText}"`);
           }
 
           const dmSummaries: string[] = [];
           for (const [_jid, data] of dmsActive.entries()) {
-            const textSnippet = isOwner ? `: "${data.lastText}"` : '';
-            dmSummaries.push(`- Direct Chat (${data.name}): ${data.count} recent message(s)${textSnippet}`);
+            dmSummaries.push(`- Direct Chat (${data.name}): ${data.count} recent message(s): "${data.lastText}"`);
           }
 
           const totalMessages = logs.length;
+          const actionSummary = recentActions.length > 0
+            ? `*Recent Bot Actions:*\n${recentActions.map((a) => `- ${a.action_type}: ${a.summary} (${a.target_name || 'System'})`).join('\n')}`
+            : '';
           const report =
             `📊 *Recent Cross-Chat Awareness Summary:*\n` +
             `• Evaluated last ${totalMessages} messages across ${groupsActive.size} group(s) and ${dmsActive.size} direct chat(s).\n\n` +
             (groupSummaries.length > 0 ? `*Group Activity:*\n${groupSummaries.join('\n')}\n\n` : '') +
-            (dmSummaries.length > 0 ? `*Direct Message Activity:*\n${dmSummaries.join('\n')}` : '');
+            (dmSummaries.length > 0 ? `*Direct Message Activity:*\n${dmSummaries.join('\n')}\n\n` : '') +
+            actionSummary;
 
           return {
             success: true,
             message: report.trim(),
-            data: { totalMessages, groupsCount: groupsActive.size, dmsCount: dmsActive.size },
+            data: { totalMessages, groupsCount: groupsActive.size, dmsCount: dmsActive.size, recentActions },
           };
         } catch (err: any) {
           return { success: false, message: `Failed to compile cross-chat activity: ${err.message}` };
@@ -205,6 +225,11 @@ export class MemoryPlugin implements IPlugin {
               SELECT sender_name, sender_jid, message_text, timestamp
               FROM chat_logs
               WHERE chat_jid = ? AND message_text IS NOT NULL
+                AND COALESCE(is_noise, 0) = 0
+                AND LOWER(message_text) NOT LIKE '%<think%'
+                AND LOWER(message_text) NOT LIKE '%<analysis%'
+                AND LOWER(message_text) NOT LIKE '%<reasoning%'
+                AND LOWER(message_text) NOT LIKE '%<tool_call%'
                 AND (LOWER(sender_name) LIKE ? OR sender_jid LIKE ?)
                 AND message_text NOT LIKE 'network slow small%'
               ORDER BY id DESC LIMIT ?
@@ -214,6 +239,11 @@ export class MemoryPlugin implements IPlugin {
               SELECT sender_name, sender_jid, message_text, timestamp
               FROM chat_logs
               WHERE chat_jid = ? AND message_text IS NOT NULL
+                AND COALESCE(is_noise, 0) = 0
+                AND LOWER(message_text) NOT LIKE '%<think%'
+                AND LOWER(message_text) NOT LIKE '%<analysis%'
+                AND LOWER(message_text) NOT LIKE '%<reasoning%'
+                AND LOWER(message_text) NOT LIKE '%<tool_call%'
                 AND message_text NOT LIKE 'network slow small%'
               ORDER BY id DESC LIMIT ?
             `).all(ctx.chatJid, limit) as any;
@@ -250,14 +280,22 @@ export class MemoryPlugin implements IPlugin {
     {
       name: 'list_autonomous_actions',
       description:
-        'Lists autonomous actions and self-directed functions the bot executed on its own without being commanded (unreplied DM check-ins, auto-moderation of spam links, passive contact indexing, continuous pattern learning, and scheduled broadcasts). Use when the owner asks what you do on your own or asks about your sentience/autonomy.',
+        'Lists recent autonomous events and tool actions in this chat and other chats or groups where you have participated. Use when asked what you have done in those conversations.',
       parameters: {
         type: 'object',
         properties: {},
       },
       execute: async (_args: {}, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
-          const recent = getRecentAutonomousActions(10);
+          const chatJids = memoryService.getChatsForParticipant(_ctx.senderJid, _ctx.chatJid);
+          const recent = db.prepare(`
+            SELECT id, action_type, target_chat, target_name, summary, timestamp
+            FROM autonomous_actions
+            WHERE target_chat IN (${chatJids.map(() => '?').join(', ')})
+            ORDER BY id DESC LIMIT 10
+          `).all(...chatJids) as Array<{
+            id: number; action_type: string; target_chat: string; target_name: string; summary: string; timestamp: number;
+          }>;
           const lines: string[] = [];
 
           if (recent.length > 0) {
@@ -270,10 +308,10 @@ export class MemoryPlugin implements IPlugin {
           // Add standing autonomous capabilities summary
           const standingCapabilities =
             `🤖 *Autonomous Functions Active in Bot Runtime:*\n\n` +
-            (lines.length > 0 ? `*Recent Self-Directed Events:*\n${lines.join('\n')}\n\n` : '') +
+            (lines.length > 0 ? `*Recent Bot Events and Tool Actions:*\n${lines.join('\n')}\n\n` : '') +
             `*Active Autonomous Capabilities:*\n` +
             `1. *Anti-Spam & Anti-Link Shield*: Autonomously deletes unauthorized group invite links and spam bursts without waiting for admin command.\n` +
-            `2. *Continuous Pattern Mining*: Passively learns speaking styles, slang, and formality metrics every 8 exchanges.\n` +
+            `2. *Conversation Adaptation*: Uses local chat context and language preferences; live training exports require explicit participant consent.\n` +
             `3. *Passive Contact Indexing*: Automatically captures and indexes new contacts and numbers into SQLite.\n` +
             `4. *Unreplied Message Watchdog*: Periodically scans for genuine unreplied DMs from contacts and prepares replies.\n` +
             `5. *Scheduled Morning Broadcasts & Status*: Posts daily motivational/tech insights to WhatsApp Status and registered groups.`;
@@ -291,7 +329,7 @@ export class MemoryPlugin implements IPlugin {
     {
       name: 'search_group_banter',
       description:
-        'Uses local semantic vector search to recall past group jokes, funny quotes, inside jokes, roasts, and memorable banter from this group or across WhatsApp groups.',
+        'Uses local semantic vector search to recall past group jokes and banter from this group or, when requested, other groups where you have participated.',
       parameters: {
         type: 'object',
         properties: {
@@ -301,14 +339,16 @@ export class MemoryPlugin implements IPlugin {
           },
           all_groups: {
             type: 'boolean',
-            description: 'If true, searches banter across all known WhatsApp groups; otherwise searches this group only.',
+            description: 'If true, searches this group and other groups where you have participated.',
           },
         },
         required: ['query'],
       },
       execute: async (args: { query: string; all_groups?: boolean }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
-          const targetChat = args.all_groups ? undefined : ctx.isGroup ? ctx.chatJid : undefined;
+          const targetChat: string | string[] = args.all_groups
+            ? memoryService.getChatsForParticipant(ctx.senderJid, ctx.chatJid)
+            : ctx.isGroup ? ctx.chatJid : [];
           const results = vectorStore.searchBanter(args.query, targetChat, 4);
 
           if (results.length === 0) {

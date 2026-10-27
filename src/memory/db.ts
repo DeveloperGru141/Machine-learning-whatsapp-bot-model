@@ -37,6 +37,14 @@ export function initDatabase() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_chat_logs_chat ON chat_logs(chat_jid, timestamp);
+    CREATE INDEX IF NOT EXISTS idx_chat_logs_dm_inbound_latest
+      ON chat_logs(chat_jid, id DESC) WHERE is_group = 0 AND sender_jid != 'bot';
+    CREATE INDEX IF NOT EXISTS idx_chat_logs_dm_inbound_time
+      ON chat_logs(timestamp, chat_jid, id) WHERE is_group = 0 AND sender_jid != 'bot';
+    CREATE INDEX IF NOT EXISTS idx_chat_logs_bot_reply_lookup
+      ON chat_logs(chat_jid, id DESC) WHERE sender_jid = 'bot';
+    CREATE INDEX IF NOT EXISTS idx_chat_logs_bot_reply_time
+      ON chat_logs(chat_jid, timestamp, id) WHERE sender_jid = 'bot';
 
     -- Long-term continuous facts learned about users
     CREATE TABLE IF NOT EXISTS user_facts (
@@ -216,6 +224,26 @@ export function initDatabase() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_autonomous_actions_time ON autonomous_actions(timestamp);
+
+    -- Durable retry state for individual inbound DMs that still need a response.
+    CREATE TABLE IF NOT EXISTS dm_reply_attempts (
+      inbound_log_id INTEGER PRIMARY KEY,
+      chat_jid TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'failed',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_attempt_at INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      completed_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_dm_reply_attempts_retry ON dm_reply_attempts(status, next_attempt_at);
+
+    -- Live conversation examples are eligible for training only after the speaker opts in.
+    CREATE TABLE IF NOT EXISTS training_consents (
+      user_jid TEXT PRIMARY KEY,
+      opted_in INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL
+    );
 
     -- Bot Corrections: Direct negative/positive reinforcement learned from user and owner feedback
     CREATE TABLE IF NOT EXISTS bot_corrections (

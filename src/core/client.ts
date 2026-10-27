@@ -65,12 +65,12 @@ export class WhatsAppClient {
   private unrepliedScanInterval: NodeJS.Timeout | null = null;
   private unrepliedDebounceTimer: NodeJS.Timeout | null = null;
   private isScanningUnreplied = false;
+  private activeInboundDmChats: Map<string, number> = new Map();
   private pairingRequested = false;
   private latestPairingCode: string | null = null;
   private latestPairingCodeAt = 0;
   private latestQr: string | null = null;
   private sessionStartedAt = Date.now();
-  private attemptedCatchupKeys: Set<string> = new Set();
   private messageStore: Map<string, any> = new Map();
   private deliveryStatusMap: Map<
     string,
@@ -757,7 +757,11 @@ export class WhatsAppClient {
             throw new Error(check.reason || 'Anti-spam policy blocked this direct message.');
           }
         }
-        return antiBanEngine.scheduleDispatch(jid, () => rawSendMessage(jid, ...rest));
+        const safeArgs = [...rest];
+        if (!isProtocolAction && payload && typeof payload === 'object') {
+          safeArgs[0] = OutboundSender.sanitizeOutgoingPayload(payload);
+        }
+        return antiBanEngine.scheduleDispatch(jid, () => rawSendMessage(jid, ...safeArgs));
       };
 
       let lastStandingRefreshAt = 0;
@@ -1331,8 +1335,21 @@ export class WhatsAppClient {
       normalized.senderName = 'Ademola';
     }
 
+    const trainingConsent = chatLogger.parseTrainingConsentDirective(normalized.text || '');
+    if (trainingConsent !== null && !normalized.isGroup) {
+      chatLogger.setTrainingConsent(normalized.senderJid, trainingConsent);
+      const consentReply = trainingConsent
+        ? 'Training consent is on. Future text exchanges from you may be used in filtered training examples; you can send “!training forget” any time to opt out.'
+        : 'Training consent is off. Your future messages will be excluded from training exports, and your prior live examples will be removed the next time the training dataset is rebuilt.';
+      if (this.sock) {
+        const isOwner = userProfileManager.isOwner(normalized.senderJid, normalized.senderName);
+        await OutboundSender.replyText(this.sock, normalized.chatJid, consentReply, msg, isOwner, false, undefined, true);
+      }
+      return;
+    }
+
     // 1. Passive Continuous Learning & Analytics: Log EVERY message in all chats
-    chatLogger.logMessage({
+    const inboundLogId = chatLogger.logMessage({
       chatJid: normalized.chatJid,
       senderJid: normalized.senderJid,
       senderName: normalized.senderName,
@@ -1719,6 +1736,7 @@ export class WhatsAppClient {
 
     const incomingCharLen = (cleanedText || promptText || '').length;
 
+    let liveOutboundDispatched = false;
     const context: ExecutionContext = {
       sock,
       chatJid: normalized.chatJid,
@@ -1750,6 +1768,7 @@ export class WhatsAppClient {
           undefined,
           true
         );
+        if (res?.key?.id) liveOutboundDispatched = true;
         if (normalized.isGroup) {
           recordGroupInteraction(normalized.chatJid);
         }
@@ -1757,7 +1776,7 @@ export class WhatsAppClient {
       },
       sendSticker: async (bufferOrPath: Buffer | string, mentions?: string[]) => {
         const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
-        return OutboundSender.sendSticker(
+        const res = await OutboundSender.sendSticker(
           sock,
           normalized.chatJid,
           bufferOrPath,
@@ -1765,28 +1784,46 @@ export class WhatsAppClient {
           mentions || (normalized.isGroup && normalized.senderJid ? [normalized.senderJid] : undefined),
           true
         );
+        if (res?.key?.id) liveOutboundDispatched = true;
+        return res;
       },
       sendImage: (bufferOrUrl: Buffer | string, caption?: string) => {
         const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
-        return OutboundSender.sendImage(sock, normalized.chatJid, bufferOrUrl, caption, safeQuoted, true);
+        return OutboundSender.sendImage(sock, normalized.chatJid, bufferOrUrl, caption, safeQuoted, true)
+          .then((res) => { if (res?.key?.id) liveOutboundDispatched = true; return res; });
       },
       sendAudio: (bufferOrUrl: Buffer | string, isVoiceNote?: boolean) => {
         const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
-        return OutboundSender.sendAudio(sock, normalized.chatJid, bufferOrUrl, isVoiceNote, safeQuoted, true);
+        return OutboundSender.sendAudio(sock, normalized.chatJid, bufferOrUrl, isVoiceNote, safeQuoted, true)
+          .then((res) => { if (res?.key?.id) liveOutboundDispatched = true; return res; });
       },
       sendVideo: (bufferOrUrl: Buffer | string, caption?: string) => {
         const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
-        return OutboundSender.sendVideo(sock, normalized.chatJid, bufferOrUrl, caption, safeQuoted, true);
+        return OutboundSender.sendVideo(sock, normalized.chatJid, bufferOrUrl, caption, safeQuoted, true)
+          .then((res) => { if (res?.key?.id) liveOutboundDispatched = true; return res; });
       },
       sendContact: (displayName: string, phoneNumber: string) => {
         const safeQuoted = normalized.chatJid.endsWith('@lid') ? undefined : msg;
-        return OutboundSender.sendContact(sock, normalized.chatJid, displayName, phoneNumber, safeQuoted, true);
+        return OutboundSender.sendContact(sock, normalized.chatJid, displayName, phoneNumber, safeQuoted, true)
+          .then((res) => { if (res?.key?.id) liveOutboundDispatched = true; return res; });
       },
       sendPoll: (question: string, options: string[], selectableCount?: number) =>
-        OutboundSender.sendPoll(sock, normalized.chatJid, question, options, selectableCount, msg),
+        OutboundSender.sendPoll(sock, normalized.chatJid, question, options, selectableCount, msg)
+          .then((res) => { if (res?.key?.id) liveOutboundDispatched = true; return res; }),
     };
 
     // 4. Dispatch via the bounded concurrency queue and shared outbound rate controls.
+    const trackLiveDm = !normalized.isGroup && Number.isSafeInteger(inboundLogId) && Number(inboundLogId) > 0;
+    const liveAttemptClaimed = trackLiveDm
+      ? chatLogger.claimUnrepliedAttempt(Number(inboundLogId), normalized.chatJid)
+      : false;
+    let liveAttemptCompleted = false;
+    if (trackLiveDm) {
+      this.activeInboundDmChats.set(
+        normalized.chatJid,
+        (this.activeInboundDmChats.get(normalized.chatJid) || 0) + 1
+      );
+    }
     const enqueued = requestQueue.enqueue({
       id: `${normalized.chatJid}_${msg.key.id || Date.now()}`,
       senderJid: normalized.senderJid,
@@ -1799,6 +1836,10 @@ export class WhatsAppClient {
           // 2. Light natural cadence pause (50ms in DM, 300-600ms in group)
           await antiBanEngine.simulateReadingDelay(incomingCharLen, normalized.isGroup, isOwner);
           await agentHarness.handleMessage(promptText, context);
+          if (liveAttemptClaimed) {
+            chatLogger.finishUnrepliedAttempt(Number(inboundLogId), liveOutboundDispatched);
+            liveAttemptCompleted = true;
+          }
 
           // 3. Autonomous Pattern-Based Sticker Engine:
           // If the conversation reached heavy laughter, hype, or relatable banter, occasionally drop a matching sticker!
@@ -1815,10 +1856,18 @@ export class WhatsAppClient {
             }
           }
         } catch (err: any) {
+          if (liveAttemptClaimed) {
+            chatLogger.finishUnrepliedAttempt(Number(inboundLogId), false, err?.message || String(err));
+            liveAttemptCompleted = true;
+          }
           console.error('[WhatsAppClient] Error in agent handler:', err.message);
           healthMonitor.recordError(err);
           analyticsEngine.trackEvent('error', { error: err.message }, normalized.chatJid, normalized.senderJid);
         } finally {
+          if (liveAttemptClaimed && !liveAttemptCompleted) {
+            chatLogger.finishUnrepliedAttempt(Number(inboundLogId), false, 'Incoming handler ended without a confirmed outbound send');
+          }
+          if (trackLiveDm) this.releaseActiveInboundDmChat(normalized.chatJid);
           if (stopTyping) {
             stopTyping();
           }
@@ -1826,6 +1875,10 @@ export class WhatsAppClient {
       },
     });
     if (!enqueued) {
+      if (liveAttemptClaimed) {
+        chatLogger.finishUnrepliedAttempt(Number(inboundLogId), false, 'Request queue rejected the inbound message');
+      }
+      if (trackLiveDm) this.releaseActiveInboundDmChat(normalized.chatJid);
       console.warn(`[WhatsAppClient] Request queue full; skipped reply for ${normalized.chatJid}.`);
     }
   }
@@ -2052,6 +2105,12 @@ export class WhatsAppClient {
     }
   }
 
+  private releaseActiveInboundDmChat(chatJid: string): void {
+    const count = this.activeInboundDmChats.get(chatJid) || 0;
+    if (count <= 1) this.activeInboundDmChats.delete(chatJid);
+    else this.activeInboundDmChats.set(chatJid, count - 1);
+  }
+
   public async replyUnrepliedMessages(batchLimit: number = 2): Promise<{ repliedCount: number; summary: string }> {
     if (this.isScanningUnreplied) {
       console.log('[WhatsAppClient] Unreplied catch-up is already running. Skipping concurrent run.');
@@ -2081,7 +2140,14 @@ export class WhatsAppClient {
     console.log('[WhatsAppClient] 🔍 Checking for genuine unreplied 1-on-1 direct messages...');
 
     try {
-      const candidates = contactService.getUnrepliedChats();
+      const now = Date.now();
+      const catchupFrom = restrictionGuard.catchupFrom();
+      const oldestEligible = Math.min(now - 30 * 24 * 60 * 60 * 1000, catchupFrom ?? Number.MAX_SAFE_INTEGER);
+      const candidates = contactService.getUnrepliedChats(
+        oldestEligible,
+        Math.min(250, Math.max(20, batchLimit * 10)),
+        now
+      );
       const ownPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '07058967815');
       const ownSockDigits = (this.sock?.user?.id || '').split(':')[0].split('@')[0];
       // Filter strictly for safety
@@ -2090,6 +2156,7 @@ export class WhatsAppClient {
         if (!chat.chatJid || chat.chatJid.endsWith('@g.us') || chat.chatJid.includes('broadcast')) {
           return false;
         }
+        if (this.activeInboundDmChats.has(chat.chatJid)) return false;
         const chatDigits = chat.chatJid.split('@')[0].split(':')[0];
         if (
           chatDigits === ownPhone ||
@@ -2102,63 +2169,16 @@ export class WhatsAppClient {
           return false;
         }
 
-        // 2. Only consider recent unreplied messages (within last 2 hours)
-        // This prevents answering days-old historical chats while reliably catching messages sent during restarts
-        // Extended automatically to cover DMs that arrived while the account was restricted.
-        const twoHoursAgo = Math.min(Date.now() - 2 * 60 * 60 * 1000, restrictionGuard.catchupFrom() ?? Number.MAX_SAFE_INTEGER);
-        if (chat.timestamp && chat.timestamp < twoHoursAgo) {
-          return false;
-        }
-
-        // 3. Skip if already attempted for this exact message ID/timestamp in this runtime session
-        const catchupKey = `${chat.chatJid}_${chat.id || chat.timestamp}`;
-        if (this.attemptedCatchupKeys.has(catchupKey)) {
-          return false;
-        }
-
-        // 4. Must have at least one genuine inbound message from a human in chat_logs
-        const hasInbound = db
-          .prepare(`SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid != 'bot' LIMIT 1`)
-          .get(chat.chatJid);
-        if (!hasInbound) return false;
-
-        // 5. Confirm bot hasn't already sent a valid reply after this message
-        const laterBotReply = chat.id
-          ? db
-              .prepare(
-                `SELECT 1 FROM chat_logs
-                 WHERE chat_jid = ?
-                   AND sender_jid = 'bot'
-                   AND id > ?
-                   AND timestamp >= ?
-                   AND LOWER(COALESCE(message_text, '')) NOT LIKE 'network slow small%'
-                   AND LOWER(COALESCE(message_text, '')) NOT LIKE '%<tool_call>%'
-                   AND COALESCE(message_text, '') NOT LIKE '⚠️%'
-                 LIMIT 1`
-              )
-              .get(chat.chatJid, chat.id, chat.timestamp)
-          : db
-              .prepare(
-                `SELECT 1 FROM chat_logs
-                 WHERE chat_jid = ?
-                   AND sender_jid = 'bot'
-                   AND timestamp > ?
-                   AND LOWER(COALESCE(message_text, '')) NOT LIKE 'network slow small%'
-                   AND LOWER(COALESCE(message_text, '')) NOT LIKE '%<tool_call>%'
-                   AND COALESCE(message_text, '') NOT LIKE '⚠️%'
-                 LIMIT 1`
-              )
-              .get(chat.chatJid, chat.timestamp);
-        if (laterBotReply) return false;
-
+        // The SQL query already validates the newest inbound message, prior valid replies,
+        // its retry window, and eligibility. Keep only recipient safety checks here.
         return true;
       });
 
       if (genuineChats.length === 0) {
-        console.log('[WhatsAppClient] ✅ No unreplied 1-on-1 DMs found. All conversations are up to date.');
+        console.log('[WhatsAppClient] ✅ No 1-on-1 DM is currently eligible for reply or retry.');
         return {
           repliedCount: 0,
-          summary: 'All direct messages have been replied to! No unreplied conversations found.',
+          summary: 'No direct message is currently eligible for a reply or retry. Failed sends remain queued for their next scheduled retry.',
         };
       }
 
@@ -2178,72 +2198,92 @@ export class WhatsAppClient {
           break;
         }
 
-        const catchupKey = `${chat.chatJid}_${chat.id || chat.timestamp}`;
-        this.attemptedCatchupKeys.add(catchupKey);
+        if (this.activeInboundDmChats.has(chat.chatJid)) continue;
+        this.activeInboundDmChats.set(
+          chat.chatJid,
+          (this.activeInboundDmChats.get(chat.chatJid) || 0) + 1
+        );
+        const inboundLogId = Number(chat.id);
+        if (!Number.isSafeInteger(inboundLogId) || inboundLogId <= 0 ||
+            !chatLogger.claimUnrepliedAttempt(inboundLogId, chat.chatJid)) {
+          this.releaseActiveInboundDmChat(chat.chatJid);
+          continue;
+        }
+        let outboundDispatched = false;
+        const trackDispatch = async <T>(promise: Promise<T>): Promise<T> => {
+          const result = await promise;
+          if ((result as any)?.key?.id) outboundDispatched = true;
+          return result;
+        };
 
         console.log(
-          `[WhatsAppClient] [${i + 1}/${toProcess.length}] Preparing human-paced reply to ${chat.senderName} (${chat.chatJid}): "${chat.lastMessage.slice(0, 50)}"`
+          `[WhatsAppClient] [${i + 1}/${toProcess.length}] Preparing human-paced reply to ${chat.senderName} (${chat.chatJid}).`
         );
 
-        // 1. Human reading delay proportional to the user's unreplied message length
-        const userMsgLen = (chat.lastMessage || '').length;
-        await antiBanEngine.simulateReadingDelay(userMsgLen, false);
-
-        // 2. Construct synthetic message for context
-        const syntheticMsg: WAMessage = {
-          key: {
-            remoteJid: chat.chatJid,
-            fromMe: false,
-            id: `catchup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-          },
-          messageTimestamp: Math.floor(chat.timestamp / 1000) || Math.floor(Date.now() / 1000),
-          pushName: chat.senderName,
-          message: {
-            conversation: chat.lastMessage,
-          },
-        };
-
-        const sock = this.sock;
-        const isOwner = userProfileManager.isOwner(chat.senderJid, chat.senderName);
-        const savedContact = contactService.getContact(chat.senderJid);
-        const effectiveSenderName = isOwner
-          ? 'Ademola'
-          : savedContact?.custom_name ||
-            contactService.extractFriendlyFirstName(chat.senderName) ||
-            chat.senderName;
-
-        const context: ExecutionContext = {
-          sock,
-          chatJid: chat.chatJid,
-          senderJid: chat.senderJid,
-          senderName: effectiveSenderName,
-          isGroup: false,
-          rawMessage: syntheticMsg,
-          replyText: async (text: string) => {
-            await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, false, userMsgLen, false);
-            return OutboundSender.replyText(sock, chat.chatJid, text, undefined, isOwner, false, undefined, true);
-          },
-          sendSticker: async (bufferOrPath: Buffer | string) =>
-            OutboundSender.sendSticker(sock, chat.chatJid, bufferOrPath, undefined, undefined, true),
-          sendImage: (bufferOrUrl: Buffer | string, caption?: string) =>
-            OutboundSender.sendImage(sock, chat.chatJid, bufferOrUrl, caption, undefined, true),
-          sendAudio: (bufferOrUrl: Buffer | string, isVN?: boolean) =>
-            OutboundSender.sendAudio(sock, chat.chatJid, bufferOrUrl, isVN, undefined, true),
-          sendVideo: (bufferOrUrl: Buffer | string, caption?: string) =>
-            OutboundSender.sendVideo(sock, chat.chatJid, bufferOrUrl, caption, undefined, true),
-          sendContact: (displayName: string, phoneNumber: string) =>
-            OutboundSender.sendContact(sock, chat.chatJid, displayName, phoneNumber, undefined, true),
-          sendPoll: (question: string, options: string[], selectableCount?: number) =>
-            OutboundSender.sendPoll(sock, chat.chatJid, question, options, selectableCount, undefined),
-        };
-
         try {
+          // Human reading delay proportional to the user's unreplied message length.
+          const userMsgLen = (chat.lastMessage || '').length;
+          await antiBanEngine.simulateReadingDelay(userMsgLen, false);
+
+          const syntheticMsg: WAMessage = {
+            key: {
+              remoteJid: chat.chatJid,
+              fromMe: false,
+              id: `catchup_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            },
+            messageTimestamp: Math.floor(chat.timestamp / 1000) || Math.floor(Date.now() / 1000),
+            pushName: chat.senderName,
+            message: { conversation: chat.lastMessage },
+          };
+
+          const sock = this.sock;
+          const isOwner = userProfileManager.isOwner(chat.senderJid, chat.senderName);
+          const savedContact = contactService.getContact(chat.senderJid);
+          const effectiveSenderName = isOwner
+            ? 'Ademola'
+            : savedContact?.custom_name ||
+              contactService.extractFriendlyFirstName(chat.senderName) ||
+              chat.senderName;
+
+          const context: ExecutionContext = {
+            sock,
+            chatJid: chat.chatJid,
+            senderJid: chat.senderJid,
+            senderName: effectiveSenderName,
+            isGroup: false,
+            rawMessage: syntheticMsg,
+            replyText: async (text: string) => {
+              await antiBanEngine.simulateTypingPresence(sock, chat.chatJid, text, false, userMsgLen, false);
+              return trackDispatch(OutboundSender.replyText(sock, chat.chatJid, text, undefined, isOwner, false, undefined, true));
+            },
+            sendSticker: async (bufferOrPath: Buffer | string) =>
+              trackDispatch(OutboundSender.sendSticker(sock, chat.chatJid, bufferOrPath, undefined, undefined, true)),
+            sendImage: (bufferOrUrl: Buffer | string, caption?: string) =>
+              trackDispatch(OutboundSender.sendImage(sock, chat.chatJid, bufferOrUrl, caption, undefined, true)),
+            sendAudio: (bufferOrUrl: Buffer | string, isVN?: boolean) =>
+              trackDispatch(OutboundSender.sendAudio(sock, chat.chatJid, bufferOrUrl, isVN, undefined, true)),
+            sendVideo: (bufferOrUrl: Buffer | string, caption?: string) =>
+              trackDispatch(OutboundSender.sendVideo(sock, chat.chatJid, bufferOrUrl, caption, undefined, true)),
+            sendContact: (displayName: string, phoneNumber: string) =>
+              trackDispatch(OutboundSender.sendContact(sock, chat.chatJid, displayName, phoneNumber, undefined, true)),
+            sendPoll: (question: string, options: string[], selectableCount?: number) =>
+              trackDispatch(OutboundSender.sendPoll(sock, chat.chatJid, question, options, selectableCount, undefined)),
+          };
+
           await agentHarness.handleMessage(chat.lastMessage, context);
-          repliedCount++;
-          repliedNames.push(effectiveSenderName);
-          console.log(`[WhatsAppClient] ✅ Successfully caught up with ${effectiveSenderName}.`);
+          chatLogger.finishUnrepliedAttempt(inboundLogId, outboundDispatched);
+          if (outboundDispatched) {
+            repliedCount++;
+            repliedNames.push(effectiveSenderName);
+            console.log(`[WhatsAppClient] ✅ Successfully dispatched catch-up reply to ${effectiveSenderName}.`);
+          } else {
+            console.warn(`[WhatsAppClient] No outbound reply was dispatched to ${effectiveSenderName}; retry has been scheduled.`);
+          }
         } catch (err: any) {
+          chatLogger.finishUnrepliedAttempt(inboundLogId, false, err?.message || String(err));
           console.error(`[WhatsAppClient] Error replying to ${chat.senderName}:`, err.message);
+        } finally {
+          this.releaseActiveInboundDmChat(chat.chatJid);
         }
 
         // 3. Human inter-chat pause between different contacts (20s between consecutive contacts in same batch)

@@ -2,12 +2,19 @@ import { llmClient } from './llm-client.js';
 import { config } from '../config/env.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { ExecutionContext } from '../plugins/types.js';
-import { db } from '../memory/db.js';
+import { db, logAutonomousAction } from '../memory/db.js';
 import { contextManager } from '../core/context-manager.js';
 import { analyticsEngine } from '../core/analytics.js';
 
 const EMOJI_SEQUENCE_REGEX =
   /(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0F|\p{Emoji_Modifier})?)*/gu;
+
+function requiresCurrentWebEvidence(text: string): boolean {
+  const normalized = (text || '').toLowerCase();
+  return /\b(?:today|tonight|right now|currently|current|latest|most recent|this season|season to date|so far this season|current season|as of now|this year|this week|this month|live score|live scores|up to date)\b/.test(normalized) ||
+    /\bhow many\s+(?:goals?|points?|wins?|losses?|assists?|appearances?|matches|games|titles|records)\b/.test(normalized) ||
+    /\b(?:goals?|points?|assists?|appearances?)\s+(?:has|have|did)\s+\w+\s+(?:score|scored|make|made)\b/.test(normalized);
+}
 
 export interface ParsedToolCall {
   id: string;
@@ -312,10 +319,19 @@ export class AgentHarness {
 
     console.log(`[AgentHarness] Managed context built with ~${tokenBudgetUsed} estimated tokens.`);
 
-    const tools = pluginRegistry.getRelevantToolDefinitions(userMessage, context.isGroup, context.chatJid);
+    const needsCurrentEvidence = requiresCurrentWebEvidence(userMessage);
+    const routedTools = pluginRegistry.getRelevantToolDefinitions(
+      needsCurrentEvidence ? `${userMessage} current latest` : userMessage,
+      context.isGroup,
+      context.chatJid
+    );
+    const tools = needsCurrentEvidence
+      ? routedTools.filter((tool: any) => tool?.function?.name === 'web_search')
+      : routedTools;
     const executedToolKeys = new Set<string>();
     const executedToolNames = new Set<string>();
     const toolOutputs: string[] = [];
+    let currentEvidenceAvailable = false;
 
     try {
       const activeTools = tools.length > 0 ? (tools as any) : undefined;
@@ -323,7 +339,7 @@ export class AgentHarness {
       const response = await this.callLLM({
         messages: messages,
         tools: activeTools,
-        tool_choice: activeTools ? 'auto' : undefined,
+        tool_choice: activeTools ? (needsCurrentEvidence ? 'required' : 'auto') : undefined,
       });
 
       const choice = response.choices[0];
@@ -361,14 +377,34 @@ export class AgentHarness {
           } catch {
             toolArgs = {};
           }
+          if (needsCurrentEvidence && toolName === 'web_search') {
+            // Preserve the user's exact current-fact question as the search query.
+            toolArgs = { query: userMessage };
+          }
 
-          console.log(`[Agent] Calling tool: ${toolName}`, toolArgs);
+          console.log(`[Agent] Calling tool: ${toolName}`);
           analyticsEngine.trackEvent('tool_call', toolName, context.chatJid, context.senderJid);
-          const toolResult = await pluginRegistry.executeTool(
-            toolName,
-            toolArgs,
-            context
-          );
+          let toolResult;
+          try {
+            toolResult = await pluginRegistry.executeTool(toolName, toolArgs, context);
+            if (toolName === 'web_search') {
+              const resultData = toolResult.data;
+              currentEvidenceAvailable = toolResult.success && (
+                (Array.isArray(resultData) && resultData.length > 0) ||
+                (typeof resultData === 'string' && resultData.trim().length > 0) ||
+                (resultData && typeof resultData === 'object' && Object.keys(resultData).length > 0)
+              );
+            }
+            logAutonomousAction(
+              'tool_execution',
+              context.chatJid,
+              context.senderName,
+              `${toolName}: ${toolResult.success === false ? 'failed' : 'completed'}`
+            );
+          } catch (toolError) {
+            logAutonomousAction('tool_execution', context.chatJid, context.senderName, `${toolName}: failed`);
+            throw toolError;
+          }
 
           let outputEntry = `[${toolName} result]: ${toolResult.message || JSON.stringify(toolResult)}`;
           if (
@@ -386,11 +422,16 @@ export class AgentHarness {
       if (message.tool_calls && message.tool_calls.length > 0) {
         await runToolCallList(message.tool_calls);
 
+        if (needsCurrentEvidence && !currentEvidenceAvailable) {
+          await context.replyText('I could not verify that current figure from the live web results just now.');
+          return;
+        }
+
         // Synthesize final natural WhatsApp response from the gathered tool results without re-triggering tool calls.
         const synthesisSystem = `${messages[0]?.content || ''}
 
-# Answering With Live Tool Data (Strict Training Pipeline Distillation):
-Combine the live tool data in the user's last message with your own knowledge and answer directly, sharply, and confidently in 1-3 conversational sentences. Emulate the exact distilled voice and cadence of the dialogue exemplars above. Do NOT output generic corporate summaries, encyclopedic fluff, <tool_call> tags, or raw JSON. If send_message_to_contact succeeded, explicitly confirm who you messaged and its WhatsApp delivery status (✓ / ✓✓).`;
+# Answering With Live Tool Data:
+Combine the live tool data in the user's last message with your own knowledge and answer directly in 1-3 conversational sentences. Never expose hidden reasoning, scratchpad text, tool markup, or raw JSON. Do not state a changing fact unless it is supported by the current web-search result; if the result is missing or unclear, say you could not verify it. Include a source link when the result supplies one. If send_message_to_contact succeeded, explicitly confirm who you messaged and its WhatsApp delivery status (✓ / ✓✓).`;
         const historyContext = messages.slice(1, -1);
         try {
           const synthesisRes = await this.callLLM({
@@ -467,6 +508,11 @@ Combine the live tool data in the user's last message with your own knowledge an
               await context.replyText(fallbackConfirm);
             }
           }
+          return;
+        }
+
+        if (needsCurrentEvidence) {
+          await context.replyText('I could not verify that current figure from the live web results just now.');
           return;
         }
 
@@ -693,6 +739,8 @@ Combine the live tool data in the user's last message with your own knowledge an
 export function sanitizeAssistantResponse(text: string): string {
   if (!text) return '';
   let cleaned = text
+    .replace(/<\|(?:analysis|thinking|reasoning|scratchpad)\|>[\s\S]*?(?=<\|final\|>|$)/gi, '')
+    .replace(/<\|final\|>/gi, '')
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<\/think>/gi, '')
     .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
@@ -704,6 +752,9 @@ export function sanitizeAssistantResponse(text: string): string {
     .replace(/<\/?args>/gi, '')
     .replace(/<function=[^>]+>[\s\S]*?(?:<\/function>|$)/gi, '')
     .replace(/<\/function>/gi, '')
+    .replace(/^\s*(?:\[(?:internal\s+)?(?:analysis|reasoning|scratchpad)\]|(?:(?:internal|private)\s+)?(?:analysis|thought(?: process)?|reasoning|chain of thought|scratchpad)|(?:my|the)\s+(?:private\s+)?(?:thought process|reasoning|chain of thought)|(?:here is|here['’]s)\s+(?:(?:my|the)\s+)?(?:thought process|reasoning|analysis))\s*[:：]\s*[\s\S]*?(?=\n\s*\n|\n\s*(?:final|answer)\s*[:：]|$)/i, '')
+    .replace(/^\s*(?:final answer|answer)\s*[:：]\s*/i, '')
+    .replace(/^\s*(?:let me think(?: through this)?|let['’]s (?:think|reason|analy[sz]e)|i need to (?:think|reason|analy[sz]e)|step[- ]by[- ]step reasoning)\b[^\n]*(?:\n(?!\s*$)[^\n]*)*(?=\n\s*\n|$)/i, '')
     .replace(/^(?:thinking process|thought|thinking):\s*[\s\S]*?(?=\n\n[^\n]+|\s*$)/i, '')
     .trim();
 

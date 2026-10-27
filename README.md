@@ -9,6 +9,9 @@ A TypeScript WhatsApp bot built with Baileys, an LLM agent, modular tools, and a
 - Replies to text and supported media messages through a configurable LLM provider.
 - Uses per-chat conversation summaries, recent history, and user preferences for continuity.
 - Matches a DM partner's current language and register. Clear language preferences can be saved to that person's profile.
+- Uses the voice-note tool when asked to record or send speech, with the recipient's saved or current language preference.
+- Searches the live web for changing facts and current-season statistics; it declines to guess when a lookup returns no evidence.
+- Keeps a durable per-message retry queue for unanswered DMs and scopes cross-chat history and bot-action recall to the current user’s chats and groups.
 - Resolves phone-number JIDs and Baileys LID aliases to the same saved contact when sync data provides both.
 - Provides modular tools for memory, contacts, groups, scheduling, web search, documents, media, and voice notes.
 - Publishes scheduled WhatsApp Status content through one status send path that strips internal reasoning and tool markup.
@@ -90,7 +93,7 @@ The inbound user limit is six messages per minute. Outbound messages use a share
 
 ## Training data
 
-The pipeline no longer searches Downloads, reads WhatsApp database backups, or includes live SQLite chats, contact records, memories, or automatically mined dialogue in fine-tuning exports.
+The pipeline never searches Downloads or reads WhatsApp database backups. It can include a small, filtered set of live text exchanges only after the speaker explicitly opts in; contacts, saved facts, and memory summaries are not training examples.
 
 - `data/curated_seed.jsonl` contains selected built-in conversational examples; identity, creator, and contact examples are omitted because system rules and contact tools handle those behaviors.
 - `data/public_training.jsonl` is produced by the optional public-dataset importer.
@@ -98,8 +101,10 @@ The pipeline no longer searches Downloads, reads WhatsApp database backups, or i
 - Generate the built-in source with `node scripts/seed_training_data.js`. Generate public-source examples with `uv run --python 3.15 python scripts/ingest_web_datasets.py`.
 - The chat importer requires one explicitly selected WhatsApp text export and the exact assistant sender label. It creates only user-to-assistant pairs and skips common secrets, identifiers, email addresses, and phone-number-like values.
 - Review the export and get participants' consent before importing private conversations.
-- `npm run validate-data` reads only those three source files, filters malformed or sensitive examples, deduplicates pairs, applies a seeded shuffle, and writes `train.jsonl`, `validation.jsonl`, and `finetune_dataset.jsonl`.
-- The database export tool includes curated and public-source examples only. The file-based validator includes explicitly approved chat data; live conversation logs are excluded from both paths.
+- A person can opt in from their private chat with `!training consent` (or `/training consent`) and opt out with `!training forget` (or `/training revoke`). Group messages are eligible only for speakers who opted in; a non-consenting participant's message breaks a training pair and is never included.
+- `npm run validate-data` reads the curated/public/approved files and opens `DATABASE_PATH` (default `data/bot.sqlite`) in SQLite read-only mode. Live examples are limited to text exchanges from the last 90 days, paired only when the bot replies before another human message, capped at 5,000 examples, and passed through the same PII, secret, noise, and thought-markup filters.
+- The validator rebuilds all three outputs (`train.jsonl`, `validation.jsonl`, and `finetune_dataset.jsonl`) every run, including empty outputs. After opt-out, run it again to remove that speaker's old live examples from those files. This removes examples from future training runs; undoing data already absorbed into model weights requires retraining from a clean checkpoint.
+- Runtime adaptation (language preferences and local conversation context) continues separately from fine-tuning. The validator does not automatically train or upload a model.
 
 Example import command:
 
@@ -108,7 +113,9 @@ npm run ingest -- --input "./reviewed-export.txt" --assistant-sender "Me"
 npm run validate-data
 ```
 
-Do not commit private exports or `approved_training.jsonl`. The validator follows the standard practice of keeping held-out data separate from training and avoiding data-derived transformations that leak between splits. See the [scikit-learn common pitfalls guide](https://scikit-learn.org/stable/common_pitfalls) and [Hugging Face Datasets processing guide](https://huggingface.co/docs/datasets/process).
+Do not commit private exports, `approved_training.jsonl`, or the local SQLite database. The validator follows the standard practice of keeping held-out data separate from training and avoiding data-derived transformations that leak between splits. See the [scikit-learn common pitfalls guide](https://scikit-learn.org/stable/common_pitfalls) and [Hugging Face Datasets processing guide](https://huggingface.co/docs/datasets/process).
+
+Anyone can ask about recent activity or bot actions in the current chat and other chats or groups where they have participated. Cross-chat retrieval is scoped to that participation history, so users cannot query conversations they were not part of.
 
 ## Scheduled Status memes
 

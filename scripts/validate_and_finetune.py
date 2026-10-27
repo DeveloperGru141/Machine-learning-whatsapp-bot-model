@@ -1,7 +1,11 @@
 import json
+import os
 import sys
 import re
 import random
+import sqlite3
+import time
+from contextlib import closing
 from pathlib import Path
 
 # Ensure UTF-8 output on Windows
@@ -17,6 +21,10 @@ PUBLIC_INPUT = DATA_DIR / "public_training.jsonl"
 INPUT_DATASET = DATA_DIR / "finetune_dataset.jsonl"
 TRAIN_DATASET = DATA_DIR / "train.jsonl"
 VAL_DATASET = DATA_DIR / "validation.jsonl"
+CHAT_DB = Path(os.environ.get("DATABASE_PATH") or str(DATA_DIR / "bot.sqlite"))
+LIVE_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000
+LIVE_PAIR_LIMIT = 5000
+LIVE_LOG_SCAN_LIMIT = 50000
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful WhatsApp conversation assistant. Answer naturally and clearly, "
@@ -103,6 +111,112 @@ def count_emojis(text: str) -> int:
             count += 1
     return count
 
+def load_opted_in_live_pairs():
+    """Read recent text turns from SQLite in read-only mode, honoring speaker consent."""
+    db_path = CHAT_DB if CHAT_DB.is_absolute() else BASE_DIR / CHAT_DB
+    if not db_path.exists():
+        return []
+
+    candidates = []
+    try:
+        uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            now_ms = int(time.time() * 1000)
+            rows = conn.execute(
+                """
+                WITH consented_senders(jid) AS (
+                    SELECT user_jid FROM training_consents WHERE opted_in = 1
+                    UNION
+                    SELECT a.alias_jid FROM contact_jid_aliases a
+                    JOIN training_consents c ON c.user_jid = a.contact_jid
+                    WHERE c.opted_in = 1
+                    UNION
+                    SELECT a.contact_jid FROM contact_jid_aliases a
+                    JOIN training_consents c ON c.user_jid = a.alias_jid
+                    WHERE c.opted_in = 1
+                ),
+                eligible_chats(chat_jid) AS (
+                    SELECT DISTINCT chat_jid FROM chat_logs
+                    WHERE sender_jid IN (SELECT jid FROM consented_senders)
+                      AND timestamp >= ?
+                ),
+                bounded_rows AS (
+                    SELECT l.id, l.chat_jid, l.sender_jid, l.content_type,
+                           l.message_text, l.is_noise, l.timestamp
+                    FROM chat_logs l
+                    WHERE l.chat_jid IN (SELECT chat_jid FROM eligible_chats)
+                      AND l.timestamp >= ?
+                    ORDER BY l.id DESC
+                    LIMIT ?
+                ),
+                sequenced_rows AS (
+                    SELECT *,
+                           LAG(sender_jid) OVER (PARTITION BY chat_jid ORDER BY id) AS previous_sender,
+                           LAG(content_type) OVER (PARTITION BY chat_jid ORDER BY id) AS previous_content_type,
+                           LAG(is_noise) OVER (PARTITION BY chat_jid ORDER BY id) AS previous_is_noise
+                    FROM bounded_rows
+                ),
+                recent_rows AS (
+                    SELECT id, chat_jid, sender_jid, content_type,
+                           CASE
+                             WHEN COALESCE(is_noise, 0) = 0 AND (
+                               sender_jid IN (SELECT jid FROM consented_senders)
+                               OR (sender_jid = 'bot'
+                                 AND previous_sender IN (SELECT jid FROM consented_senders)
+                                 AND previous_content_type = 'text'
+                                 AND COALESCE(previous_is_noise, 0) = 0)
+                             ) THEN message_text
+                             ELSE NULL
+                           END AS message_text,
+                           timestamp
+                    FROM sequenced_rows
+                )
+                SELECT id, chat_jid, sender_jid, content_type, message_text, timestamp
+                FROM recent_rows ORDER BY id ASC
+                """,
+                (now_ms - LIVE_LOOKBACK_MS,
+                 now_ms - LIVE_LOOKBACK_MS,
+                 LIVE_LOG_SCAN_LIMIT),
+            ).fetchall()
+
+            consented = {row[0] for row in conn.execute(
+                "SELECT user_jid FROM training_consents WHERE opted_in = 1"
+            ).fetchall()}
+            for alias_jid, contact_jid in conn.execute(
+                "SELECT alias_jid, contact_jid FROM contact_jid_aliases"
+            ).fetchall():
+                if contact_jid in consented:
+                    consented.add(alias_jid)
+                if alias_jid in consented:
+                    consented.add(contact_jid)
+
+        pending_by_chat = {}
+        for _row_id, chat_jid, sender_jid, content_type, message_text, _timestamp in rows:
+            if sender_jid == "bot":
+                pending = pending_by_chat.pop(chat_jid, None)
+                if pending and content_type == "text" and message_text:
+                    candidates.append({"messages": [
+                        {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                        {"role": "user", "content": pending},
+                        {"role": "assistant", "content": message_text.strip()},
+                    ]})
+                continue
+
+            # Every human turn ends the previous pair. Only opted-in text becomes a new candidate.
+            pending_by_chat.pop(chat_jid, None)
+            if sender_jid in consented and content_type == "text" and message_text:
+                clean_user = message_text.strip()
+                if clean_user and not re.match(r"^[!/ ]?training\s+(?:consent|forget|revoke|opt[ -]?in|opt[ -]?out)\s*$", clean_user, re.I):
+                    pending_by_chat[chat_jid] = clean_user
+
+        # Bound work and avoid letting very old eligible exchanges dominate the refreshed set.
+        candidates = candidates[-LIVE_PAIR_LIMIT:]
+    except (sqlite3.Error, OSError) as exc:
+        print(f"⚠️ Live chat training source unavailable; continuing with reviewed files only ({type(exc).__name__}).")
+        return []
+    return candidates
+
 SENSITIVE_PATTERNS = [
     re.compile(r"gsk_[a-zA-Z0-9_-]{20,}", re.IGNORECASE),
     re.compile(r"rnd_[a-zA-Z0-9_-]{20,}", re.IGNORECASE),
@@ -124,8 +238,8 @@ def validate_and_tighten():
 
     raw_candidates = []
 
-    # Only curated, public, or explicitly approved JSONL sources are eligible.
-    # Runtime chat logs, contacts, memories, and SQLite are never read.
+    # Curated/public/approved files are eligible. Live logs are read in read-only mode and
+    # contribute only when the speaker explicitly opted in with a DM consent command.
     for source_path in (CURATED_INPUT, PUBLIC_INPUT, APPROVED_INPUT):
         if not source_path.exists():
             continue
@@ -141,7 +255,9 @@ def validate_and_tighten():
                 except json.JSONDecodeError:
                     pass
 
-    print(f"📥 Collected {len(raw_candidates)} reviewed source samples for inspection.")
+    raw_candidates.extend(load_opted_in_live_pairs())
+
+    print(f"📥 Collected {len(raw_candidates)} reviewed or consented source samples for inspection.")
 
     valid_samples = []
     skipped_reasons = {
@@ -184,7 +300,19 @@ def validate_and_tighten():
 
         # Sensitive Data Guardrail: discard any pair with API keys, tokens, or private IDs
         all_content = "\n".join(str(m.get("content", "")) for m in messages)
-        if any(pat.search(all_content) for pat in SENSITIVE_PATTERNS) or re.search(r"<(?:think|analysis|tool_call|function)\b", all_content, re.I):
+        contains_internal_trace = re.search(
+            r"<(?:think|thought|analysis|reasoning|scratchpad|tool_call|function)\b|"
+            r"<\|(?:analysis|thinking|reasoning|scratchpad)\|>|"
+            r"^\s*(?:\[(?:internal\s+)?(?:analysis|reasoning|scratchpad)\]|"
+            r"(?:(?:internal|private)\s+)?(?:analysis|thought(?: process)?|reasoning|chain of thought|scratchpad)|"
+            r"(?:my|the)\s+(?:private\s+)?(?:thought process|reasoning|chain of thought)|"
+            r"(?:here is|here['’]s)\s+(?:(?:my|the)\s+)?(?:thought process|reasoning|analysis))\s*[:：]|"
+            r"^\s*(?:let me think(?: through this)?|let['’]s (?:think|reason|analy[sz]e)|"
+            r"i need to (?:think|reason|analy[sz]e)|step[- ]by[- ]step reasoning)\b",
+            all_content,
+            re.I | re.M,
+        )
+        if any(pat.search(all_content) for pat in SENSITIVE_PATTERNS) or contains_internal_trace:
             skipped_reasons["sensitive_data_leak"] += 1
             continue
 
@@ -233,7 +361,7 @@ def validate_and_tighten():
         ]
 
         # Format tightening for WhatsApp: strip un-conversational Markdown headers and excess spacing
-        for m in messages:
+        for m in data["messages"]:
             if m.get("role") == "assistant":
                 cleaned = re.sub(r"^#{1,6}\s+", "", m.get("content", ""), flags=re.MULTILINE)
                 cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
@@ -249,11 +377,8 @@ def validate_and_tighten():
         if count > 0:
             print(f"     - {reason.replace('_', ' ').title()}: {count}")
 
-    if not valid_samples:
-        print("\n❌ No valid samples remaining after filtering.")
-        return
-
-    # Shuffle only after all row-wise filtering; exact duplicates were removed before splitting.
+    # Rebuild all derived files even when empty so revoked consent removes old live examples.
+    # Shuffle only after row-wise filtering; exact duplicates are removed before splitting.
     random.Random(42).shuffle(valid_samples)
     split_idx = max(1, int(len(valid_samples) * 0.9)) if len(valid_samples) > 1 else len(valid_samples)
     train_data = valid_samples[:split_idx]
@@ -273,7 +398,7 @@ def validate_and_tighten():
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
 
     print(f"\n✅ Fine-Tuning Pipeline Tightened & Saved:")
-    print(f"   📥 Approved sources:    {CURATED_INPUT.name}, {PUBLIC_INPUT.name}, {APPROVED_INPUT.name}")
+    print(f"   📥 Sources:             {CURATED_INPUT.name}, {PUBLIC_INPUT.name}, {APPROVED_INPUT.name}, opted-in live chats")
     print(f"   📁 Clean Unified Dataset: {INPUT_DATASET} ({len(valid_samples)} pairs)")
     print(f"   📁 Training Set (90%):    {TRAIN_DATASET} ({len(train_data)} pairs)")
     print(f"   📁 Validation Set (10%):  {VAL_DATASET} ({len(val_data)} pairs)")
