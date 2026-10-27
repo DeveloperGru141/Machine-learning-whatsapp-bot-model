@@ -85,7 +85,7 @@ export class ChatLogger {
     }
   }
 
-  public logOutboundSticker(chatJid: string, filename: string, vibe?: string): void {
+  public logOutboundSticker(chatJid: string, filename: string, _vibe?: string): void {
     try {
       this.insertLogStmt.run(
         chatJid,

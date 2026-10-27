@@ -1,6 +1,9 @@
-import type { WASocket, proto } from '@whiskeysockets/baileys';
+import type { WASocket } from '@whiskeysockets/baileys';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { db } from '../memory/db.js';
 import { config } from '../config/env.js';
+
+const DM_INBOUND_RECENCY_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface OutboundCheckParams {
   chatJid: string;
@@ -40,28 +43,26 @@ function isLivetestRunner(): boolean {
 
 /**
  * AntiBanEngine:
- * 1. Simulates human reading and typing delays with natural jitter.
- * 2. Enforces strict inbound-only messaging (zero cold outreach).
- * 3. Enforces group mention/tag-only rules.
- * 4. Paces outbound messages via a global velocity limiter and per-chat cooldown.
+ * 1. Allows direct messages only to owners or people who recently messaged the bot.
+ * 2. Enforces group mention/tag-only rules for OutboundSender messages.
+ * 3. Applies one bounded outbound queue and rate limit to both helper and direct socket sends.
  */
 export class AntiBanEngine {
   // Global outbound pacing queue
   private dispatchQueue: AntiBanDispatchItem[] = [];
   private isProcessingQueue = false;
+  private readonly dispatchContext = new AsyncLocalStorage<boolean>();
+  private readonly maxPendingDispatches = 100;
 
   // Rate limiting & cooldown tracking
   private lastDispatchTimes: Map<string, number> = new Map(); // chatJid -> timestamp
   private recentGlobalDispatches: number[] = []; // timestamps of recent dispatches within 60s
-  private readonly maxGlobalPerMinute = 25; // Safe human cap: max 25 messages/min across all chats
-  private readonly minPerChatCooldownMs = 400; // Ultra-snappy 400ms cooldown between messages to the same chat
-  private readonly minGlobalGapMs = 250; // 0.25s minimum gap between consecutive dispatches
+  private readonly maxGlobalPerMinute = 10; // Maximum outbound content sends across all chats
+  private readonly minPerChatCooldownMs = 5_000;
+  private readonly minGlobalGapMs = 1_500;
+  private readonly globalGapJitterMs = 1_000;
 
-  /**
-   * Calculates an authentic human reading delay proportional to the length of the message.
-   * DMs are near-instant (~50ms) for ultra-snappy velocity, while groups have a light pause (300ms - 600ms).
-   * For the bot owner Ademola, delay is instant (10ms).
-   */
+  /** Applies a short response delay before processing an incoming message. */
   public calculateReadingDelay(incomingTextLength: number = 0, isGroup: boolean = false, isOwner: boolean = false): number {
     if (isLivetestRunner() || isOwner) return 10;
     if (!isGroup) return 50;
@@ -73,15 +74,9 @@ export class AntiBanEngine {
     return Math.min(600, rawDelay);
   }
 
-  /**
-   * Calculates realistic human typing delay based on message length and chat type.
-   * - Owner: Near-instant (200-400ms) for ultra-fast, responsive interaction.
-   * - DMs: Snappy human typing (~0.7s - 1.8s) so chats flow naturally without artificial lag.
-   * - Groups: ~1.2s - 3.0s to simulate natural cadence among multiple participants.
-   */
+  /** Calculates a bounded presence duration for an active response. */
   public calculateTypingDelay(
     responseTextLength: number = 0,
-    incomingTextLength: number = 0,
     isGroup: boolean = false,
     isOwner: boolean = false
   ): number {
@@ -106,8 +101,7 @@ export class AntiBanEngine {
   }
 
   /**
-   * Simulates active human presence: sends 'composing' (or 'recording'), waits a realistic
-   * human typing duration proportional to message length, then sends 'paused'.
+   * Shows composing/recording presence while a response is being prepared.
    */
   public async simulateTypingPresence(
     sock: WASocket,
@@ -129,7 +123,7 @@ export class AntiBanEngine {
       ? isLivetestRunner()
         ? 50
         : Math.min(9000, Math.max(2800, Math.floor(responseText.length * 48 + incomingTextLength * 15)))
-      : this.calculateTypingDelay(responseText.length, incomingTextLength, isGroup || chatJid.endsWith('@g.us'), isOwner);
+      : this.calculateTypingDelay(responseText.length, isGroup || chatJid.endsWith('@g.us'), isOwner);
 
     console.log(
       `[AntiBan] ⏳ Simulating human ${isVoiceNote ? 'recording' : 'typing'} (${delay}ms, userMsg=${incomingTextLength}c, reply=${responseText.length}c, owner=${isOwner}) to ${chatJid}...`
@@ -206,12 +200,12 @@ export class AntiBanEngine {
 
   /**
    * Strict Outbound Gatekeeper:
-   * Confirms whether an outbound message is legally permissible per Anti-Ban policy.
+   * Confirms whether an outbound message is permitted by the bot's contact and group policy.
    * - In DMs: The user MUST have texted the bot first (inbound in chat_logs) or be an owner.
    * - In Groups: The bot MUST be tagged/mentioned or quoted, or this is the bot's own join intro.
    */
   public canSendOutbound(params: OutboundCheckParams, enforcePolicy: boolean = false): { allowed: boolean; reason?: string } {
-    const { chatJid, isGroup, isReplyToInbound, isGroupMention, isBotAddedToGroup, isOwnerCommand } = params;
+    const { chatJid, isGroup, isGroupMention, isBotAddedToGroup } = params;
 
     // Fast-path ONLY for synthetic livetest suite (unless explicit enforcement is requested)
     if (!enforcePolicy && isLivetestRunner()) {
@@ -227,52 +221,38 @@ export class AntiBanEngine {
       if (isGroupMention) {
         return { allowed: true }; // Permitted reply to an @mention or quote
       }
-      if (params.isProactiveCheckIn) {
-        // Allowed if bot is member and has logged history in this group
-        try {
-          const hasHistory = db.prepare(`SELECT 1 FROM chat_logs WHERE chat_jid = ? LIMIT 1`).get(chatJid);
-          if (hasHistory) {
-            return { allowed: true };
-          }
-        } catch {}
-      }
       return {
         allowed: false,
-        reason: `Anti-Ban Policy: Bot cannot message group ${chatJid} unless explicitly @mentioned, quoted, or verified proactive check-in.`,
+        reason: `Anti-Ban Policy: Bot cannot message group ${chatJid} unless explicitly @mentioned, quoted, or added to the group.`,
       };
     }
 
     // 2. Direct Message (DM) Evaluation
     // Superuser / Bot Owners / Self-chat are always permitted
     const rawDigits = chatJid.split('@')[0].split(':')[0];
-    const pairingDigits = (config.bot.pairingPhoneNumber || '2347058967815').replace(/[^0-9]/g, '');
+    const ownerDigits = config.bot.owners
+      .map((owner: string) => owner.split('@')[0].split(':')[0].replace(/\D/g, ''))
+      .filter(Boolean);
+    const pairingDigits = (config.bot.pairingPhoneNumber || '').replace(/\D/g, '');
     const isOwner =
-      config.bot.owners.includes(rawDigits) ||
       config.bot.owners.includes(chatJid) ||
-      config.bot.owners.some((o: string) => o.includes(rawDigits)) ||
-      rawDigits === '83954564632610' ||
-      rawDigits === '2347058967815' ||
-      rawDigits === '102409552584830' ||
-      rawDigits === '2348108574293' ||
-      (Boolean(pairingDigits) && rawDigits === pairingDigits) ||
-      isOwnerCommand;
+      ownerDigits.includes(rawDigits) ||
+      (Boolean(pairingDigits) && rawDigits === pairingDigits);
 
     if (isOwner) {
       return { allowed: true };
     }
 
-    // If this is an immediate reactive reply to an inbound message from this user
-    if (isReplyToInbound) {
-      return { allowed: true };
-    }
-
-    // Otherwise, check SQLite chat_logs: Has this user ever initiated an inbound message?
+    // A caller-supplied reply flag or owner-command flag must not authorize a cold DM.
+    // Verify an actual recent inbound message in the exact conversation before allowing any send.
     try {
-      const inboundRecord = db
-        .prepare(`SELECT 1 FROM chat_logs WHERE (chat_jid = ? OR chat_jid LIKE ?) AND sender_jid != 'bot' LIMIT 1`)
-        .get(chatJid, `%${rawDigits}%`);
-
-      if (inboundRecord) {
+      const inboundRecord = db.prepare(
+        `SELECT MAX(timestamp) AS last_inbound_at
+         FROM chat_logs
+         WHERE chat_jid = ? AND is_group = 0 AND sender_jid != 'bot'`
+      ).get(chatJid) as { last_inbound_at: number | null } | undefined;
+      const lastInboundAt = Number(inboundRecord?.last_inbound_at || 0);
+      if (lastInboundAt > 0 && Date.now() - lastInboundAt <= DM_INBOUND_RECENCY_MS) {
         return { allowed: true };
       }
     } catch (err: any) {
@@ -281,20 +261,30 @@ export class AntiBanEngine {
 
     return {
       allowed: false,
-      reason: `Anti-Ban Policy: Cold messaging blocked. Recipient (${chatJid}) has not initiated a conversation with the bot first.`,
+      reason: `Anti-Ban Policy: Direct messages are limited to owners and contacts who messaged the bot within the last 30 days (${chatJid}).`,
     };
   }
 
   /**
    * Paces outbound message execution through an asynchronous queue.
-   * Enforces global speed limits, per-chat cooldowns, and randomized human jitter.
+   * Enforces a rolling global cap, a per-chat cooldown, and a bounded scheduling spread.
    */
   public async scheduleDispatch<T>(chatJid: string, dispatchFn: () => Promise<T>): Promise<T> {
     if (isLivetestRunner()) {
       return dispatchFn();
     }
 
+    // A patched WASocket routes direct sends through this queue too. Re-entering from a queued
+    // OutboundSender call must dispatch directly to avoid queueing behind and awaiting itself.
+    if (this.dispatchContext.getStore()) {
+      return dispatchFn();
+    }
+
     return new Promise<T>((resolve, reject) => {
+      if (this.dispatchQueue.length >= this.maxPendingDispatches) {
+        reject(new Error(`Anti-Ban outbound queue is full (${this.maxPendingDispatches} pending messages).`));
+        return;
+      }
       this.dispatchQueue.push({
         id: `${chatJid}_${Date.now()}_${Math.random()}`,
         chatJid,
@@ -322,7 +312,7 @@ export class AntiBanEngine {
         const item = this.dispatchQueue[0];
         const now = Date.now();
 
-        // 1. Enforce global velocity cap (max 15 messages in the last 60 seconds)
+        // 1. Enforce a rolling global outbound cap.
         this.recentGlobalDispatches = this.recentGlobalDispatches.filter((t) => now - t < 60_000);
         if (this.recentGlobalDispatches.length >= this.maxGlobalPerMinute) {
           const oldest = this.recentGlobalDispatches[0] || now;
@@ -343,18 +333,20 @@ export class AntiBanEngine {
         // 3. Dequeue and execute
         this.dispatchQueue.shift();
 
+        // Count attempts as well as successes so a failed send cannot trigger an immediate retry burst.
+        const dispatchTime = Date.now();
+        this.lastDispatchTimes.set(item.chatJid, dispatchTime);
+        this.recentGlobalDispatches.push(dispatchTime);
+
         try {
-          const result = await item.execute();
-          const dispatchTime = Date.now();
-          this.lastDispatchTimes.set(item.chatJid, dispatchTime);
-          this.recentGlobalDispatches.push(dispatchTime);
+          const result = await this.dispatchContext.run(true, item.execute);
           item.resolve(result);
         } catch (err) {
           item.reject(err);
         }
 
-        // 4. Subtle human-like gap before next message in queue
-        const gap = this.minGlobalGapMs + Math.floor(Math.random() * 800);
+        // 4. Keep a minimum gap between sends to reduce bursts.
+        const gap = this.minGlobalGapMs + Math.floor(Math.random() * this.globalGapJitterMs);
         await new Promise((r) => setTimeout(r, gap));
       }
     } finally {

@@ -8,22 +8,18 @@ import { sensitiveDataFilter } from '../security/sensitive-data-filter.js';
 export class DatasetExporterPlugin implements IPlugin {
   name = 'DatasetExporter';
   version = '1.0.0';
-  description = 'Compiles learned multi-chat dialogue patterns into an OpenAI/Groq compatible JSONL fine-tuning dataset';
+  description = 'Exports curated and public-source examples into a privacy-filtered JSONL dataset';
 
   tools: BotTool[] = [
     {
       name: 'export_training_data',
-      description: 'Exports all learned chat interactions, successful exemplars, and dialogue pairs into an offline JSONL dataset ready for fine-tuning.',
+      description: 'Exports curated seed and public-dataset examples. Live conversations and imported private chats are excluded.',
       parameters: {
         type: 'object',
         properties: {
-          minQualityScore: {
-            type: 'number',
-            description: 'Minimum exemplar quality score to include (default 1.0).',
-          },
         },
       },
-      execute: async (args: { minQualityScore?: number }, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
         if (!config.bot.owners.includes(ctx.senderJid)) {
           return {
             success: false,
@@ -33,25 +29,11 @@ export class DatasetExporterPlugin implements IPlugin {
 
         try {
           const outputPath = path.resolve('./data/finetune_dataset.jsonl');
-          const minScore = args.minQualityScore ?? 1.0;
 
-          // 1. Fetch learned dialogue exemplars
-          const exemplars = db.prepare(`
-            SELECT context_text, response_text, response_type, vibe_classification
-            FROM dialogue_exemplars
-            WHERE quality_score >= ? AND response_text IS NOT NULL
-            ORDER BY id ASC
-          `).all(minScore) as unknown as Array<{
-            context_text: string;
-            response_text: string;
-            response_type: string;
-            vibe_classification: string;
-          }>;
-
-          // 2. Fetch recorded fine-tuning pairs
           const directPairs = db.prepare(`
             SELECT system_prompt, user_message, assistant_response
             FROM fine_tuning_pairs
+            WHERE source_type IN ('bundled_curated', 'curated_seed', 'public_dataset')
             ORDER BY id ASC
           `).all() as unknown as Array<{
             system_prompt: string;
@@ -61,7 +43,7 @@ export class DatasetExporterPlugin implements IPlugin {
 
           const lines: string[] = [];
 
-          // Format direct pairs (filtering out any sensitive information)
+          // Runtime conversations, memories, contact records, and mined exemplars never enter this export.
           for (const p of directPairs) {
             if (
               sensitiveDataFilter.shouldExcludeFromTraining(p.user_message) ||
@@ -69,38 +51,16 @@ export class DatasetExporterPlugin implements IPlugin {
             ) {
               continue;
             }
+            if (sensitiveDataFilter.shouldExcludeFromTraining(p.system_prompt)) continue;
+            const cleanSystem = sensitiveDataFilter.scrubSensitiveText(p.system_prompt).scrubbedText;
             const cleanUser = sensitiveDataFilter.scrubSensitiveText(p.user_message).scrubbedText;
             const cleanAsst = sensitiveDataFilter.scrubSensitiveText(p.assistant_response).scrubbedText;
             lines.push(
               JSON.stringify({
                 messages: [
-                  { role: 'system', content: p.system_prompt },
+                  { role: 'system', content: cleanSystem },
                   { role: 'user', content: cleanUser },
                   { role: 'assistant', content: cleanAsst },
-                ],
-              })
-            );
-          }
-
-          // Format mined exemplars (filtering out any sensitive information)
-          for (const e of exemplars) {
-            if (
-              sensitiveDataFilter.shouldExcludeFromTraining(e.context_text) ||
-              sensitiveDataFilter.shouldExcludeFromTraining(e.response_text)
-            ) {
-              continue;
-            }
-            const cleanCtx = sensitiveDataFilter.scrubSensitiveText(e.context_text).scrubbedText;
-            const cleanResp = sensitiveDataFilter.scrubSensitiveText(e.response_text).scrubbedText;
-            lines.push(
-              JSON.stringify({
-                messages: [
-                  {
-                    role: 'system',
-                    content: `You are ${config.bot.name}, a sharp, witty, and culturally savvy real WhatsApp user living inside WhatsApp chats. Your creator is ${config.bot.creator}. Talk naturally like a real person, NO robotic AI cliches, NO emoji spam (max 0-1 emoji).`,
-                  },
-                  { role: 'user', content: cleanCtx },
-                  { role: 'assistant', content: cleanResp },
                 ],
               })
             );

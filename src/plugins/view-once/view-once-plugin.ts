@@ -4,7 +4,6 @@ import type { WASocket } from '@whiskeysockets/baileys';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import {
   getLatestViewOnceMessages,
-  getViewOnceMessageById,
   markViewOnceRetrieved,
   ViewOnceRecord,
 } from '../../memory/db.js';

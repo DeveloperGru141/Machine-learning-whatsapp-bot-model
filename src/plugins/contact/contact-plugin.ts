@@ -367,7 +367,7 @@ export class ContactPlugin implements IPlugin {
         type: 'object',
         properties: {},
       },
-      execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (_args: {}, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
           const result = await whatsAppClient.replyUnrepliedMessages();
           return {
@@ -649,27 +649,23 @@ export class ContactPlugin implements IPlugin {
             console.warn(`[ContactPlugin] onWhatsApp check warning for ${lookupTarget}:`, waErr.message);
           }
 
-          // Cold Contact Safety:
-          // If recipient is NOT in saved contacts and has never messaged the bot,
-          // ensure clear attribution so the stranger does not tap "Block & Report" on WhatsApp.
-          let hasInboundHistory = false;
-          try {
-            const row = db.prepare(`SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid != 'bot' LIMIT 1`).get(targetJid);
-            hasInboundHistory = Boolean(row);
-          } catch {}
-
-          const isSavedContact = Boolean(targetPhone && contactService.getContact(targetPhone));
+          const outboundCheck = antiBanEngine.canSendOutbound({ chatJid: targetJid, isGroup: false }, true);
+          if (!outboundCheck.allowed) {
+            return {
+              success: false,
+              message: `Message not sent to ${targetName}: ${outboundCheck.reason}`,
+            };
+          }
           let finalDispatchMessage = cleanMessage;
 
           console.log(`[ContactPlugin] 📨 Sending outbound message to ${targetName} (${targetJid}): "${finalDispatchMessage.slice(0, 60)}..."`);
 
-          // Simulate realistic human typing presence before dispatching to cold/direct contacts
+          // Show presence only after the recipient has passed the recent-interaction policy.
           try {
             await antiBanEngine.simulateTypingPresence(ctx.sock, targetJid, finalDispatchMessage, false, 0, false);
           } catch {}
 
-          // Send message through OutboundSender with explicit command authorization
-          const sent = await OutboundSender.replyText(ctx.sock, targetJid, finalDispatchMessage, undefined, true);
+          const sent = await OutboundSender.replyText(ctx.sock, targetJid, finalDispatchMessage);
           if (!sent) {
             return {
               success: false,
@@ -741,7 +737,7 @@ export class ContactPlugin implements IPlugin {
           },
           only_interacted: {
             type: 'boolean',
-            description: 'If true, ONLY messages warm contacts who have previously sent a message to the bot (safest, lowest ban risk). Default false.',
+            description: 'Must remain true: only contacts who messaged the bot within the last 30 days are eligible. Cold contact outreach is disabled.',
           },
           dry_run: {
             type: 'boolean',
@@ -759,6 +755,12 @@ export class ContactPlugin implements IPlugin {
         },
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
+        if (args.only_interacted === false) {
+          return {
+            success: false,
+            message: 'Contact campaigns require only_interacted=true and are limited to people who messaged the bot in the last 30 days.',
+          };
+        }
         const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
         if (!isOwner) {
           return {
@@ -845,7 +847,7 @@ ${status.lastRecipient ? `- Last Recipient: ${status.lastRecipient}` : ''}`;
     {
       name: 'preview_contact_save_reminders',
       description:
-        'Previews the next contacts in line to receive the reminder along with their personalized rendered message templates without sending anything.',
+        'Previews warm contacts who messaged the bot recently; owner-only and never sends messages.',
       parameters: {
         type: 'object',
         properties: {
@@ -855,16 +857,19 @@ ${status.lastRecipient ? `- Last Recipient: ${status.lastRecipient}` : ''}`;
           },
           only_interacted: {
             type: 'boolean',
-            description: 'If true, previews warm contacts with prior chat history only.',
+            description: 'Legacy option; preview is always limited to recent, warm contacts.',
           },
         },
       },
       execute: async (
         args: { count?: number; only_interacted?: boolean },
-        _ctx: ExecutionContext
+        ctx: ExecutionContext
       ): Promise<ToolResult> => {
+        if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
+          return { success: false, message: 'Permission denied: only the bot owner can preview contact records.' };
+        }
         const count = Math.min(args.count || 5, 10);
-        const previews = contactReminderService.preview(count, Boolean(args.only_interacted));
+        const previews = contactReminderService.preview(count, true);
 
         if (previews.length === 0) {
           return {

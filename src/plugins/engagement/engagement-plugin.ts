@@ -377,7 +377,9 @@ Drop a natural 1-2 sentence ${isContact ? 'check-in / hello' : 'reminder / follo
       messageText,
       undefined,
       false,
-      true // isProactiveCheckIn: true
+      false, // Do not treat proactive outreach as an inbound-triggered group reply.
+      undefined,
+      false // isReply: false; DMs still require a recent inbound interaction.
     );
 
     if (!result) {

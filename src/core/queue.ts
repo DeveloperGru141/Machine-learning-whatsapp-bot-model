@@ -12,10 +12,10 @@ export class RequestQueue {
   private activeChats: Set<string> = new Set();
 
   public enqueue(task: QueueTask): boolean {
-    // Shed tasks only if queue is severely overloaded (max 50 waiting)
+    // Reject new work at capacity so existing chats keep their place and memory stays bounded.
     if (this.queue.length >= 50) {
-      console.warn(`[RequestQueue] Queue capacity exceeded. Dropping oldest non-priority request.`);
-      this.queue.shift();
+      console.warn(`[RequestQueue] Queue is full; rejecting incoming task ${task.id}.`);
+      return false;
     }
 
     this.queue.push(task);
@@ -41,13 +41,17 @@ export class RequestQueue {
     this.activeChats.add(task.chatJid);
 
     try {
-      // 60-second timeout safeguard per task (accommodates human reading, LLM reasoning, and natural human typing delays)
-      await Promise.race([
-        task.execute(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Task execution timed out')), 60000)
-        ),
-      ]);
+      // Warn on slow work, but retain the concurrency/chat lock until it settles. A Promise.race
+      // would release both locks while the original handler continued in the background.
+      const slowTaskWarning = setTimeout(() => {
+        console.warn(`[RequestQueue] Task ${task.id} is still running after 60 seconds.`);
+      }, 60_000);
+      slowTaskWarning.unref?.();
+      try {
+        await task.execute();
+      } finally {
+        clearTimeout(slowTaskWarning);
+      }
     } catch (err: any) {
       console.error(`[RequestQueue] Error executing task ${task.id}:`, err.message);
     } finally {

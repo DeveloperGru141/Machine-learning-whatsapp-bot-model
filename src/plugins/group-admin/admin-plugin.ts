@@ -11,7 +11,6 @@ import {
   upsertKnownGroup,
   findKnownGroup,
   getAllKnownGroups,
-  setGroupAdminStatus,
 } from '../../memory/db.js';
 
 export class GroupAdminPlugin implements IPlugin {

@@ -5,6 +5,10 @@ const fs = require('node:fs');
 const dbPath = path.resolve(__dirname, '../data/bot.sqlite');
 const db = new DatabaseSync(dbPath);
 
+try {
+  db.exec("ALTER TABLE fine_tuning_pairs ADD COLUMN source_type TEXT NOT NULL DEFAULT 'unknown'");
+} catch {}
+
 console.log('🌱 Seeding authentic human-like WhatsApp dialogue exemplars...');
 
 // 1. Clean previous seeds & low-quality artifacts to ensure idempotency
@@ -12,7 +16,7 @@ db.exec(`
   DELETE FROM dialogue_exemplars WHERE chat_jid = 'global_pipeline';
   DELETE FROM dialogue_exemplars WHERE response_type = 'sticker' OR response_text LIKE '%[Sent Sticker]%';
   DELETE FROM dialogue_exemplars WHERE context_text LIKE '%roasts Alex%';
-  DELETE FROM fine_tuning_pairs;
+  DELETE FROM fine_tuning_pairs WHERE source_type = 'curated_seed';
 `);
 
 const authenticExemplars = [
@@ -169,8 +173,11 @@ const insertStmt = db.prepare(`
 
 const now = Date.now();
 let count = 0;
+const trainingExemplars = authenticExemplars.filter(
+  (item) => !['creator', 'identity', 'contacts'].includes(item.vibe)
+);
 
-for (const item of authenticExemplars) {
+for (const item of trainingExemplars) {
   insertStmt.run(item.context, item.response, item.vibe, now);
   count++;
 }
@@ -178,22 +185,21 @@ for (const item of authenticExemplars) {
 console.log(`✅ Seeded ${count} high-quality human WhatsApp dialogue exemplars into SQLite.`);
 
 // 2. Export to fine_tuning_pairs and dataset jsonl
-const systemPrompt = "You are Forgelabs assistant, a sharp, witty, and culturally savvy real WhatsApp user living inside WhatsApp chats. Your creator is Ademola, an aspiring ML/AI Engineer. Talk naturally like a real person, NO robotic AI cliches, NO emoji spam (max 0-1 emoji).";
+const systemPrompt = "You are a helpful WhatsApp conversation assistant. Answer naturally, match the other person's language and register, and avoid unnecessary personal data.";
 
 const insertPairStmt = db.prepare(`
-  INSERT INTO fine_tuning_pairs (system_prompt, user_message, assistant_response, tools_invoked, created_at)
-  VALUES (?, ?, ?, '[]', ?)
+  INSERT INTO fine_tuning_pairs (system_prompt, user_message, assistant_response, tools_invoked, created_at, source_type)
+  VALUES (?, ?, ?, '[]', ?, 'curated_seed')
 `);
 
-for (const item of authenticExemplars) {
+for (const item of trainingExemplars) {
   insertPairStmt.run(systemPrompt, item.context, item.response, now);
 }
 
-// Write to finetune_dataset.jsonl and train.jsonl
-const jsonlPath = path.resolve(__dirname, '../data/finetune_dataset.jsonl');
-const trainPath = path.resolve(__dirname, '../data/train.jsonl');
+// Write the curated source for the validator; it will create train/validation outputs.
+const curatedPath = path.resolve(__dirname, '../data/curated_seed.jsonl');
 
-const lines = authenticExemplars.map(item => JSON.stringify({
+const lines = trainingExemplars.map(item => JSON.stringify({
   messages: [
     { role: "system", content: systemPrompt },
     { role: "user", content: item.context },
@@ -201,7 +207,6 @@ const lines = authenticExemplars.map(item => JSON.stringify({
   ]
 })).join('\n') + '\n';
 
-fs.writeFileSync(jsonlPath, lines, 'utf8');
-fs.writeFileSync(trainPath, lines, 'utf8');
+fs.writeFileSync(curatedPath, lines, 'utf8');
 
-console.log(`✅ Updated ${jsonlPath} and ${trainPath} with ${authenticExemplars.length} clean training pairs.`);
+console.log(`✅ Wrote ${trainingExemplars.length} curated pairs to ${curatedPath}; run validate-data to produce splits.`);

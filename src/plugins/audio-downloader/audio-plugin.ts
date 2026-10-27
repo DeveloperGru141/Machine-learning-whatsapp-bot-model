@@ -218,7 +218,7 @@ export class AudioDownloaderPlugin implements IPlugin {
           },
         },
       },
-      execute: async (args: { audio_url?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (args: { audio_url?: string }, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
           if (args.audio_url) {
             const res = await fetch(args.audio_url, { signal: AbortSignal.timeout(20000) });

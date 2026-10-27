@@ -10,15 +10,17 @@ export interface UserQuotaRecord {
 }
 
 export class UserRateLimiter {
-  private readonly maxTokens = 10;
+  private readonly maxTokens = 6;
   private readonly windowDurationMs = 60 * 1000; // 60 seconds
   private quotas: Map<string, UserQuotaRecord> = new Map();
+  private lastPruneAt = 0;
 
   /**
    * Checks whether the user is permitted to send a message within their current window
    */
   public checkLimit(senderJid: string): RateLimitStatus {
     const now = Date.now();
+    this.pruneExpired(now);
     const record = this.quotas.get(senderJid);
 
     // If no existing record or window has elapsed, user has full quota available
@@ -48,6 +50,7 @@ export class UserRateLimiter {
    */
   public consumeToken(senderJid: string): void {
     const now = Date.now();
+    this.pruneExpired(now);
     const record = this.quotas.get(senderJid);
 
     if (!record || now - record.windowStart >= this.windowDurationMs) {
@@ -68,6 +71,7 @@ export class UserRateLimiter {
    */
   public getStats(): Map<string, { tokens: number; windowStart: number; resetInSeconds: number }> {
     const now = Date.now();
+    this.pruneExpired(now);
     const activeStats = new Map<string, { tokens: number; windowStart: number; resetInSeconds: number }>();
 
     for (const [jid, record] of this.quotas.entries()) {
@@ -80,9 +84,6 @@ export class UserRateLimiter {
             Math.ceil((record.windowStart + this.windowDurationMs - now) / 1000)
           ),
         });
-      } else {
-        // Prune expired record to avoid unbounded memory growth
-        this.quotas.delete(jid);
       }
     }
 
@@ -101,6 +102,14 @@ export class UserRateLimiter {
    */
   public clear(): void {
     this.quotas.clear();
+  }
+
+  private pruneExpired(now: number): void {
+    if (now - this.lastPruneAt < 60_000) return;
+    this.lastPruneAt = now;
+    for (const [jid, record] of this.quotas) {
+      if (now - record.windowStart >= this.windowDurationMs) this.quotas.delete(jid);
+    }
   }
 }
 

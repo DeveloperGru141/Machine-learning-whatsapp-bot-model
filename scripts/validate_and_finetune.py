@@ -1,7 +1,7 @@
 import json
-import sqlite3
 import sys
 import re
+import random
 from pathlib import Path
 
 # Ensure UTF-8 output on Windows
@@ -11,15 +11,16 @@ if sys.platform == "win32":
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "bot.sqlite"
+APPROVED_INPUT = DATA_DIR / "approved_training.jsonl"
+CURATED_INPUT = DATA_DIR / "curated_seed.jsonl"
+PUBLIC_INPUT = DATA_DIR / "public_training.jsonl"
 INPUT_DATASET = DATA_DIR / "finetune_dataset.jsonl"
 TRAIN_DATASET = DATA_DIR / "train.jsonl"
 VAL_DATASET = DATA_DIR / "validation.jsonl"
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are Forgelabs assistant, a sharp, witty, and culturally savvy real WhatsApp user "
-    "living inside WhatsApp chats. Your creator is Ademola, an aspiring ML/AI Engineer. Talk naturally like a real person, "
-    "NO robotic AI clichés, authentic expressive emojis (1-2 emojis max per reply)."
+    "You are a helpful WhatsApp conversation assistant. Answer naturally and clearly, "
+    "match the other person's language and register, and avoid unnecessary personal data."
 )
 
 ROBOTIC_CLICHES = [
@@ -109,6 +110,9 @@ SENSITIVE_PATTERNS = [
     re.compile(r"sk-[a-zA-Z0-9_-]{20,}", re.IGNORECASE),
     re.compile(r"eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}", re.IGNORECASE),
     re.compile(r"\b10\d{12,14}(?:@lid)?\b"),
+    re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}"),
+    re.compile(r"(?<!\w)\+?\d[\d ()-]{6,}\d(?!\w)"),
+    re.compile(r"\b[\w.+-]+@(?:s\.whatsapp\.net|lid|g\.us)\b", re.IGNORECASE),
     re.compile(r"(?:password|secret|apikey|api_key)\s*[:=]\s*\S+", re.IGNORECASE),
     re.compile(r"ignore\s+(?:all\s+)?previous\s+instructions", re.IGNORECASE),
 ]
@@ -120,54 +124,24 @@ def validate_and_tighten():
 
     raw_candidates = []
 
-    # 1. Pull candidates from INPUT_DATASET if it exists
-    if INPUT_DATASET.exists():
-        with open(INPUT_DATASET, "r", encoding="utf-8") as f:
+    # Only curated, public, or explicitly approved JSONL sources are eligible.
+    # Runtime chat logs, contacts, memories, and SQLite are never read.
+    for source_path in (CURATED_INPUT, PUBLIC_INPUT, APPROVED_INPUT):
+        if not source_path.exists():
+            continue
+        with open(source_path, "r", encoding="utf-8") as f:
             for line in f:
                 line_str = line.strip()
                 if not line_str:
                     continue
                 try:
                     data = json.loads(line_str)
-                    raw_candidates.append(data)
+                    if isinstance(data, dict) and isinstance(data.get("messages"), list):
+                        raw_candidates.append(data)
                 except json.JSONDecodeError:
                     pass
 
-    # 2. Also pull candidates from SQLite fine_tuning_pairs & dialogue_exemplars
-    if DB_PATH.exists():
-        try:
-            conn = sqlite3.connect(str(DB_PATH))
-            cursor = conn.cursor()
-
-            # From fine_tuning_pairs
-            cursor.execute("SELECT system_prompt, user_message, assistant_response FROM fine_tuning_pairs")
-            for sp, um, ar in cursor.fetchall():
-                if um and ar:
-                    sys_content = sp if (sp and "Forgelabs assistant" in sp and "ADEMOLA" in sp) else DEFAULT_SYSTEM_PROMPT
-                    raw_candidates.append({
-                        "messages": [
-                            {"role": "system", "content": sys_content},
-                            {"role": "user", "content": um},
-                            {"role": "assistant", "content": ar},
-                        ]
-                    })
-
-            # From dialogue_exemplars
-            cursor.execute("SELECT context_text, response_text FROM dialogue_exemplars WHERE response_type = 'text'")
-            for ctx, resp in cursor.fetchall():
-                if ctx and resp:
-                    raw_candidates.append({
-                        "messages": [
-                            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
-                            {"role": "user", "content": ctx},
-                            {"role": "assistant", "content": resp},
-                        ]
-                    })
-            conn.close()
-        except Exception as e:
-            print(f"⚠️ SQLite reading warning: {e}")
-
-    print(f"📥 Collected {len(raw_candidates)} total candidate samples for inspection.")
+    print(f"📥 Collected {len(raw_candidates)} reviewed source samples for inspection.")
 
     valid_samples = []
     skipped_reasons = {
@@ -192,21 +166,25 @@ def validate_and_tighten():
             skipped_reasons["missing_roles"] += 1
             continue
 
+        if not all(isinstance(message, dict) for message in messages):
+            skipped_reasons["missing_roles"] += 1
+            continue
         roles = [m.get("role") for m in messages]
-        if "user" not in roles or "assistant" not in roles:
+        if not all(isinstance(role, str) for role in roles) or sorted(roles) != ["assistant", "system", "user"]:
             skipped_reasons["missing_roles"] += 1
             continue
 
-        user_msg = next((m.get("content", "") for m in messages if m.get("role") == "user"), "").strip()
-        asst_msg = next((m.get("content", "") for m in messages if m.get("role") == "assistant"), "").strip()
+        user_msg = next((str(m.get("content", "")) for m in messages if m.get("role") == "user"), "").strip()
+        asst_msg = next((str(m.get("content", "")) for m in messages if m.get("role") == "assistant"), "").strip()
 
         # Rule 1: Length check
-        if len(user_msg) < 2 or len(asst_msg) < 3:
+        if len(user_msg) < 2 or len(asst_msg) < 3 or len(user_msg) > 4000 or len(asst_msg) > 4000:
             skipped_reasons["too_short"] += 1
             continue
 
         # Sensitive Data Guardrail: discard any pair with API keys, tokens, or private IDs
-        if any(pat.search(asst_msg) or pat.search(user_msg) for pat in SENSITIVE_PATTERNS):
+        all_content = "\n".join(str(m.get("content", "")) for m in messages)
+        if any(pat.search(all_content) for pat in SENSITIVE_PATTERNS) or re.search(r"<(?:think|analysis|tool_call|function)\b", all_content, re.I):
             skipped_reasons["sensitive_data_leak"] += 1
             continue
 
@@ -228,40 +206,31 @@ def validate_and_tighten():
             skipped_reasons["deprecated_artifact"] += 1
             continue
 
-        # Rule 5: Creator consistency check
-        if any(ck in user_lower for ck in CREATOR_KEYWORDS):
-            if "ademola" not in asst_lower:
-                skipped_reasons["inconsistent_creator"] += 1
-                continue
-
-        # Rule 6: Natural emoji limit (maximum 2 emojis per assistant reply)
+        # Rule 5: Natural emoji limit (maximum 2 emojis per assistant reply)
         if count_emojis(asst_msg) > 2:
             skipped_reasons["emoji_spam"] += 1
             continue
 
-        # Rule 7: Deduplication
+        # Rule 6: Deduplication
         pair_key = (user_lower, asst_lower)
         if pair_key in seen_pairs:
             skipped_reasons["duplicates"] += 1
             continue
         seen_pairs.add(pair_key)
 
-        # Rule 8: Strict Response Diversity & Repetition Cap (Max 3 identical responses)
+        # Rule 7: Strict Response Diversity & Repetition Cap (Max 3 identical responses)
         resp_key = asst_lower.strip()
         if response_counts.get(resp_key, 0) >= 3:
             skipped_reasons["repetitive_response_cap"] += 1
             continue
         response_counts[resp_key] = response_counts.get(resp_key, 0) + 1
 
-        # Ensure the unified system prompt is strictly enforced
-        has_system = False
-        for m in messages:
-            if m.get("role") == "system":
-                m["content"] = DEFAULT_SYSTEM_PROMPT
-                has_system = True
-                break
-        if not has_system:
-            messages.insert(0, {"role": "system", "content": DEFAULT_SYSTEM_PROMPT})
+        # Use a generic system prompt and exactly the user/assistant example being curated.
+        data["messages"] = [
+            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": asst_msg},
+        ]
 
         # Format tightening for WhatsApp: strip un-conversational Markdown headers and excess spacing
         for m in messages:
@@ -284,10 +253,11 @@ def validate_and_tighten():
         print("\n❌ No valid samples remaining after filtering.")
         return
 
-    # Train / Validation Split (90% Train, 10% Validation)
-    split_idx = int(len(valid_samples) * 0.9)
+    # Shuffle only after all row-wise filtering; exact duplicates were removed before splitting.
+    random.Random(42).shuffle(valid_samples)
+    split_idx = max(1, int(len(valid_samples) * 0.9)) if len(valid_samples) > 1 else len(valid_samples)
     train_data = valid_samples[:split_idx]
-    val_data = valid_samples[split_idx:] if len(valid_samples) > 10 else valid_samples
+    val_data = valid_samples[split_idx:]
 
     with open(TRAIN_DATASET, "w", encoding="utf-8") as f:
         for s in train_data:
@@ -303,6 +273,7 @@ def validate_and_tighten():
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
 
     print(f"\n✅ Fine-Tuning Pipeline Tightened & Saved:")
+    print(f"   📥 Approved sources:    {CURATED_INPUT.name}, {PUBLIC_INPUT.name}, {APPROVED_INPUT.name}")
     print(f"   📁 Clean Unified Dataset: {INPUT_DATASET} ({len(valid_samples)} pairs)")
     print(f"   📁 Training Set (90%):    {TRAIN_DATASET} ({len(train_data)} pairs)")
     print(f"   📁 Validation Set (10%):  {VAL_DATASET} ({len(val_data)} pairs)")

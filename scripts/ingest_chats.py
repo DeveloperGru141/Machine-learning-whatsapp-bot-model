@@ -1,10 +1,7 @@
-import os
 import re
 import sys
 import json
-import sqlite3
 from pathlib import Path
-from datetime import datetime
 
 # Ensure UTF-8 output on Windows terminal
 if sys.platform == "win32":
@@ -14,9 +11,6 @@ if sys.platform == "win32":
 # Path references
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "bot.sqlite"
-FINETUNE_OUTPUT = DATA_DIR / "finetune_dataset.jsonl"
-
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Regex patterns for WhatsApp chat export formats
@@ -54,55 +48,6 @@ def is_system_message(text: str) -> bool:
         if re.search(pat, text, re.IGNORECASE):
             return True
     return False
-
-def init_db(conn: sqlite3.Connection):
-    cursor = conn.cursor()
-    cursor.executescript("""
-        PRAGMA journal_mode = WAL;
-
-        CREATE TABLE IF NOT EXISTS chat_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_jid TEXT NOT NULL,
-            sender_jid TEXT NOT NULL,
-            sender_name TEXT,
-            is_group INTEGER NOT NULL,
-            content_type TEXT NOT NULL,
-            message_text TEXT,
-            sticker_filename TEXT,
-            timestamp INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS dialogue_exemplars (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_jid TEXT NOT NULL,
-            context_text TEXT NOT NULL,
-            response_text TEXT,
-            response_type TEXT NOT NULL,
-            sticker_filename TEXT,
-            vibe_classification TEXT,
-            quality_score REAL DEFAULT 1.0,
-            created_at INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS fine_tuning_pairs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            system_prompt TEXT NOT NULL,
-            user_message TEXT NOT NULL,
-            assistant_response TEXT NOT NULL,
-            tools_invoked TEXT,
-            created_at INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS user_facts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_jid TEXT NOT NULL,
-            fact TEXT NOT NULL,
-            category TEXT DEFAULT 'general',
-            updated_at INTEGER NOT NULL,
-            UNIQUE(user_jid, fact)
-        );
-    """)
-    conn.commit()
 
 def parse_txt_chat(file_path: Path):
     """Parses a WhatsApp exported .txt chat file into clean conversational turns."""
@@ -142,44 +87,6 @@ def parse_txt_chat(file_path: Path):
     print(f"✅ Extracted {len(turns)} clean messages from {file_path.name}")
     return turns
 
-def parse_msgstore_sqlite(msgstore_path: Path):
-    """Parses a decrypted WhatsApp SQLite database file."""
-    print(f"📖 Parsing decrypted msgstore database: {msgstore_path.name}")
-    try:
-        source_conn = sqlite3.connect(msgstore_path)
-        cur = source_conn.cursor()
-        tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-        
-        turns = []
-        target_tbl = None
-        for cand in ["message", "messages"]:
-            if cand in tables:
-                target_tbl = cand
-                break
-
-        if target_tbl:
-            cols = [info[1] for info in cur.execute(f"PRAGMA table_info({target_tbl})").fetchall()]
-            text_col = "text_data" if "text_data" in cols else ("data" if "data" in cols else None)
-            from_me_col = "from_me" if "from_me" in cols else ("key_from_me" if "key_from_me" in cols else None)
-
-            if text_col and from_me_col:
-                query = f"SELECT {text_col}, {from_me_col} FROM {target_tbl} WHERE {text_col} IS NOT NULL AND {text_col} != ''"
-                rows = cur.execute(query).fetchall()
-                for text_val, from_me in rows:
-                    if not text_val or is_system_message(text_val):
-                        continue
-                    turns.append({
-                        "sender": "Me" if from_me == 1 else "Friend",
-                        "text": text_val.strip()
-                    })
-
-        source_conn.close()
-        print(f"✅ Extracted {len(turns)} clean messages from {msgstore_path.name}")
-        return turns
-    except Exception as e:
-        print(f"⚠️ Error reading {msgstore_path.name}: {e}")
-        return []
-
 SENSITIVE_DATA_PATTERNS = [
     re.compile(r"gsk_[a-zA-Z0-9_-]{20,}", re.IGNORECASE),
     re.compile(r"rnd_[a-zA-Z0-9_-]{20,}", re.IGNORECASE),
@@ -190,139 +97,66 @@ SENSITIVE_DATA_PATTERNS = [
     re.compile(r"(?:password|secret|apikey|api_key)\s*[:=]\s*\S+", re.IGNORECASE),
 ]
 
-def contains_sensitive_data(text: str) -> bool:
-    for pat in SENSITIVE_DATA_PATTERNS:
-        if pat.search(text):
-            return True
-    return False
-
-def ingest_turns(conn: sqlite3.Connection, turns: list, chat_name: str):
-    """Processes turns into dialogue exemplars, training pairs, and knowledge."""
-    cursor = conn.cursor()
-    ingested_pairs = 0
-
-    system_prompt = (
-        "You are Forgelabs assistant, a sharp, witty, and culturally savvy real WhatsApp user "
-        "living inside WhatsApp chats. Your creator is Ademola. Talk naturally like a real person, "
-        "NO robotic AI clichés, authentic expressive emojis (1-2 emojis max per reply)."
-    )
-
-    now = int(datetime.now().timestamp() * 1000)
-
-    for i in range(len(turns) - 1):
-        turn_a = turns[i]
-        turn_b = turns[i + 1]
-
-        if turn_a["sender"] != turn_b["sender"]:
-            user_text = turn_a["text"]
-            resp_text = turn_b["text"]
-
-            if len(user_text) < 2 or len(resp_text) < 2:
-                continue
-
-            if contains_sensitive_data(user_text) or contains_sensitive_data(resp_text):
-                continue
-
-            cursor.execute("""
-                INSERT INTO chat_logs (chat_jid, sender_jid, sender_name, is_group, content_type, message_text, timestamp)
-                VALUES (?, ?, ?, 1, 'text', ?, ?)
-            """, (chat_name, turn_a["sender"], turn_a["sender"], user_text, now))
-
-            cursor.execute("""
-                INSERT INTO dialogue_exemplars (chat_jid, context_text, response_text, response_type, vibe_classification, quality_score, created_at)
-                VALUES (?, ?, ?, 'text', 'natural_dialogue', 1.0, ?)
-            """, (chat_name, user_text, resp_text, now))
-
-            cursor.execute("""
-                INSERT INTO fine_tuning_pairs (system_prompt, user_message, assistant_response, tools_invoked, created_at)
-                VALUES (?, ?, ?, '[]', ?)
-            """, (system_prompt, user_text, resp_text, now))
-
-            ingested_pairs += 1
-
-    conn.commit()
-    print(f"🎉 Ingested {ingested_pairs} training pairs into database from {chat_name}")
-    return ingested_pairs
-
-def export_jsonl_dataset(conn: sqlite3.Connection):
-    """Exports all fine_tuning_pairs to finetune_dataset.jsonl"""
-    cursor = conn.cursor()
-    rows = cursor.execute("""
-        SELECT system_prompt, user_message, assistant_response
-        FROM fine_tuning_pairs
-        ORDER BY id ASC
-    """).fetchall()
-
-    with open(FINETUNE_OUTPUT, "w", encoding="utf-8") as f:
-        for sys_p, user_msg, asst_resp in rows:
-            record = {
-                "messages": [
-                    {"role": "system", "content": sys_p},
-                    {"role": "user", "content": user_msg},
-                    {"role": "assistant", "content": asst_resp}
-                ]
-            }
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    print(f"📁 Exported {len(rows)} training examples to: {FINETUNE_OUTPUT}")
-
 def main():
-    print("=" * 60)
-    print("🚀 WhatsApp Chat History Cleaner & Fine-Tuning Pipeline")
-    print("=" * 60)
+    import argparse
 
-    conn = sqlite3.connect(DB_PATH)
-    init_db(conn)
+    parser = argparse.ArgumentParser(description="Import one reviewed WhatsApp text export into approved training data.")
+    parser.add_argument("--input", required=True, type=Path, help="Explicit path to one WhatsApp .txt export")
+    parser.add_argument("--assistant-sender", required=True, help="Exact sender label for the bot in that export")
+    parser.add_argument("--output", type=Path, default=DATA_DIR / "approved_training.jsonl")
+    args = parser.parse_args()
+    if not args.input.is_file() or args.input.suffix.lower() != ".txt":
+        parser.error("--input must point to one existing .txt export; directory scans and msgstore databases are unsupported")
+    if not args.assistant_sender.strip():
+        parser.error("--assistant-sender must not be empty")
 
-    search_dirs = [
-        Path.home() / "Downloads",
-        DATA_DIR,
-        BASE_DIR
+    turns = parse_txt_chat(args.input)
+    assistant_sender = args.assistant_sender.strip().casefold()
+    system_prompt = (
+        "You are a helpful WhatsApp conversation assistant. Answer naturally and clearly, "
+        "match the other person's language and register, and avoid unnecessary personal data."
+    )
+    sensitive_patterns = SENSITIVE_DATA_PATTERNS + [
+        re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}"),
+        re.compile(r"(?<!\w)\+?\d[\d ()-]{6,}\d(?!\w)"),
+        re.compile(r"[\w.+-]+@(?:s\.whatsapp\.net|lid|g\.us)", re.I),
     ]
+    existing = set()
+    if args.output.exists():
+        with args.output.open("r", encoding="utf-8") as saved:
+            for line in saved:
+                try:
+                    messages = json.loads(line).get("messages", [])
+                    user = next(m["content"] for m in messages if m["role"] == "user")
+                    reply = next(m["content"] for m in messages if m["role"] == "assistant")
+                    existing.add((user.strip().casefold(), reply.strip().casefold()))
+                except (ValueError, StopIteration, KeyError, TypeError, AttributeError):
+                    continue
 
-    # 1. Search for decrypted SQLite msgstore databases
-    db_files = []
-    for d in search_dirs:
-        if d.exists():
-            db_files.extend(list(d.glob("msgstore*.db")))
+    additions = []
+    for previous, answer in zip(turns, turns[1:]):
+        if previous["sender"].casefold() == assistant_sender or answer["sender"].casefold() != assistant_sender:
+            continue
+        user_text, response = previous["text"].strip(), answer["text"].strip()
+        if not (2 <= len(user_text) <= 4000 and 3 <= len(response) <= 4000):
+            continue
+        if any(pattern.search(user_text) or pattern.search(response) for pattern in sensitive_patterns):
+            continue
+        key = (user_text.casefold(), response.casefold())
+        if key in existing:
+            continue
+        existing.add(key)
+        additions.append({"messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": response},
+        ]})
 
-    for db_f in db_files:
-        turns = parse_msgstore_sqlite(db_f)
-        if turns:
-            ingest_turns(conn, turns, db_f.stem)
-
-    # 2. Search for any .txt exported chats
-    txt_files = []
-    for d in search_dirs:
-        if d.exists():
-            txt_files.extend(list(d.glob("*.txt")))
-            txt_files.extend(list(d.glob("WhatsApp Chat*.txt")))
-
-    valid_txt = [f for f in set(txt_files) if "Read Me" not in f.name]
-
-    if valid_txt:
-        print(f"🔍 Found {len(valid_txt)} chat export text file(s):")
-        for f in valid_txt:
-            turns = parse_txt_chat(f)
-            ingest_turns(conn, turns, f.stem)
-
-    # 3. Check for .crypt14 files and notify user
-    crypt_files = []
-    for d in search_dirs:
-        if d.exists():
-            crypt_files.extend(list(d.glob("*.crypt*")))
-
-    if crypt_files and not db_files and not valid_txt:
-        print(f"ℹ️ Found {len(crypt_files)} encrypted backup file(s): {[c.name for c in crypt_files]}")
-        print("🔒 .crypt14 files are AES-256-GCM encrypted WhatsApp database backups.")
-        print("💡 To ingest them:")
-        print("   1. If you have the 64-digit encryption key or 'key' file, we can decrypt it.")
-        print("   2. OR simply export your most active chats from WhatsApp on your phone:")
-        print("      Open Chat > 3 dots > More > Export Chat > Without Media > save .txt into data/")
-
-    # 4. Export updated fine-tuning dataset
-    export_jsonl_dataset(conn)
-    conn.close()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with args.output.open("a", encoding="utf-8", newline="\n") as output:
+        for sample in additions:
+            output.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    print(f"Reviewed import complete: added {len(additions)} eligible pairs to {args.output.name}; message text was not printed.")
 
 if __name__ == "__main__":
     main()

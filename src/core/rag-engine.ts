@@ -1,7 +1,7 @@
 import { db } from '../memory/db.js';
 import { vectorStore } from '../learning/vector-store.js';
-import { contactService, ContactRecord } from '../memory/contact-service.js';
-import { memoryService, UserFact, GroupFact } from '../memory/memory-service.js';
+import { contactService } from '../memory/contact-service.js';
+import { memoryService, UserFact } from '../memory/memory-service.js';
 
 export interface RagDocument {
   source: 'user_fact' | 'group_fact' | 'contact' | 'historical_chat' | 'vector_knowledge';

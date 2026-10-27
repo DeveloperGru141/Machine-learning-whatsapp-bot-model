@@ -5,7 +5,6 @@ import { pathToFileURL } from 'url';
 import { fileURLToPath } from 'node:url';
 import { PluginRegistry, pluginRegistry } from './registry.js';
 import { BotTool, ExecutionContext, IPlugin, ToolResult } from './types.js';
-import { config } from '../config/env.js';
 import { userProfileManager } from '../memory/user-profiles.js';
 
 const __filename = fileURLToPath(import.meta.url);

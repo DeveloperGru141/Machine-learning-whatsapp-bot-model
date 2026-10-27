@@ -263,7 +263,7 @@ export class WebSearchPlugin implements IPlugin {
           },
         },
       },
-      execute: async (args: { team?: string; league?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (args: { team?: string; league?: string }, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
           const { text, matches } = await fetchLiveFootballScores(args.team, args.league);
           return {

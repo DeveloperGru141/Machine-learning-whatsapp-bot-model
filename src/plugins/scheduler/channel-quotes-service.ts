@@ -1,12 +1,9 @@
-import path from 'path';
 import fs from 'fs';
 import type { WASocket } from '@whiskeysockets/baileys';
 import {
   saveChannelQuote,
   getFreshestQuoteForNiche,
   markQuoteUsed,
-  getAllChannelQuotes,
-  getChannelQuotesStats,
   getAllKnownGroups,
   upsertKnownGroup,
   logAutonomousAction,
@@ -15,7 +12,6 @@ import {
   db,
 } from '../../memory/db.js';
 import { chatLogger } from '../../memory/chat-logger.js';
-import { llmClient } from '../../agent/llm-client.js';
 import { getOrGenerateQuoteMedia } from './media-card-generator.js';
 import { getStartOfTodayWat } from './scheduler-db.js';
 import { OutboundSender } from '../../core/sender.js';

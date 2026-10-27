@@ -12,20 +12,18 @@ import {
   markTaskFired,
   markTaskFailed,
   getNextFireAtForTimeOfDay,
+  getTargetUtcTimestamp,
   advanceToNextDay,
   rescheduleRecurringTask,
   getActiveDailyBroadcasts,
   cancelScheduledTask,
-  getInitialScheduleFireAt,
-  hasFiredToday,
   getTimeZoneParts,
-  ScheduledTask,
 } from './scheduler-db.js';
 import { chatLogger } from '../../memory/chat-logger.js';
 import { llmClient } from '../../agent/llm-client.js';
 import { healthMonitor } from '../../core/health-monitor.js';
+import { OutboundSender } from '../../core/sender.js';
 import { db } from '../../memory/db.js';
-import { config, normalizePhoneNumber } from '../../config/env.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
 import { contactService } from '../../memory/contact-service.js';
 import {
@@ -33,29 +31,27 @@ import {
   broadcastEveningGroupRoundup,
   scrapeWhatsAppChannelQuotes,
   seedChannelQuotesIfEmpty,
-  WHATSAPP_CHANNEL_INVITE_CODE,
-  WHATSAPP_CHANNEL_URL,
-  WHATSAPP_CHANNEL_NAME,
 } from './channel-quotes-service.js';
 import { getOrGenerateMemeMedia, getOrGenerateQuoteMedia } from './media-card-generator.js';
 import {
   getAllChannelQuotes,
   getChannelQuotesStats,
-  QuoteNiche,
-  getBotSetting,
   setBotSetting,
   getFreshestQuoteForNiche,
   getFreshestMemeForPosting,
+  markMemePosted,
 } from '../../memory/db.js';
 import {
   postChannelMemeWithCooldown,
   formatMemeBroadcast,
   scrapeWhatsAppChannelMemes,
   getMemeCooldownStatus,
+  getStatusMemePostingStatus,
+  reserveStatusMemePost,
+  releaseStatusMemePost,
+  STATUS_MEME_MIN_INTERVAL_MS,
+  STATUS_MEME_DAILY_LIMIT,
   seedChannelMemesIfEmpty,
-  WHATSAPP_MEME_CHANNEL_INVITE_CODE,
-  WHATSAPP_MEME_CHANNEL_URL,
-  WHATSAPP_MEME_CHANNEL_NAME,
 } from './channel-memes-service.js';
 
 let activeSocket: WASocket | null = null;
@@ -466,24 +462,53 @@ export async function safeSendStatus(
   extraOptions: any = {},
   statusJidList: string[] = []
 ): Promise<void> {
+  const safeContent = sanitizeStatusContent(content);
+  if (!hasVisibleStatusContent(safeContent)) {
+    throw new Error('Status content was empty after removing internal reasoning and tool markup.');
+  }
   const safeList = (statusJidList && statusJidList.length > 0)
     ? statusJidList.slice(0, 25)
     : ['2348108574293@s.whatsapp.net'];
 
   try {
-    await socket.sendMessage('status@broadcast', content, {
+    await socket.sendMessage('status@broadcast', safeContent, {
       broadcast: true,
       ...extraOptions,
       statusJidList: safeList,
     } as any);
   } catch (err: any) {
     console.warn(`[StatusPoster] Status send with ${safeList.length} contacts failed (${err.message}). Retrying with primary contact fallback...`);
-    await socket.sendMessage('status@broadcast', content, {
+    await socket.sendMessage('status@broadcast', safeContent, {
       broadcast: true,
       ...extraOptions,
       statusJidList: ['2348108574293@s.whatsapp.net'],
     } as any);
   }
+}
+
+function sanitizeStatusContent(value: any, parentKey = ''): any {
+  if (typeof value === 'string') {
+    return !parentKey || ['text', 'caption', 'conversation', 'body'].includes(parentKey.toLowerCase())
+      ? OutboundSender.sanitizeOutboundText(value)
+      : value;
+  }
+  if (!value || typeof value !== 'object' || Buffer.isBuffer(value) || value instanceof Uint8Array) return value;
+  if (Array.isArray(value)) return value.map((item) => sanitizeStatusContent(item, parentKey));
+  const sanitized: Record<string, any> = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (/^(?:reasoning_content|chain_of_thought|tool_calls?)$/i.test(key)) continue;
+    sanitized[key] = sanitizeStatusContent(child, key);
+  }
+  return sanitized;
+}
+
+function hasVisibleStatusContent(value: any): boolean {
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (!value || typeof value !== 'object') return false;
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) return value.byteLength > 0;
+  return Array.isArray(value)
+    ? value.some(hasVisibleStatusContent)
+    : Object.values(value).some(hasVisibleStatusContent);
 }
 
 export type StatusCategory = 'all' | 'motion_intro' | 'bible_verse' | 'motivational_quote' | 'tech_news' | 'meme';
@@ -585,42 +610,57 @@ export async function postMorningStatusBundle(
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Tech News] ${text}`);
         postedTypes.push('tech_news');
       } else if (cat === 'meme') {
-        const meme = getFreshestMemeForPosting();
-        let imagePath: string | null = null;
-        if (meme) {
-          try {
-            imagePath = await getOrGenerateMemeMedia(meme.id, meme.caption, meme.image_path);
-          } catch {}
-        }
-        const hasImage = Boolean(imagePath && fs.existsSync(imagePath));
-        if (hasImage && meme) {
-          await safeSendStatus(
-            socket,
-            { image: fs.readFileSync(imagePath!), caption: formatMemeBroadcast(meme) },
-            {},
-            statusJidList
-          );
-          chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${meme.caption}`);
-          postedTypes.push('meme');
+        const statusPolicy = getStatusMemePostingStatus();
+        if (!statusPolicy.canPost) {
+          console.log(`[StatusPoster] Skipping meme: ${statusPolicy.postedToday}/${statusPolicy.dailyLimit} status memes posted today; spacing remaining ${statusPolicy.remainingMinutes} minute(s).`);
         } else {
-          const webMeme = await scrapeWebMeme();
-          if (webMeme.imageBuffer) {
+          const reservation = reserveStatusMemePost();
+          if (!reservation) {
+            console.log('[StatusPoster] Skipping meme because another send reserved the remaining daily slot.');
+          } else {
+            try {
+          const meme = getFreshestMemeForPosting();
+          let imagePath: string | null = null;
+          if (meme) {
+            try {
+              imagePath = await getOrGenerateMemeMedia(meme.id, meme.caption, meme.image_path);
+            } catch {}
+          }
+          const hasImage = Boolean(imagePath && fs.existsSync(imagePath));
+          let postedCaption = meme?.caption || '';
+          if (hasImage && meme) {
             await safeSendStatus(
               socket,
-              { image: webMeme.imageBuffer, caption: webMeme.caption },
+              { image: fs.readFileSync(imagePath!), caption: formatMemeBroadcast(meme) },
               {},
               statusJidList
             );
           } else {
-            await safeSendStatus(
-              socket,
-              { text: meme ? formatMemeBroadcast(meme) : webMeme.caption },
-              { backgroundColor: '#3a0ca3', font: 1 },
-              statusJidList
-            );
+            const webMeme = await scrapeWebMeme();
+            postedCaption = meme?.caption || webMeme.caption;
+            if (webMeme.imageBuffer) {
+              await safeSendStatus(
+                socket,
+                { image: webMeme.imageBuffer, caption: webMeme.caption },
+                {},
+                statusJidList
+              );
+            } else {
+              await safeSendStatus(
+                socket,
+                { text: meme ? formatMemeBroadcast(meme) : webMeme.caption },
+                { backgroundColor: '#3a0ca3', font: 1 },
+                statusJidList
+              );
+            }
           }
-          chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${webMeme.caption}`);
+          chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${postedCaption}`);
+          if (meme) markMemePosted(meme.id);
           postedTypes.push('meme');
+            } finally {
+              releaseStatusMemePost(reservation);
+            }
+          }
         }
       }
 
@@ -641,6 +681,56 @@ export async function postMorningStatusBundle(
 export function getTodayWatDate(): string {
   const parts = getTimeZoneParts(new Date(), 'Africa/Lagos');
   return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
+}
+
+const STATUS_MEME_WINDOW_START_MINUTE = 13 * 60;
+const STATUS_MEME_WINDOW_END_MINUTE = 20 * 60 + 59;
+
+/** Returns a randomized future slot in the 13:00–20:59 WAT status-meme window. */
+export function getNextRandomStatusMemeFireAt(now = Date.now(), skipToday = false): number {
+  const timezone = 'Africa/Lagos';
+  const status = getStatusMemePostingStatus(now);
+  const today = getTimeZoneParts(new Date(now), timezone);
+  const earliestAt = Math.max(now + 5 * 60_000, status.lastPostedAt + STATUS_MEME_MIN_INTERVAL_MS);
+  const earliestParts = getTimeZoneParts(new Date(earliestAt), timezone);
+
+  const toDayNumber = (parts: { year: number; month: number; day: number }) =>
+    Math.floor(Date.UTC(parts.year, parts.month - 1, parts.day) / 86_400_000);
+  const fromDayNumber = (dayNumber: number) => {
+    const date = new Date(dayNumber * 86_400_000);
+    return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
+  };
+
+  const todayNumber = toDayNumber(today);
+  let targetDayNumber = todayNumber;
+  if (skipToday || status.postedToday >= STATUS_MEME_DAILY_LIMIT) {
+    targetDayNumber++;
+  }
+  targetDayNumber = Math.max(targetDayNumber, toDayNumber(earliestParts));
+
+  let targetDate = fromDayNumber(targetDayNumber);
+  let earliestMinute = targetDayNumber === toDayNumber(earliestParts)
+    ? earliestParts.hour * 60 + earliestParts.minute
+    : STATUS_MEME_WINDOW_START_MINUTE;
+  let firstAllowedMinute = Math.max(STATUS_MEME_WINDOW_START_MINUTE, earliestMinute);
+
+  if (firstAllowedMinute > STATUS_MEME_WINDOW_END_MINUTE) {
+    targetDayNumber++;
+    targetDate = fromDayNumber(targetDayNumber);
+    firstAllowedMinute = STATUS_MEME_WINDOW_START_MINUTE;
+  }
+
+  const chosenMinute = firstAllowedMinute + Math.floor(
+    Math.random() * (STATUS_MEME_WINDOW_END_MINUTE - firstAllowedMinute + 1)
+  );
+  return getTargetUtcTimestamp(
+    targetDate.year,
+    targetDate.month,
+    targetDate.day,
+    Math.floor(chosenMinute / 60),
+    chosenMinute % 60,
+    timezone
+  );
 }
 
 export class SchedulerPlugin implements IPlugin {
@@ -671,7 +761,7 @@ export class SchedulerPlugin implements IPlugin {
     this.ensureEveningGroupRoundupSchedule();
     // Seed memes from WhatsApp channel Memes (0029Vb6oS4LJkK7AvtORyH46)
     seedChannelMemesIfEmpty();
-    // Automatically ensure 2-hour meme posting schedule (with strict 2hr cooldown)
+    // Automatically ensure one additional status meme at a randomized afternoon/evening time.
     this.ensureTwoHourMemeSchedule();
 
     if (this.timerInterval) {
@@ -862,10 +952,7 @@ export class SchedulerPlugin implements IPlugin {
   }
 
 
-  /**
-   * Automatically schedules a recurring 2-hour meme post from WhatsApp Channel Memes (0029Vb6oS4LJkK7AvtORyH46)
-   * with strict 2-hour cooldown enforcement between postings.
-   */
+  /** Automatically schedules one extra status meme per day in a randomized WAT time window. */
   public ensureTwoHourMemeSchedule(): void {
     try {
       const statusJid = 'status@broadcast';
@@ -873,29 +960,32 @@ export class SchedulerPlugin implements IPlugin {
         .prepare(`SELECT id, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'channel_meme_2hr_post' AND status = 'pending'`)
         .get(statusJid) as { id: number; fire_at: number } | undefined;
 
-      const cooldown = getMemeCooldownStatus();
-      // If cooldown elapsed (can post now), fire in 60 seconds; otherwise wait for remaining cooldown
-      const targetDelay = cooldown.canPost ? 60_000 : Math.max(60_000, cooldown.remainingMs);
-      const fireAt = Date.now() + targetDelay;
+      const now = Date.now();
+      const fireAt = getNextRandomStatusMemeFireAt(now);
+      const existingParts = existing ? getTimeZoneParts(new Date(existing.fire_at), 'Africa/Lagos') : null;
+      const existingMinute = existingParts ? existingParts.hour * 60 + existingParts.minute : -1;
+      const existingIsInWindow = existingMinute >= STATUS_MEME_WINDOW_START_MINUTE && existingMinute <= STATUS_MEME_WINDOW_END_MINUTE;
+      const existingIsUsable = Boolean(existing && existing.fire_at > now + 60_000 && existingIsInWindow);
 
       if (existing) {
-        // If the existing task is scheduled more than 2 hours in the future or expired, synchronize it
-        if (existing.fire_at > Date.now() + 2 * 60 * 60 * 1000 || existing.fire_at < Date.now() - 60_000) {
+        // Keep a valid pending randomized slot; migrate old fixed two-hour slots to the new window.
+        if (!existingIsUsable) {
           db.prepare(`UPDATE scheduled_tasks SET fire_at = ? WHERE id = ?`).run(fireAt, existing.id);
+          console.log(`[Scheduler] 🎲 Updated status meme task #${existing.id} to ${new Date(fireAt).toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })} WAT.`);
         }
       } else {
         insertScheduledTask(
           statusJid,
           '2348108574293@s.whatsapp.net',
-          '2-Hour WhatsApp Channel Meme Broadcast',
+          'Randomized Daily WhatsApp Status Meme',
           fireAt,
-          'every_2_hours',
+          'daily_random_window',
           'channel_meme_2hr_post',
-          '2hr',
-          'Scrapes and posts viral memes from WhatsApp Channel Memes (0029Vb6oS4LJkK7AvtORyH46) with 2-hour cooldown',
+          '13:00-20:59 WAT (random)',
+          'Posts at most one additional status meme in a randomized afternoon/evening slot; daily status limit is two memes total.',
           'WhatsApp Status'
         );
-        console.log(`[Scheduler] 😂 Registered 2-hour meme poster schedule with strict 2hr cooldown (fireAt: ${new Date(fireAt).toLocaleTimeString()}).`);
+        console.log(`[Scheduler] 🎲 Registered randomized daily status meme at ${new Date(fireAt).toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })} WAT.`);
       }
     } catch (err: any) {
       console.warn('[Scheduler] Could not ensure 2-hour meme schedule:', err.message);
@@ -941,15 +1031,27 @@ export class SchedulerPlugin implements IPlugin {
         }
 
         try {
-          // 1. Recurring 2-Hour Memes (with strict cooldown check)
+          // 1. Daily randomized Status meme slot (subject to the status daily cap and spacing rule).
           if (task.topic === 'channel_meme_2hr_post') {
-            const nextFireAt = Date.now() + 2 * 60 * 60 * 1000;
+            const status = getStatusMemePostingStatus();
+            if (!status.canPost) {
+              const retryAt = getNextRandomStatusMemeFireAt(Date.now());
+              rescheduleRecurringTask(task.id, retryAt);
+              console.log(`[Scheduler] ⏭️ Status meme task #${task.id} skipped by daily/spacing policy; next randomized slot is ${new Date(retryAt).toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })} WAT.`);
+              continue;
+            }
+
+            const nextFireAt = getNextRandomStatusMemeFireAt(Date.now(), true);
             rescheduleRecurringTask(task.id, nextFireAt);
             try {
-              await postChannelMemeWithCooldown(socket, false, task.chat_jid);
-              console.log(
-                `[Scheduler] 🔄 2-Hour Meme Task #${task.id} processed and rescheduled for ${new Date(nextFireAt).toLocaleTimeString()}.`
-              );
+              const result = await postChannelMemeWithCooldown(socket, false, task.chat_jid);
+              if (!result.success) {
+                const retryAt = getNextRandomStatusMemeFireAt(Date.now());
+                rescheduleRecurringTask(task.id, retryAt);
+                console.warn(`[Scheduler] Status meme task #${task.id} could not post; next eligible randomized slot is ${new Date(retryAt).toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })} WAT. ${result.message}`);
+              } else {
+                console.log(`[Scheduler] ✅ Status meme task #${task.id} posted; next daily slot is ${new Date(nextFireAt).toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })} WAT.`);
+              }
             } catch (memeErr: any) {
               console.error('[Scheduler] Error posting 2-hour meme:', memeErr.message);
             }
@@ -1096,7 +1198,7 @@ export class SchedulerPlugin implements IPlugin {
           },
         },
       },
-      execute: async (args: { target_group_jid?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (args: { target_group_jid?: string }, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
           const sock = (schedulerPlugin as any).activeSocket;
           if (!sock) {
@@ -1566,14 +1668,14 @@ export class SchedulerPlugin implements IPlugin {
     {
       name: 'post_channel_meme',
       description:
-        'Posts a fresh viral meme scraped from WhatsApp Channel Memes (0029Vb6oS4LJkK7AvtORyH46) to WhatsApp Status (status@broadcast) or the current chat, strictly enforcing the 2-hour cooldown between posts.',
+        'Posts a fresh meme from the WhatsApp Memes channel to Status or the current chat. Status posts are limited to two per WAT day with at least six hours between them; force cannot override the Status limit. Group meme posts retain the two-hour cooldown.',
       parameters: {
         type: 'object',
         properties: {
           force: {
             type: 'boolean',
             description:
-              'Optional: Set to true to override the 2-hour cooldown if explicitly ordered by owner Ademola. Defaults to false.',
+              'Optional: Set to true to override the two-hour cooldown for a group post. It never overrides Status daily limits or spacing. Defaults to false.',
           },
           target: {
             type: 'string',
@@ -1629,19 +1731,19 @@ export class SchedulerPlugin implements IPlugin {
     {
       name: 'get_meme_cooldown_status',
       description:
-        'Checks whether the 2-hour cooldown for posting memes from WhatsApp Channel Memes has elapsed and reports remaining time before the next post is allowed.',
+        'Reports the group meme cooldown and WhatsApp Status meme count, minimum spacing, and next eligible randomized time.',
       parameters: {
         type: 'object',
         properties: {},
       },
       execute: async (): Promise<ToolResult> => {
         const status = getMemeCooldownStatus();
+        const statusPolicy = getStatusMemePostingStatus();
+        const nextStatusSlot = getNextRandomStatusMemeFireAt();
         return {
           success: true,
-          message: status.canPost
-            ? '🟢 Meme posting is ready! 2-hour cooldown has elapsed.'
-            : `⏳ Cooldown active: ${status.remainingMinutes} minute(s) remaining before next meme post.`,
-          data: status,
+          message: `Status memes today: ${statusPolicy.postedToday}/${statusPolicy.dailyLimit}; ${statusPolicy.canPost ? 'eligible now' : `not eligible yet (${statusPolicy.remainingMinutes} minute(s) spacing remaining)`}. Next randomized slot: ${new Date(nextStatusSlot).toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })} WAT. Group meme cooldown: ${status.canPost ? 'clear' : `${status.remainingMinutes} minute(s) remaining`}.`,
+          data: { groupCooldown: status, statusPolicy, nextStatusSlot },
         };
       },
     },

@@ -5,7 +5,6 @@ import { ExecutionContext } from '../plugins/types.js';
 import { db } from '../memory/db.js';
 import { contextManager } from '../core/context-manager.js';
 import { analyticsEngine } from '../core/analytics.js';
-import { chatLogger } from '../memory/chat-logger.js';
 
 const EMOJI_SEQUENCE_REGEX =
   /(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D(?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0F|\p{Emoji_Modifier})?)*/gu;
@@ -422,12 +421,6 @@ Combine the live tool data in the user's last message with your own knowledge an
             console.log(`[AgentHarness] 💬 Bot replied (post-tool) to ${context.senderName}: "${replyText.slice(0, 100)}..."`);
             await context.replyText(replyText);
             analyticsEngine.trackEvent('message_sent', { length: replyText.length }, context.chatJid, context.senderJid);
-            this.recordFineTuningPair(
-              messages[0]?.content || '',
-              userMessage,
-              replyText,
-              Array.from(executedToolNames)
-            );
           } else if (toolOutputs.length > 0) {
             const fallbackConfirm = sanitizeAssistantResponse(
               toolOutputs[toolOutputs.length - 1].replace(/^\[[^\]]+\]:\s*/, '')
@@ -588,12 +581,6 @@ Combine the live tool data in the user's last message with your own knowledge an
             console.warn('[AgentHarness] Reply was suppressed before dispatch.');
           }
           analyticsEngine.trackEvent('message_sent', { length: replyText.length }, context.chatJid, context.senderJid);
-          this.recordFineTuningPair(
-            messages[0]?.content || '',
-            userMessage,
-            replyText,
-            []
-          );
         }
       }
     } catch (err: any) {
@@ -660,12 +647,6 @@ Combine the live tool data in the user's last message with your own knowledge an
           if (fallbackText) {
             console.log(`[AgentHarness] 💬 Bot replied via direct fallback to ${context.senderName}: "${fallbackText.slice(0, 100)}..."`);
             await context.replyText(fallbackText);
-            this.recordFineTuningPair(
-              messages[0]?.content || '',
-              userMessage,
-              fallbackText,
-              []
-            );
           }
           return;
         }
@@ -701,79 +682,6 @@ Combine the live tool data in the user's last message with your own knowledge an
     }
   }
 
-  /**
-   * Continuous learning guardrail:
-   * Only persists high-quality, authentic interactions into the fine-tuning database.
-   * Discards error messages, raw tool call markup, robotic clichés, and emoji spam.
-   */
-  private recordFineTuningPair(
-    systemPrompt: string,
-    userMessage: string,
-    assistantResponse: string,
-    tools: string[]
-  ): void {
-    try {
-      const trimmed = assistantResponse.trim();
-      // Guardrail 1: Minimum length requirement
-      if (trimmed.length < 5) return;
-
-      // Guardrail 2: Block error strings, raw tool tags, robotic clichés, generic fallbacks, or outdated names
-      const lower = trimmed.toLowerCase();
-      if (
-        lower.includes('<tool_call>') ||
-        lower.includes('</tool_call>') ||
-        lower.includes('<function=') ||
-        lower.includes('<think>') ||
-        lower.includes('</think>') ||
-        lower.includes('"arguments":') ||
-        lower.includes('network slow') ||
-        lower.includes('abeg try again') ||
-        lower.includes('as an ai') ||
-        lower.includes('i am an ai') ||
-        lower.includes('i am a language model') ||
-        lower.includes('i apologize') ||
-        lower.includes('rate limit') ||
-        lower.includes('an error occurred') ||
-        lower.includes('how can i help') ||
-        lower.includes('what can i help') ||
-        lower.includes('can i help you') ||
-        lower.includes("i'm here to help") ||
-        lower.includes("i'm here to assist") ||
-        lower.includes('i am here to assist') ||
-        lower.includes('feel free') ||
-        lower.includes('certainly!') ||
-        lower.includes('certainly,') ||
-        lower.includes('sure thing!') ||
-        lower.includes('i hope this helps') ||
-        lower.includes('let me know if you need') ||
-        lower.includes('let me know if you want') ||
-        lower.includes('is there anything else i can assist') ||
-        lower.includes('nova')
-      ) {
-        return;
-      }
-
-      // Guardrail 3: Block emoji spam (strictly max 0-1 emoji)
-      const emojiCount = (trimmed.match(EMOJI_SEQUENCE_REGEX) || []).length;
-      if (emojiCount > 1) return;
-
-      // Guardrail 4: Valid user message
-      if (!userMessage || userMessage.trim().length < 2) return;
-
-      db.prepare(`
-        INSERT INTO fine_tuning_pairs (system_prompt, user_message, assistant_response, tools_invoked, created_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(
-        systemPrompt || '',
-        userMessage.trim(),
-        trimmed,
-        JSON.stringify(tools),
-        Date.now()
-      );
-    } catch (err: any) {
-      // Non-critical logging
-    }
-  }
 }
 
 /**

@@ -8,12 +8,12 @@ Transforms and filters them into high-quality, highly diverse dialogue exemplars
 Strictly caps any duplicate response to a maximum of 3 occurrences across the entire dataset to eliminate boilerplate repetition.
 """
 
-import os
 import re
 import csv
 import io
 import sys
 import json
+import time
 import sqlite3
 import urllib.request
 import urllib.parse
@@ -29,9 +29,8 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "bot.sqlite"
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are Forgelabs, a sharp, witty, and culturally savvy real WhatsApp user "
-    "living inside WhatsApp chats. Your creator is Ademola, an aspiring ML/AI Engineer. Talk naturally like a real person, "
-    "NO robotic AI cliches, NO emoji spam (max 0-1 emoji)."
+    "You are a helpful WhatsApp conversation assistant. Answer naturally and clearly, "
+    "match the other person's language and register, and avoid unnecessary personal data."
 )
 
 def clean_text(text: str) -> str:
@@ -57,6 +56,10 @@ def ingest_web_datasets():
 
     conn = sqlite3.connect(str(DB_PATH))
     cursor = conn.cursor()
+    try:
+        cursor.execute("ALTER TABLE fine_tuning_pairs ADD COLUMN source_type TEXT NOT NULL DEFAULT 'unknown'")
+    except sqlite3.OperationalError:
+        pass
 
     # Clean out previous repetitive synthetic web_pipeline pairs
     print("🧹 Cleaning out old repetitive boilerplate from SQLite...")
@@ -692,7 +695,7 @@ def ingest_web_datasets():
     # -------------------------------------------------------------
     # 4. Insert into SQLite dialogue_exemplars and fine_tuning_pairs
     # -------------------------------------------------------------
-    now = int(time_now := 1792137600000)
+    now = int(time.time() * 1000)
 
     inserted_exemplars = 0
     inserted_ft = 0
@@ -726,14 +729,25 @@ def ingest_web_datasets():
         cursor.execute(
             """
             INSERT INTO fine_tuning_pairs (
-                system_prompt, user_message, assistant_response, tools_invoked, created_at
-            ) VALUES (?, ?, ?, '[]', ?)
+                system_prompt, user_message, assistant_response, tools_invoked, created_at, source_type
+            ) VALUES (?, ?, ?, '[]', ?, 'public_dataset')
             """,
             (DEFAULT_SYSTEM_PROMPT, ctx, resp, now),
         )
         inserted_ft += 1
 
     conn.commit()
+
+    public_source = DATA_DIR / "public_training.jsonl"
+    with public_source.open("w", encoding="utf-8", newline="\n") as output:
+        for item in collected_pairs:
+            output.write(json.dumps({
+                "messages": [
+                    {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
+                    {"role": "user", "content": item["context"].strip()},
+                    {"role": "assistant", "content": item["response"].strip()},
+                ]
+            }, ensure_ascii=False) + "\n")
 
     total_exemplars = cursor.execute("SELECT COUNT(*) FROM dialogue_exemplars").fetchone()[0]
     total_ft = cursor.execute("SELECT COUNT(*) FROM fine_tuning_pairs").fetchone()[0]
@@ -742,6 +756,7 @@ def ingest_web_datasets():
     print(f"\n🎉 Successfully Ingested Web Datasets into SQLite:")
     print(f"   • High-diversity Dialogue Exemplars added: {inserted_exemplars} (Total in DB: {total_exemplars})")
     print(f"   • High-diversity Fine-Tuning Pairs added:  {inserted_ft} (Total in DB: {total_ft})")
+    print(f"   • Public dataset source for privacy validation: {public_source.name}")
 
 if __name__ == "__main__":
     ingest_web_datasets()

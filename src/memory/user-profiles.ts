@@ -5,6 +5,7 @@ export interface UserProfile {
   user_jid: string;
   display_name: string | null;
   preferred_language: string;
+  language_source?: string;
   personality_notes: string;
   first_seen: number;
   last_seen: number;
@@ -207,7 +208,8 @@ export class UserProfileManager {
     if (!userJid) return null;
     try {
       const row = db.prepare(`
-        SELECT user_jid, display_name, preferred_language, personality_notes,
+        SELECT user_jid, display_name, preferred_language, language_source,
+               language_candidate, language_candidate_count, personality_notes,
                first_seen, last_seen, total_messages, is_owner
         FROM user_profiles
         WHERE user_jid = ?
@@ -218,6 +220,112 @@ export class UserProfileManager {
       console.error(`[UserProfileManager] Error retrieving profile for ${userJid}:`, err);
       return null;
     }
+  }
+
+  private readonly languageNames: Record<string, string> = {
+    en: 'English', pcm: 'Nigerian Pidgin', yo: 'Yoruba', ha: 'Hausa', ig: 'Igbo',
+    fr: 'French', es: 'Spanish', pt: 'Portuguese', ar: 'Arabic', de: 'German', it: 'Italian',
+    sw: 'Swahili', id: 'Indonesian', tr: 'Turkish', ja: 'Japanese', ko: 'Korean', zh: 'Chinese',
+    ru: 'Russian', hi: 'Hindi', bn: 'Bengali', th: 'Thai', el: 'Greek', he: 'Hebrew', uk: 'Ukrainian',
+  };
+
+  /** Detect a small supported language set conservatively; short or mixed messages stay unknown. */
+  public detectMessageLanguage(text: string): { code: string; label: string; confidence: number } | null {
+    if (!text || text.trim().length < 8) return null;
+    const value = text.toLocaleLowerCase();
+    const candidates: Array<{ code: string; score: number; pattern: RegExp }> = [
+      { code: 'ar', score: 1, pattern: /[\u0600-\u06ff]{3,}/g },
+      { code: 'ja', score: 1, pattern: /[\u3040-\u30ff]{2,}/g },
+      { code: 'ko', score: 1, pattern: /[\uac00-\ud7af]{3,}/g },
+      { code: 'zh', score: 1, pattern: /[\u4e00-\u9fff]{2,}/g },
+      { code: 'ru', score: 0.98, pattern: /[\u0400-\u04ff]{4,}/g },
+      { code: 'hi', score: 1, pattern: /[\u0900-\u097f]{3,}/g },
+      { code: 'bn', score: 1, pattern: /[\u0980-\u09ff]{3,}/g },
+      { code: 'th', score: 1, pattern: /[\u0e00-\u0e7f]{3,}/g },
+      { code: 'el', score: 0.98, pattern: /[\u0370-\u03ff]{4,}/g },
+      { code: 'he', score: 0.98, pattern: /[\u0590-\u05ff]{3,}/g },
+      { code: 'yo', score: 0.95, pattern: /\b(ẹ káàbọ|ẹ jọ̀ọ́|ọmọ|ṣé|ṣe|ọ̀rẹ́|ẹ kú|ẹ ṣé)\b/giu },
+      { code: 'fr', score: 0.82, pattern: /\b(bonjour|merci|salut|pourquoi|parce que|comment|aujourd'hui|demain|beaucoup|je suis|tu es|vous êtes)\b/giu },
+      { code: 'es', score: 0.82, pattern: /\b(hola|gracias|buenos días|buenas noches|por qué|porque|cómo estás|mañana|estoy|quiero)\b/giu },
+      { code: 'pt', score: 0.82, pattern: /\b(olá|obrigado|obrigada|bom dia|boa noite|por favor|porque|amanhã|estou|você)\b/giu },
+      { code: 'de', score: 0.82, pattern: /\b(guten morgen|guten tag|guten abend|danke|bitte|warum|ich bin|wie geht es|nicht|tschüss)\b/giu },
+      { code: 'it', score: 0.82, pattern: /\b(buongiorno|buonasera|grazie|prego|perché|come stai|domani|sono|vorrei)\b/giu },
+      { code: 'sw', score: 0.82, pattern: /\b(habari|asante|tafadhali|karibu|habari yako|nzuri sana|ninaomba)\b/giu },
+      { code: 'id', score: 0.82, pattern: /\b(selamat pagi|terima kasih|tolong|apa kabar|bagaimana|saya ingin|besok|tidak)\b/giu },
+      { code: 'tr', score: 0.88, pattern: /\b(merhaba|teşekkürler|lütfen|nasılsın|günaydın|iyi akşamlar|yarın)\b/giu },
+      { code: 'ha', score: 0.82, pattern: /\b(sannu|na gode|yaya kake|yaya kike|lafiya lau|ina kwana|ina wuni)\b/giu },
+      { code: 'ig', score: 0.82, pattern: /\b(nnoo|daalụ|kedụ|kedu ka|ọ dị mma|anyị|ị ga|biko)\b/giu },
+      { code: 'pcm', score: 0.82, pattern: /\b(wetin|abeg|omo|dey|no wahala|how far|e go|make i|una|na so|sha|wahala| sef)\b/giu },
+    ];
+    const ranked = candidates
+      .map((candidate) => ({ ...candidate, hits: [...value.matchAll(candidate.pattern)].length }))
+      .filter((candidate) => candidate.hits > 0)
+      .sort((a, b) => (b.hits * b.score) - (a.hits * a.score));
+    const best = ranked[0];
+    if (best) {
+      const confidence = Math.min(0.99, best.score + Math.max(0, best.hits - 1) * 0.04);
+      return { code: best.code, label: this.languageNames[best.code] || best.code, confidence };
+    }
+
+    // A clear English turn should override a saved non-English preference for that reply.
+    const englishWords = new Set(value.match(/\b(?:the|is|are|and|you|what|how|this|that|with|for|have|your|can|will|please|from|was|were|not|but|because)\b/g) || []);
+    if (text.trim().length >= 10 && englishWords.size >= 3) {
+      return { code: 'en', label: 'English', confidence: 0.84 };
+    }
+    return null;
+  }
+
+  /** Learn explicit requests immediately and inferred preferences only after repeated clear evidence. */
+  public observeMessageLanguage(userJid: string, text: string): void {
+    if (!userJid || !text) return;
+    const supportedLanguages = 'english|nigerian pidgin|pidgin|yoruba|hausa|igbo|french|spanish|portuguese|arabic|german|italian|swahili|indonesian|turkish|japanese|korean|chinese|mandarin|russian|hindi|bengali|thai|greek|hebrew|ukrainian';
+    const explicit = text.match(new RegExp(`\\b(?:please\\s+)?(?:reply|respond|speak|talk|write)\\s+(?:to me\\s+)?(?:in|using)\\s+(${supportedLanguages})\\b`, 'i'))
+      || text.match(new RegExp(`\\b(?:i prefer|my preferred language is|i speak)\\s+(${supportedLanguages})\\b`, 'i'));
+    if (explicit) {
+      const alias = explicit[1].toLowerCase();
+      const code = alias.includes('pidgin') ? 'pcm' : alias === 'mandarin' ? 'zh' :
+        Object.entries(this.languageNames).find(([, name]) => name.toLowerCase() === alias)?.[0];
+      if (code) {
+        db.prepare(`UPDATE user_profiles SET preferred_language = ?, language_source = 'explicit', language_candidate = NULL, language_candidate_count = 0 WHERE user_jid = ?`).run(code, userJid);
+        return;
+      }
+    }
+
+    const detected = this.detectMessageLanguage(text);
+    if (!detected || detected.confidence < 0.82) return;
+    const profile = this.getProfile(userJid);
+    if (profile?.language_source === 'explicit') return;
+    try {
+      const nextCount = profile?.preferred_language === detected.code ? 3 : 1;
+      const priorCandidate = (profile as any)?.language_candidate === detected.code
+        ? Number((profile as any)?.language_candidate_count || 0)
+        : 0;
+      const count = nextCount === 3 ? 3 : priorCandidate + 1;
+      if (count >= 3) {
+        db.prepare(`UPDATE user_profiles SET preferred_language = ?, language_source = 'inferred', language_candidate = NULL, language_candidate_count = 0 WHERE user_jid = ?`).run(detected.code, userJid);
+      } else {
+        db.prepare(`UPDATE user_profiles SET language_candidate = ?, language_candidate_count = ? WHERE user_jid = ?`).run(detected.code, count, userJid);
+      }
+    } catch (err) {
+      console.warn('[UserProfileManager] Could not persist language signal:', err);
+    }
+  }
+
+  public getLanguageInstruction(userJid: string, incomingText?: string): string {
+    const detected = incomingText ? this.detectMessageLanguage(incomingText) : null;
+    const profile = this.getProfile(userJid);
+    const savedCode = profile?.preferred_language || 'en';
+    const savedLabel = this.languageNames[savedCode] || savedCode;
+    if (profile?.language_source === 'explicit') {
+      return `The sender explicitly prefers ${savedLabel}. Reply in that language unless they explicitly ask to change languages.`;
+    }
+    if (detected && detected.confidence >= 0.82) {
+      return `Reply in ${detected.label} for this message. Mirror the sender's language and register; keep their code-switching only when they use it.`;
+    }
+    if (profile?.language_source === 'inferred') {
+      return `The saved language preference is ${savedLabel}. Reply primarily in that language, while following any clear language change in the latest message.`;
+    }
+    return 'Use the language of the latest message. If it is unclear or language-neutral, default to English.';
   }
 
   /**
@@ -247,9 +355,12 @@ export class UserProfileManager {
 
       // If key is language, update user_profiles table as well
       if (cleanKey.toLowerCase() === 'language' || cleanKey.toLowerCase() === 'preferred_language') {
+        const alias = cleanValue.toLowerCase();
+        const languageCode = alias.includes('pidgin') ? 'pcm' : alias === 'mandarin' ? 'zh' :
+          Object.entries(this.languageNames).find(([code, name]) => code === alias || name.toLowerCase() === alias)?.[0] || alias;
         db.prepare(`
-          UPDATE user_profiles SET preferred_language = ? WHERE user_jid = ?
-        `).run(cleanValue, userJid);
+          UPDATE user_profiles SET preferred_language = ?, language_source = 'explicit' WHERE user_jid = ?
+        `).run(languageCode, userJid);
       }
 
       console.log(`[UserProfileManager] Saved preference for ${userJid}: "${factText}"`);

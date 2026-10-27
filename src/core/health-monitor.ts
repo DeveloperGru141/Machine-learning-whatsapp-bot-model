@@ -50,7 +50,7 @@ export class HealthMonitor {
     };
   }
 
-  public startMonitoring(sock: WASocket, ownerJid: string): void {
+  public startMonitoring(_sock: WASocket, ownerJid: string): void {
     if (this.monitoringInterval) {
       clearInterval(this.monitoringInterval);
     }

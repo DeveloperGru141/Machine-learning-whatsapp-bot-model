@@ -124,6 +124,14 @@ export class OutboundSender {
     if (!text) return '';
     let cleaned = text;
 
+    // Never send model-internal reasoning or tool directives through any outbound path.
+    cleaned = cleaned
+      .replace(/<(think|thought|analysis|reasoning|scratchpad|tool_call|function)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+      .replace(/<(think|thought|analysis|reasoning|scratchpad|tool_call|function)\b[^>]*>[\s\S]*$/gi, '')
+      .replace(/<\/?(?:think|thought|analysis|reasoning|scratchpad|tool_call|function)\b[^>]*>/gi, '')
+      .replace(/(?:^|\n)\s*(?:analysis|thought|reasoning|chain of thought)\s*:\s*[\s\S]*$/i, '')
+      .replace(/\b(?:reasoning_content|chain_of_thought)\s*[:=][\s\S]*$/gi, '');
+
     // 1. Scrub internal WhatsApp JIDs and domains
     cleaned = cleaned
       .replace(/\b[a-zA-Z0-9._%+-]+@(?:s\.whatsapp\.net|lid|g\.us|broadcast|newsletter)\b/gi, '')

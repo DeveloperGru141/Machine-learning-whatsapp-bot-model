@@ -1,7 +1,6 @@
 import zlib from 'node:zlib';
-import { downloadMediaMessage, proto } from '@whiskeysockets/baileys';
+import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
-import { config } from '../../config/env.js';
 import { unwrapMessage } from '../../core/normalizer.js';
 
 /**

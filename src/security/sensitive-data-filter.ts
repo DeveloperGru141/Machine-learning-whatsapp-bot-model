@@ -5,6 +5,10 @@ export interface SensitiveDetectionResult {
 }
 
 export class SensitiveDataFilter {
+  private emailRegex = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+  private whatsappJidRegex = /\b[\w.-]+@(?:s\.whatsapp\.net|lid|g\.us)\b/gi;
+  private phoneRegex = /(?<!\w)\+?\d[\d\s().-]{6,}\d(?!\w)/g;
+
   // 1. API Keys, Secrets & Access Tokens
   private apiKeyRegexes = [
     /\b(?:sk-[a-zA-Z0-9]{20,48})\b/g, // OpenAI
@@ -28,7 +32,7 @@ export class SensitiveDataFilter {
 
   // 4. Nigerian Bank Accounts in Context (10 digits + bank name or "acct/account")
   private bankAccountRegex =
-    /\b(?:acct(?:\s*no)?|account(?:\s*number)?|send\s*(?:money|funds)\s*to|credit|transfer\s*to)?[:\s]*(\d{10})\s*(?:gtb|gtbank|access|zenith|firstbank|uba|opay|palmpay|kuda|fcmb|fidelity|stanbic|union|wema|polaris|sterling|providus|jaiz|taj|keystone)?\b/gi;
+    /\b(?:(?:acct(?:\s*no)?|account(?:\s*number)?|send\s*(?:money|funds)\s*to|credit|transfer\s*to)[:\s]*(\d{10})|(\d{10})\s*(?:gtb|gtbank|access|zenith|firstbank|uba|opay|palmpay|kuda|fcmb|fidelity|stanbic|union|wema|polaris|sterling|providus|jaiz|taj|keystone))\b/gi;
 
   // 5. Passwords, Transaction PINs & ATM PINs
   private passwordPinRegex =
@@ -58,6 +62,10 @@ export class SensitiveDataFilter {
   public shouldExcludeFromTraining(text?: string | null): boolean {
     if (!text || typeof text !== 'string') return false;
 
+    if (this.testRegex(this.emailRegex, text)) return true;
+    if (this.testRegex(this.whatsappJidRegex, text)) return true;
+    if (this.testRegex(this.phoneRegex, text)) return true;
+
     // Check API Keys & tokens
     for (const reg of this.apiKeyRegexes) {
       if (this.testRegex(reg, text)) return true;
@@ -68,6 +76,7 @@ export class SensitiveDataFilter {
     if (this.testRegex(this.cvvRegex, text)) return true;
     if (this.testRegex(this.bvnRegex, text)) return true;
     if (this.testRegex(this.ninRegex, text)) return true;
+    if (this.testRegex(this.bankAccountRegex, text)) return true;
     if (this.testRegex(this.passwordPinRegex, text)) return true;
     if (this.testRegex(this.otpRegex, text)) return true;
     if (this.testRegex(this.privateKeyRegex, text)) return true;
@@ -87,6 +96,22 @@ export class SensitiveDataFilter {
 
     let scrubbed = text;
     const detected: string[] = [];
+
+    if (this.testRegex(this.emailRegex, scrubbed)) {
+      detected.push('email');
+      this.emailRegex.lastIndex = 0;
+      scrubbed = scrubbed.replace(this.emailRegex, '[REDACTED_EMAIL]');
+    }
+    if (this.testRegex(this.whatsappJidRegex, scrubbed)) {
+      detected.push('whatsapp_identifier');
+      this.whatsappJidRegex.lastIndex = 0;
+      scrubbed = scrubbed.replace(this.whatsappJidRegex, '[REDACTED_IDENTIFIER]');
+    }
+    if (this.testRegex(this.phoneRegex, scrubbed)) {
+      detected.push('phone_number');
+      this.phoneRegex.lastIndex = 0;
+      scrubbed = scrubbed.replace(this.phoneRegex, '[REDACTED_PHONE]');
+    }
 
     // 1. Scrub API Keys
     for (const reg of this.apiKeyRegexes) {
@@ -152,18 +177,13 @@ export class SensitiveDataFilter {
       scrubbed = scrubbed.replace(this.seedPhraseLeadInRegex, '[REDACTED_SEED_PHRASE]');
     }
 
-    // 7. Scrub Bank Account Numbers when mentioned in transactional context
-    const hasBankContext =
-      /\b(gtb|gtbank|access|zenith|firstbank|uba|opay|palmpay|kuda|fcmb|fidelity|stanbic|union|wema|polaris|sterling|providus|jaiz|taj|keystone|acct|account|transfer|send to)\b/i.test(
-        scrubbed
+    // 7. Scrub Bank Account Numbers only when an account label or bank name is present.
+    if (this.testRegex(this.bankAccountRegex, scrubbed)) {
+      detected.push('bank_account');
+      this.bankAccountRegex.lastIndex = 0;
+      scrubbed = scrubbed.replace(this.bankAccountRegex, (match, accountWithLabel, accountWithBank) =>
+        match.replace(accountWithLabel || accountWithBank, '[REDACTED_ACCOUNT_NUMBER]')
       );
-    if (hasBankContext) {
-      const tenDigits = /\b\d{10}\b/g;
-      if (this.testRegex(tenDigits, scrubbed)) {
-        detected.push('bank_account');
-        tenDigits.lastIndex = 0;
-        scrubbed = scrubbed.replace(tenDigits, '[REDACTED_ACCOUNT_NUMBER]');
-      }
     }
 
     const uniqueDetected = Array.from(new Set(detected));

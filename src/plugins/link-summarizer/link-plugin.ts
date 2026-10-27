@@ -332,7 +332,7 @@ export class LinkSummarizerPlugin implements IPlugin {
         },
         required: ['url'],
       },
-      execute: async (args: { url: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (args: { url: string }, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
           const report = await inspectUrlSafety(args.url);
           const verdictEmoji = report.isSuspicious ? '🚨' : '✅';
@@ -363,7 +363,7 @@ export class LinkSummarizerPlugin implements IPlugin {
         },
         required: ['url'],
       },
-      execute: async (args: { url: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (args: { url: string }, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
           if (!args.url || typeof args.url !== 'string') {
             return {

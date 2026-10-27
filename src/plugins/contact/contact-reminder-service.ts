@@ -35,8 +35,7 @@ export interface CampaignStatus {
 }
 
 /**
- * 10 High-Entropy, Natural, Non-Spam Message Templates.
- * Diverse phrasing, tone, and formatting prevents automated WhatsApp hash/spam tripwires.
+ * Reminder templates for contacts with a recent inbound conversation.
  */
 const REMINDER_TEMPLATES: Array<(name: string, botNumber: string) => string> = [
   // 1. Warm & Friendly with Name
@@ -94,9 +93,12 @@ export class ContactReminderService {
    * Retrieves all unique eligible contacts from both the contacts address book and chat_logs.
    * Filters out groups, broadcasts, owner numbers, bot's own number, and previously messaged contacts.
    */
-  public getEligibleContacts(onlyInteracted = false): EligibleContact[] {
-    const botPhone = config.bot.pairingPhoneNumber?.replace(/\D/g, '') || '2347058967815';
-    const ownerPhones = ['2348108574293', '2349014896714'];
+  public getEligibleContacts(onlyInteracted = true): EligibleContact[] {
+    const botPhone = config.bot.pairingPhoneNumber?.replace(/\D/g, '') || '';
+    const ownerPhones = config.bot.owners
+      .map((owner) => owner.split('@')[0].split(':')[0].replace(/\D/g, ''))
+      .filter(Boolean);
+    const inboundCutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
 
     const eligibleMap = new Map<string, EligibleContact>();
 
@@ -110,10 +112,11 @@ export class ContactReminderService {
           AND chat_jid NOT LIKE '%@g.us'
           AND chat_jid NOT LIKE '%broadcast%'
           AND chat_jid NOT LIKE '%newsletter%'
+          AND (? = 0 OR timestamp >= ?)
         GROUP BY chat_jid
         HAVING inbound_count > 0
         ORDER BY MAX(timestamp) DESC
-      `).all() as Array<{ chat_jid: string; sender_name: string | null; inbound_count: number }>;
+      `).all(onlyInteracted ? 1 : 0, inboundCutoff) as Array<{ chat_jid: string; sender_name: string | null; inbound_count: number }>;
 
       for (const row of chatRows) {
         const phone = contactService.extractPhoneNumber(row.chat_jid);
@@ -206,7 +209,7 @@ export class ContactReminderService {
   /**
    * Previews the next contacts in line with their personalized rendered messages without sending.
    */
-  public preview(count = 5, onlyInteracted = false): Array<{
+  public preview(count = 5, onlyInteracted = true): Array<{
     phoneNumber: string;
     displayName: string;
     firstName: string;
@@ -277,6 +280,13 @@ export class ContactReminderService {
     sock: WASocket,
     opts: CampaignConfig = {}
   ): Promise<{ success: boolean; message: string; data?: any }> {
+    if (opts.onlyInteracted === false) {
+      return {
+        success: false,
+        message: 'Contact campaigns are limited to people who messaged the bot within the last 30 days. Cold contact outreach is disabled.',
+      };
+    }
+
     if (this.isRunning) {
       return {
         success: false,
@@ -284,10 +294,10 @@ export class ContactReminderService {
       };
     }
 
-    const batchSize = Math.max(1, Math.min(opts.batchSize || 20, 50));
-    const delayMinSec = Math.max(25, opts.delayMinSec || 35);
-    const delayMaxSec = Math.max(delayMinSec + 5, opts.delayMaxSec || 75);
-    const onlyInteracted = Boolean(opts.onlyInteracted);
+    const batchSize = Math.max(1, Math.min(opts.batchSize || 5, 10));
+    const delayMinSec = Math.max(60, opts.delayMinSec || 90);
+    const delayMaxSec = Math.max(delayMinSec + 30, opts.delayMaxSec || 180);
+    const onlyInteracted = true;
     const dryRun = Boolean(opts.dryRun);
 
     const eligible = this.getEligibleContacts(onlyInteracted);

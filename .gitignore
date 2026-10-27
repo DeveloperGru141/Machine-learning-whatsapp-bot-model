@@ -13,6 +13,9 @@ sessions_*/
 data/*.sqlite*
 data/*.pid
 data/temp/
+data/approved_training.jsonl
+data/curated_seed.jsonl
+data/public_training.jsonl
 assets/channel_media/*.jpg
 assets/channel_media/*.png
 assets/channel_media/*.jpeg

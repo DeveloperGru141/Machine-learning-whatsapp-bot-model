@@ -188,7 +188,7 @@ class StickerEngine {
    * Decides whether the conversation pattern warrants an automated sticker response.
    * - Triggered on heavy laughter (lwkmd, lol, 💀, 😂), celebratory hype, or witty Nigerian banter.
    */
-  public shouldTriggerAutonomousSticker(incomingText: string, chatJid: string): boolean {
+  public shouldTriggerAutonomousSticker(incomingText: string, _chatJid: string): boolean {
     const clean = (incomingText || '').toLowerCase().trim();
     if (clean.length < 2) return false;
 

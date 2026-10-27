@@ -24,6 +24,43 @@ export interface AutoSaveResult {
 }
 
 export class ContactService {
+  /** Persist Baileys phone-number and LID identifiers against one canonical contact. */
+  public syncWhatsAppContact(contact: {
+    id?: string;
+    lid?: string;
+    phoneNumber?: string;
+    name?: string | null;
+    notify?: string | null;
+  }): AutoSaveResult {
+    const displayName = contact.name || contact.notify || undefined;
+    const phone = this.extractPhoneNumber(contact.phoneNumber || '') || this.extractPhoneNumber(contact.id || '');
+    const canonicalJid = phone ? `${phone}@s.whatsapp.net` : '';
+    if (!canonicalJid) {
+      const possibleAlias = contact.lid || contact.id;
+      const existing = possibleAlias ? this.getContact(possibleAlias) : null;
+      return { isNew: false, needsIntroduction: false, contact: existing };
+    }
+
+    const saved = this.autoSaveContact(canonicalJid, displayName);
+    const aliases = [contact.id, contact.lid, contact.phoneNumber]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => this.normalizeJid(value))
+      .filter((value) => value.includes('@'));
+    try {
+      const insertAlias = db.prepare(`
+        INSERT INTO contact_jid_aliases (alias_jid, contact_jid, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(alias_jid) DO UPDATE SET contact_jid = excluded.contact_jid, updated_at = excluded.updated_at
+      `);
+      for (const alias of new Set([...aliases, canonicalJid])) {
+        insertAlias.run(alias, canonicalJid, Date.now());
+      }
+    } catch (err) {
+      console.warn('[ContactService] Could not store WhatsApp contact aliases:', err);
+    }
+    return { ...saved, contact: this.getContact(canonicalJid) || saved.contact };
+  }
+
   /**
    * Normalizes a WhatsApp JID to remove device suffix (e.g. 23480123:1@s.whatsapp.net -> 23480123@s.whatsapp.net)
    * while preserving @lid or @s.whatsapp.net domains.
@@ -300,30 +337,51 @@ export class ContactService {
     }
 
     try {
-      // 1. Search by exact JID, phone number, or @lid/@s.whatsapp.net variants
+      // Resolve exact JIDs first, including LID aliases synchronized by Baileys.
+      const normalizedJid = clean.includes('@') ? this.normalizeJid(clean) : '';
+      if (normalizedJid) {
+        const aliasRow = db.prepare(`
+          SELECT c.* FROM contacts c
+          LEFT JOIN contact_jid_aliases a ON a.contact_jid = c.jid
+          WHERE c.jid = ? OR a.alias_jid = ?
+          LIMIT 1
+        `).get(normalizedJid, normalizedJid) as ContactRecord | undefined;
+        if (aliasRow) return aliasRow;
+      }
+
+      // Phone numbers must match exactly; substring matching can return the wrong person.
       if (digits.length >= 7) {
         const row = db.prepare(`
-          SELECT * FROM contacts 
-          WHERE jid = ? OR phone_number = ? OR jid = ? OR jid = ? OR phone_number LIKE ?
+          SELECT c.* FROM contacts c
+          LEFT JOIN contact_jid_aliases a ON a.contact_jid = c.jid
+          WHERE c.jid = ? OR c.phone_number = ? OR a.alias_jid = ? OR a.alias_jid = ?
           LIMIT 1
         `).get(
-          clean,
+          `${digits}@s.whatsapp.net`,
           digits,
           `${digits}@s.whatsapp.net`,
-          `${digits}@lid`,
-          `%${digits}%`
+          `${digits}@lid`
         ) as ContactRecord | undefined;
         if (row) return row;
       }
 
-      // 2. Search by name (exclude accidental 'Crypto Boss' match)
+      // Prefer exact names. Escape SQL LIKE metacharacters before allowing a partial match.
+      const exactName = db.prepare(`
+        SELECT * FROM contacts
+        WHERE (LOWER(custom_name) = LOWER(?) OR LOWER(display_name) = LOWER(?))
+          AND display_name != 'Crypto Boss😊'
+        ORDER BY updated_at DESC LIMIT 1
+      `).get(clean, clean) as ContactRecord | undefined;
+      if (exactName) return exactName;
+
+      const escaped = clean.replace(/[\\%_]/g, '\\$&');
       const nameMatch = db.prepare(`
         SELECT * FROM contacts 
-        WHERE (custom_name LIKE ? OR display_name LIKE ?)
+        WHERE (custom_name LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')
           AND display_name != 'Crypto Boss😊'
         ORDER BY updated_at DESC
         LIMIT 1
-      `).get(`%${clean}%`, `%${clean}%`) as ContactRecord | undefined;
+      `).get(`%${escaped}%`, `%${escaped}%`) as ContactRecord | undefined;
 
       return nameMatch || null;
     } catch (err) {

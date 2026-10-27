@@ -16,7 +16,6 @@ import qrcode from 'qrcode-terminal';
 import { Boom } from '@hapi/boom';
 import fs from 'fs';
 import path from 'path';
-import readline from 'readline';
 import { config, normalizePhoneNumber } from '../config/env.js';
 import { normalizeMessage, NormalizedMessage } from './normalizer.js';
 import { shouldRespondToMessage, recordGroupInteraction } from './filter.js';
@@ -28,7 +27,7 @@ import { ExecutionContext } from '../plugins/types.js';
 import { patternMiner } from '../learning/pattern-miner.js';
 import { batchLearner } from '../learning/batch-learner.js';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
-import { transcribeAudioBuffer, analyzeVoiceNote } from './transcription.js';
+import { analyzeVoiceNote } from './transcription.js';
 import { inspectUrlSafety } from '../plugins/link-summarizer/link-plugin.js';
 import { analyzeImageBuffer } from './vision.js';
 import { requestQueue } from './queue.js';
@@ -44,7 +43,7 @@ import { contactService } from '../memory/contact-service.js';
 import { setSchedulerSocket } from '../plugins/scheduler/scheduler-plugin.js';
 import { setEngagementSocket } from '../plugins/engagement/engagement-plugin.js';
 import { setViewOnceSocket, deliverViewOnceMediaToOwner } from '../plugins/view-once/view-once-plugin.js';
-import { saveViewOnceMessage, getLatestViewOnceMessages, ViewOnceRecord } from '../memory/db.js';
+import { saveViewOnceMessage, getLatestViewOnceMessages } from '../memory/db.js';
 import { antiBanEngine } from '../security/anti-ban.js';
 
 /**
@@ -748,7 +747,17 @@ export class WhatsAppClient {
           restrictionGuard.logSkip(`outbound send to ${jid.endsWith('@lid') ? 'LID chat' : jid === 'status@broadcast' ? 'status' : 'DM'}`);
           return undefined;
         }
-        return rawSendMessage(jid, ...rest);
+        const isDirectMessage = jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid');
+        const payload = rest[0];
+        const isProtocolAction = Boolean(payload?.delete || payload?.react || payload?.pollUpdateMessage);
+        if (isDirectMessage && !isProtocolAction) {
+          const check = antiBanEngine.canSendOutbound({ chatJid: jid, isGroup: false }, true);
+          if (!check.allowed) {
+            console.warn(`[AntiBan] 🛡️ Blocked direct socket send: ${check.reason}`);
+            throw new Error(check.reason || 'Anti-spam policy blocked this direct message.');
+          }
+        }
+        return antiBanEngine.scheduleDispatch(jid, () => rawSendMessage(jid, ...rest));
       };
 
       let lastStandingRefreshAt = 0;
@@ -977,7 +986,7 @@ export class WhatsAppClient {
           if (contacts && contacts.length > 0) {
             for (const c of contacts) {
               if (c.id && !c.id.endsWith('@g.us')) {
-                contactService.autoSaveContact(c.id, c.name || c.notify);
+                contactService.syncWhatsAppContact(c);
               }
             }
           }
@@ -1110,7 +1119,7 @@ export class WhatsAppClient {
         try {
           for (const c of contacts) {
             if (c.id && !c.id.endsWith('@g.us')) {
-              contactService.autoSaveContact(c.id, c.name || c.notify);
+              contactService.syncWhatsAppContact(c);
             }
           }
         } catch {}
@@ -1119,7 +1128,6 @@ export class WhatsAppClient {
       // Passively extract any unread DM messages attached to chats.upsert events
       this.sock.ev.on('chats.upsert', async (newChats) => {
         try {
-          let loggedUnreadDm = false;
           for (const chat of newChats) {
             if (chat.id && chat.id.endsWith('@g.us')) {
               if (chat.name || (chat as any).subject) {
@@ -1342,6 +1350,7 @@ export class WhatsAppClient {
 
     // Persistent User Profile Tracking across all chats
     userProfileManager.upsertProfile(normalized.senderJid, normalized.senderName);
+    userProfileManager.observeMessageLanguage(normalized.senderJid, normalized.text || '');
 
     // Automatic Contact Saving: passively record and index all contacts
     const contactSaveStatus = contactService.autoSaveContact(normalized.senderJid, normalized.senderName);
@@ -1680,6 +1689,12 @@ export class WhatsAppClient {
 
     if (!promptText) return;
 
+    const voiceLanguageSample = promptText.match(/message\]: "([\s\S]*?)"\n\[Voice Note Summary\]/)?.[1];
+    userProfileManager.observeMessageLanguage(
+      normalized.senderJid,
+      voiceLanguageSample || normalized.text || cleanedText || ''
+    );
+
     console.log(
       `[Incoming Trigger] From: ${normalized.senderName} (${normalized.chatJid}): "${promptText.slice(0, 80)}..."`
     );
@@ -1771,8 +1786,8 @@ export class WhatsAppClient {
         OutboundSender.sendPoll(sock, normalized.chatJid, question, options, selectableCount, msg),
     };
 
-    // 4. Dispatch via Concurrency Queue (Anti-Crash & Human-Like Rate Limiting)
-    requestQueue.enqueue({
+    // 4. Dispatch via the bounded concurrency queue and shared outbound rate controls.
+    const enqueued = requestQueue.enqueue({
       id: `${normalized.chatJid}_${msg.key.id || Date.now()}`,
       senderJid: normalized.senderJid,
       chatJid: normalized.chatJid,
@@ -1810,6 +1825,9 @@ export class WhatsAppClient {
         }
       },
     });
+    if (!enqueued) {
+      console.warn(`[WhatsAppClient] Request queue full; skipped reply for ${normalized.chatJid}.`);
+    }
   }
 
   /**
@@ -2066,8 +2084,6 @@ export class WhatsAppClient {
       const candidates = contactService.getUnrepliedChats();
       const ownPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '07058967815');
       const ownSockDigits = (this.sock?.user?.id || '').split(':')[0].split('@')[0];
-      const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-
       // Filter strictly for safety
       const genuineChats = candidates.filter((chat) => {
         // 1. Must not be group, broadcast, or the bot's own number
@@ -2195,8 +2211,6 @@ export class WhatsAppClient {
           : savedContact?.custom_name ||
             contactService.extractFriendlyFirstName(chat.senderName) ||
             chat.senderName;
-
-        const isVoiceNote = chat.contentType === 'audio';
 
         const context: ExecutionContext = {
           sock,

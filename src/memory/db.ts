@@ -110,7 +110,8 @@ export function initDatabase() {
       user_message TEXT NOT NULL,
       assistant_response TEXT NOT NULL,
       tools_invoked TEXT,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      source_type TEXT NOT NULL DEFAULT 'unknown'
     );
 
     -- Batched Learning Checkpoints: Buffers 20 exchanges before running a single compression API call
@@ -137,6 +138,9 @@ export function initDatabase() {
       user_jid TEXT PRIMARY KEY,
       display_name TEXT,
       preferred_language TEXT DEFAULT 'en',
+      language_source TEXT NOT NULL DEFAULT 'default',
+      language_candidate TEXT,
+      language_candidate_count INTEGER NOT NULL DEFAULT 0,
       personality_notes TEXT DEFAULT '',
       first_seen INTEGER NOT NULL,
       last_seen INTEGER NOT NULL,
@@ -156,6 +160,20 @@ export function initDatabase() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_conversation_summaries_chat ON conversation_summaries(chat_jid, to_timestamp);
+
+    -- Baileys may expose a phone-number JID and a separate LID for the same person.
+    CREATE TABLE IF NOT EXISTS contact_jid_aliases (
+      alias_jid TEXT PRIMARY KEY,
+      contact_jid TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_contact_jid_aliases_contact ON contact_jid_aliases(contact_jid);
+
+    -- Pending status-meme reservations prevent overlapping scheduler paths exceeding the daily cap.
+    CREATE TABLE IF NOT EXISTS status_meme_reservations (
+      reservation_id TEXT PRIMARY KEY,
+      reserved_at INTEGER NOT NULL
+    );
 
     -- Contacts Book: Automatic and manual contact saving, address book indexing, and vCard export
     CREATE TABLE IF NOT EXISTS contacts (
@@ -342,6 +360,15 @@ export function initDatabase() {
     // Column already exists
   }
 
+  for (const [column, definition] of [
+    ['language_source', "TEXT NOT NULL DEFAULT 'default'"],
+    ['language_candidate', 'TEXT'],
+    ['language_candidate_count', 'INTEGER NOT NULL DEFAULT 0'],
+  ]) {
+    try { db.exec(`ALTER TABLE user_profiles ADD COLUMN ${column} ${definition};`); } catch {}
+  }
+  try { db.exec("ALTER TABLE fine_tuning_pairs ADD COLUMN source_type TEXT NOT NULL DEFAULT 'unknown';"); } catch {}
+
   try {
     db.exec(`ALTER TABLE channel_quotes ADD COLUMN image_path TEXT;`);
   } catch {
@@ -366,8 +393,6 @@ export function initDatabase() {
     `);
   } catch {}
 
-  // Auto-seed dialogue_exemplars & fine_tuning_pairs from data/train.jsonl on fresh server deployments
-  seedTrainingExemplarsIfEmpty();
   seedContactsFromVcfIfEmpty();
   cleanTrainingTablesAndSeedUnreplied();
 }
@@ -411,106 +436,6 @@ function cleanTrainingTablesAndSeedUnreplied(): void {
       vectorStore.indexHistoricalBanter();
     } catch {}
   } catch {}
-}
-
-function classifySeedVibe(text: string): string {
-  const lower = (text || '').toLowerCase().trim();
-  if (/\b(ademola|creator|developer|who built|who made|who coded|who owns|who created|who trained|who programmed|who runs|who is behind)\b/i.test(lower)) {
-    return 'creator';
-  }
-  if (/\b(who are you|what are you|your name|forgelabs|nova|are you nova|are you chatgpt|what is this bot|what can you do|capabilities|wetin you fit do|who am i|what is my name)\b/i.test(lower)) {
-    return 'identity';
-  }
-  if (/\b(micah|david|femi|contact|contacts|address book|phone number|save contact)\b/i.test(lower)) {
-    return 'contacts';
-  }
-  if (/^(hi|hello|hey|yo|sup|good morning|gm|good afternoon|good evening|good night|bye|see ya|how are you)\b/i.test(lower)) {
-    return 'greeting';
-  }
-  if (/\b(btc|bitcoin|eth|sol|solana|price|crypto|stock|market)\b/i.test(lower)) {
-    return 'crypto';
-  }
-  if (/\b(shadow slave|sunny|sunless|nephis|nightmare spell|guiltythree|solo leveling|jin-woo|klein moretti|omniscient reader|gojo|web novel)\b/i.test(lower)) {
-    return 'novel';
-  }
-  if (/\b(download|video|audio|remind|reminder|pdf|doc|document|summarize|read|vcf|voice note|voicenote|vn|speak|say|tts|scrape|link|url|website|article|export|image)\b/i.test(lower)) {
-    return 'tools';
-  }
-  if (/\b(check in|checking in|checking up|check up|dropped|follow up|following up|saying hi|say hi|haven't heard|quiet group|reminder in)\b/i.test(lower)) {
-    return 'followup';
-  }
-  if (/\b(recursion|async|flutter|typescript|python|code|bug)\b/i.test(lower)) {
-    return 'tech';
-  }
-  if (/\b(thanks|thank you|appreciate|smart bro)\b/i.test(lower)) {
-    return 'appreciation';
-  }
-  if (/\b(hehe|lmao|lol|funny|joke)\b/i.test(lower)) {
-    return 'humor';
-  }
-  return 'slang';
-}
-
-function seedTrainingExemplarsIfEmpty(): void {
-  try {
-    const row = db.prepare('SELECT COUNT(*) as count FROM dialogue_exemplars').get() as { count: number } | undefined;
-    if (row && row.count > 0) {
-      return;
-    }
-
-    const candidates = [
-      path.resolve('./data/train.jsonl'),
-      path.resolve('./data/finetune_dataset.jsonl'),
-    ];
-    const seedFile = candidates.find((p) => fs.existsSync(p));
-    if (!seedFile) return;
-
-    const lines = fs
-      .readFileSync(seedFile, 'utf-8')
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean);
-
-    if (lines.length === 0) return;
-
-    const insertExemplar = db.prepare(`
-      INSERT INTO dialogue_exemplars (chat_jid, context_text, response_text, response_type, sticker_filename, vibe_classification, quality_score, created_at)
-      VALUES ('global_pipeline', ?, ?, 'text', NULL, ?, 1.5, ?)
-    `);
-    const insertPair = db.prepare(`
-      INSERT INTO fine_tuning_pairs (system_prompt, user_message, assistant_response, tools_invoked, created_at)
-      VALUES (?, ?, ?, '[]', ?)
-    `);
-
-    const now = Date.now();
-    let seededCount = 0;
-
-    db.exec('BEGIN TRANSACTION');
-    try {
-      for (const line of lines) {
-        try {
-          const parsed = JSON.parse(line);
-          const msgs = Array.isArray(parsed?.messages) ? parsed.messages : [];
-          const sys = msgs.find((m: any) => m.role === 'system')?.content || '';
-          const usr = msgs.find((m: any) => m.role === 'user')?.content || '';
-          const ast = msgs.find((m: any) => m.role === 'assistant')?.content || '';
-          if (usr && ast) {
-            const vibe = classifySeedVibe(usr);
-            insertExemplar.run(usr, ast, vibe, now);
-            insertPair.run(sys, usr, ast, now);
-            seededCount++;
-          }
-        } catch {}
-      }
-      db.exec('COMMIT');
-      console.log(`🌱 [DB] Auto-seeded ${seededCount} fine-tuned dialogue exemplars from ${path.basename(seedFile)}.`);
-    } catch (txErr) {
-      try { db.exec('ROLLBACK'); } catch {}
-      console.warn('[DB] Auto-seed rollback:', txErr);
-    }
-  } catch (err: any) {
-    console.warn('[DB] Could not auto-seed training exemplars:', err.message);
-  }
 }
 
 function seedContactsFromVcfIfEmpty(): void {
