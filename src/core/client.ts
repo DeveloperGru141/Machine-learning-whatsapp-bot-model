@@ -359,10 +359,30 @@ export class WhatsAppClient {
   private lastBackupAt = 0;
   private lastBackupHash = '';
   private static readonly BACKUP_MIN_INTERVAL_MS = 30_000;
-  private static readonly BACKUP_MAX_B64_CHARS = 180_000;
+  private static readonly SESSION_BUNDLE_CHUNK_SIZE = 90_000;
+  private static readonly SESSION_BUNDLE_MAX_B64_CHARS = 1_500_000;
+
+  private assembleSessionBundle(env: NodeJS.ProcessEnv): string | undefined {
+    const pointer = env.SESSION_BUNDLE_SET || '';
+    const match = /^([a-z0-9]+):(\d+)$/.exec(pointer);
+    if (!match) return env.SESSION_BUNDLE_BASE64;
+
+    const [, version, rawCount] = match;
+    const count = Number(rawCount);
+    if (!Number.isInteger(count) || count < 1 || count > 32) return undefined;
+
+    const chunks: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const chunk = env[`SESSION_BUNDLE_${version}_${String(index).padStart(3, '0')}`];
+      if (!chunk) return undefined;
+      chunks.push(chunk);
+    }
+    return chunks.join('');
+  }
 
   /**
-   * Reads the freshest SESSION_BUNDLE_BASE64 straight from the Render API.
+   * Reads the freshest session bundle straight from Render, supporting both a
+   * legacy single variable and a chunked bundle that stays below OS env limits.
    * process.env only holds the snapshot taken at the last deploy, so after a container
    * restart or rolling deploy it is stale or empty.
    */
@@ -371,15 +391,22 @@ export class WhatsAppClient {
     const serviceId = process.env.RENDER_SERVICE_ID;
     if (apiKey && serviceId) {
       try {
-        const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars/SESSION_BUNDLE_BASE64`, {
+        const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars?limit=100`, {
           headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
           signal: AbortSignal.timeout(15_000),
         });
         if (res.ok) {
-          const data = (await res.json()) as { value?: string };
-          if (data?.value && data.value.length > 100) {
-            console.log(`[WhatsAppClient] ☁️ Fetched latest session bundle from Render API (${data.value.length}b).`);
-            return data.value;
+          const rows = (await res.json()) as Array<{ envVar?: { key?: string; value?: string } }>;
+          const latestEnv: NodeJS.ProcessEnv = {};
+          for (const row of rows) {
+            if (row.envVar?.key && typeof row.envVar.value === 'string') {
+              latestEnv[row.envVar.key] = row.envVar.value;
+            }
+          }
+          const latestBundle = this.assembleSessionBundle(latestEnv);
+          if (latestBundle && latestBundle.length > 100) {
+            console.log(`[WhatsAppClient] ☁️ Fetched latest session bundle from Render API (${latestBundle.length}b).`);
+            return latestBundle;
           }
         } else {
           console.warn(`[WhatsAppClient] Render API bundle fetch returned ${res.status}; falling back to process.env snapshot.`);
@@ -388,7 +415,7 @@ export class WhatsAppClient {
         console.warn('[WhatsAppClient] Render API bundle fetch failed; falling back to process.env snapshot:', err?.message || err);
       }
     }
-    return process.env.SESSION_BUNDLE_BASE64;
+    return this.assembleSessionBundle(process.env);
   }
 
   public async autoBackupSessionToRender(): Promise<void> {
@@ -466,13 +493,18 @@ export class WhatsAppClient {
       const build = (): string => zlib.gzipSync(Buffer.from(JSON.stringify(filesMap), 'utf8'), { level: 9 }).toString('base64');
       let bundle = build();
       let dropped = 0;
-      if (bundle.length > WhatsAppClient.BACKUP_MAX_B64_CHARS) {
+      if (bundle.length > WhatsAppClient.SESSION_BUNDLE_MAX_B64_CHARS) {
         const dropOrder = [...prunable].reverse().filter((f) => filesMap[f] !== undefined);
         for (let i = 0; i < dropOrder.length; i += 8) {
           for (const f of dropOrder.slice(i, i + 8)) { delete filesMap[f]; dropped++; }
           bundle = build();
-          if (bundle.length <= WhatsAppClient.BACKUP_MAX_B64_CHARS) break;
+          if (bundle.length <= WhatsAppClient.SESSION_BUNDLE_MAX_B64_CHARS) break;
         }
+      }
+      if (bundle.length > WhatsAppClient.SESSION_BUNDLE_MAX_B64_CHARS) {
+        console.warn(`[WhatsAppClient] Session backup skipped: bundle exceeds the safe Render environment budget (${bundle.length}b).`);
+        this.lastBackupAt = Date.now();
+        return;
       }
 
       const crypto = await import('crypto');
@@ -486,25 +518,83 @@ export class WhatsAppClient {
         return;
       }
       const serviceId = process.env.RENDER_SERVICE_ID || 'srv-db9jvcmq1p3s738hpa40';
-
-      const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars/SESSION_BUNDLE_BASE64`, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        body: JSON.stringify({ value: bundle }),
-        signal: AbortSignal.timeout(15_000),
+      const envVarsUrl = `https://api.render.com/v1/services/${serviceId}/env-vars`;
+      const headers = {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      };
+      const putEnvVar = (key: string, value: string) => fetch(`${envVarsUrl}/${encodeURIComponent(key)}`, {
+        method: 'PUT', headers, body: JSON.stringify({ value }), signal: AbortSignal.timeout(15_000),
       });
+      const deleteEnvVar = async (key: string): Promise<boolean> => {
+        const res = await fetch(`${envVarsUrl}/${encodeURIComponent(key)}`, {
+          method: 'DELETE', headers, signal: AbortSignal.timeout(15_000),
+        });
+        return res.ok || res.status === 404;
+      };
       this.lastBackupAt = Date.now();
 
-      if (res.ok) {
-        this.lastBackupHash = hash;
-        console.log(`[WhatsAppClient] 💾 Successfully persisted authenticated session (${Object.keys(filesMap).length} files kept, ${dropped} pruned, ${bundle.length}b base64) to Render!`);
+      const previousPointer = process.env.SESSION_BUNDLE_SET || '';
+      const previousMatch = /^([a-z0-9]+):(\d+)$/.exec(previousPointer);
+      let saved = false;
+      if (bundle.length <= WhatsAppClient.SESSION_BUNDLE_CHUNK_SIZE) {
+        const res = await putEnvVar('SESSION_BUNDLE_BASE64', bundle);
+        if (res.ok) {
+          const pointerDeleted = await deleteEnvVar('SESSION_BUNDLE_SET');
+          if (pointerDeleted && previousMatch) {
+            for (let index = 0; index < Number(previousMatch[2]); index++) {
+              if (!await deleteEnvVar(`SESSION_BUNDLE_${previousMatch[1]}_${String(index).padStart(3, '0')}`)) {
+                console.warn('[WhatsAppClient] Could not clean up an old Render session bundle chunk.');
+              }
+            }
+          }
+          saved = pointerDeleted;
+        } else {
+          const body = (await res.text().catch(() => '')).slice(0, 200);
+          console.warn(`[WhatsAppClient] Render session backup response: ${res.status} ${body}`);
+        }
       } else {
-        const body = (await res.text().catch(() => '')).slice(0, 200);
-        console.warn(`[WhatsAppClient] Render session backup response: ${res.status} ${body}`);
+        const version = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+        const chunks: string[] = [];
+        for (let offset = 0; offset < bundle.length; offset += WhatsAppClient.SESSION_BUNDLE_CHUNK_SIZE) {
+          chunks.push(bundle.slice(offset, offset + WhatsAppClient.SESSION_BUNDLE_CHUNK_SIZE));
+        }
+
+        let chunksSaved = true;
+        for (let index = 0; index < chunks.length; index++) {
+          const key = `SESSION_BUNDLE_${version}_${String(index).padStart(3, '0')}`;
+          const res = await putEnvVar(key, chunks[index]);
+          if (!res.ok) {
+            const body = (await res.text().catch(() => '')).slice(0, 200);
+            console.warn(`[WhatsAppClient] Render session chunk backup response: ${res.status} ${body}`);
+            chunksSaved = false;
+            break;
+          }
+        }
+
+        if (chunksSaved) {
+          const pointerRes = await putEnvVar('SESSION_BUNDLE_SET', `${version}:${chunks.length}`);
+          if (pointerRes.ok) {
+            const legacyDeleted = await deleteEnvVar('SESSION_BUNDLE_BASE64');
+            if (previousMatch) {
+              for (let index = 0; index < Number(previousMatch[2]); index++) {
+                if (!await deleteEnvVar(`SESSION_BUNDLE_${previousMatch[1]}_${String(index).padStart(3, '0')}`)) {
+                  console.warn('[WhatsAppClient] Could not clean up an old Render session bundle chunk.');
+                }
+              }
+            }
+            saved = legacyDeleted;
+          } else {
+            const body = (await pointerRes.text().catch(() => '')).slice(0, 200);
+            console.warn(`[WhatsAppClient] Render session bundle pointer update failed: ${pointerRes.status} ${body}`);
+          }
+        }
+      }
+
+      if (saved) {
+        this.lastBackupHash = hash;
+        console.log(`[WhatsAppClient] 💾 Persisted authenticated session (${Object.keys(filesMap).length} files kept, ${dropped} pruned, ${bundle.length}b base64) to Render!`);
       }
     } catch (err: any) {
       console.warn('[WhatsAppClient] Auto backup to Render failed:', err.message);
