@@ -1,7 +1,7 @@
-import { db } from '../memory/db.js';
 import { vectorStore } from '../learning/vector-store.js';
 import { contactService } from '../memory/contact-service.js';
 import { memoryService, UserFact } from '../memory/memory-service.js';
+import { userProfileManager } from '../memory/user-profiles.js';
 
 export interface RagDocument {
   source: 'user_fact' | 'group_fact' | 'contact' | 'historical_chat' | 'vector_knowledge';
@@ -33,26 +33,20 @@ export class RagEngine {
 
     const cleanQuery = query.trim();
     const queryLower = cleanQuery.toLowerCase();
+    const isGroupChat = Boolean(chatJid?.endsWith('@g.us'));
     const queryVec = vectorStore.embed(cleanQuery);
     const documents: RagDocument[] = [];
 
     // 1. Search User Facts (if userJid provided or across all user facts if asking generally)
     try {
       let facts: UserFact[] = [];
-      if (userJid) {
+      if (userJid && !isGroupChat) {
         facts = memoryService.getUserFacts(userJid);
       }
-
-      const factKeywordRows = db.prepare(`
-        SELECT fact, category, updated_at FROM user_facts
-        ORDER BY updated_at DESC LIMIT 20
-      `).all() as unknown as UserFact[];
-
-      const combinedFacts = [...facts, ...factKeywordRows];
       const seenFacts = new Set<string>();
       const isPersonalQuery = /\b(i|my|me|mine|study|studies|live|work|like|prefer|preference|favorite|course|school)\b/i.test(queryLower);
 
-      for (const f of combinedFacts) {
+      for (const f of facts) {
         if (!f.fact || seenFacts.has(f.fact)) continue;
         seenFacts.add(f.fact);
 
@@ -123,7 +117,8 @@ export class RagEngine {
         /\b(who is|contact|phone|number|call|reach|message|find|get|ademola|boss|creator)\b/i.test(queryLower) ||
         queryLower.split(/\s+/).length <= 4;
 
-      if (isPersonQuery) {
+      const explicitlyRequestsContactDetails = /\b(phone|number|contact details|contact info|email|address)\b/i.test(queryLower);
+      if (isPersonQuery && explicitlyRequestsContactDetails && !isGroupChat && userProfileManager.isOwner(userJid || '')) {
         const queryTerms = queryLower
           .replace(/^(who is|whats the contact for|get me|find|look up|call)\s+/i, '')
           .replace(/[?.,!]/g, '')

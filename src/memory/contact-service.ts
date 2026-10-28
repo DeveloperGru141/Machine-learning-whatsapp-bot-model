@@ -321,10 +321,18 @@ export class ContactService {
       /\b(your\s+boss|my\s+boss|the\s+boss|your\s+creator|the\s+creator|your\s+owner|the\s+owner|ademola)\b/i.test(clean);
 
     if (isBossQuery) {
+      const ownerIdentifier =
+        config.bot.owners.find((owner) => !owner.endsWith('@lid') && normalizePhoneNumber(owner).length >= 7) ||
+        config.bot.owners.find((owner) => owner.endsWith('@lid')) ||
+        '';
+      const ownerPhone = ownerIdentifier.endsWith('@lid') ? '' : normalizePhoneNumber(ownerIdentifier);
+      const ownerJid = ownerIdentifier.includes('@')
+        ? this.normalizeJid(ownerIdentifier)
+        : ownerPhone ? `${ownerPhone}@s.whatsapp.net` : '';
       return {
         id: -1,
-        phone_number: '2348108574293',
-        jid: '2348108574293@s.whatsapp.net',
+        phone_number: ownerPhone,
+        jid: ownerJid,
         display_name: 'Ademola (Creator & Boss)',
         custom_name: 'Ademola (Boss)',
         notes: 'Creator, developer, and owner of Forgelabs assistant',

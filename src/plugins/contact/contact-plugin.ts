@@ -44,29 +44,14 @@ export class ContactPlugin implements IPlugin {
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
         try {
-          let targetPhone = args.phone_number;
-          if (!targetPhone) {
-            // Check if a phone number was mentioned in recent messages in this chat
-            try {
-              const recentInChat = db.prepare(`
-                SELECT message_text FROM chat_logs
-                WHERE chat_jid = ?
-                ORDER BY id DESC LIMIT 6
-              `).all(ctx.chatJid) as Array<{ message_text: string | null }>;
-
-              for (const r of recentInChat) {
-                const txt = r.message_text || '';
-                const phoneMatch = txt.match(/(?:(?:\+|00)?234|0)\s*[789][01]\s*(?:[\s-]?\d{3,4}){2}|\+?\d[\d\s-]{9,}\d/);
-                if (phoneMatch) {
-                  const extracted = contactService.extractPhoneNumber(phoneMatch[0]);
-                  if (extracted) {
-                    targetPhone = extracted;
-                    break;
-                  }
-                }
-              }
-            } catch {}
+          const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
+          if (args.phone_number && !isOwner) {
+            return {
+              success: false,
+              message: 'Only the bot owner can add another person’s phone number to the shared address book. You can save your own contact without providing a number.',
+            };
           }
+          let targetPhone = args.phone_number;
           if (!targetPhone) {
             targetPhone = ctx.senderJid;
           }
@@ -113,18 +98,25 @@ export class ContactPlugin implements IPlugin {
           const isBossQuery =
             /^(the\s+)?(my\s+)?(your\s+)?(boss|owner|creator|maker|developer|dev|engineer|ademola|hardez)$/i.test(cleanQuery) ||
             /\b(your\s+boss|my\s+boss|the\s+boss|your\s+creator|the\s+creator|your\s+owner|the\s+owner|ademola)\b/i.test(cleanQuery);
+          const explicitlyRequestsPhone = /\b(phone|number|contact details|contact info)\b/i.test(cleanQuery);
 
           if (isBossQuery) {
+            const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
+            const ownerContact = contactService.getContact('boss');
+            const includePhone = isOwner && explicitlyRequestsPhone && !ctx.isGroup && Boolean(ownerContact?.phone_number);
             return {
               success: true,
-              message: `Found contact: *Ademola (Creator & Boss)*\n📞 Phone: +2348108574293\n📝 Notes: Creator, developer, and owner of Forgelabs assistant`,
+              message: `Found contact: *Ademola (Creator & Boss)*${includePhone ? `\n📞 Phone: +${ownerContact!.phone_number}` : ''}\n📝 Notes: Creator, developer, and owner of Forgelabs assistant`,
               data: {
-                phone_number: '2348108574293',
-                jid: '2348108574293@s.whatsapp.net',
+                ...(includePhone ? { phone_number: ownerContact!.phone_number, jid: ownerContact!.jid } : {}),
                 display_name: 'Ademola (Creator & Boss)',
                 custom_name: 'Ademola (Boss)',
               },
             };
+          }
+
+          if (ctx.isGroup) {
+            return { success: false, message: 'Saved address book lookups are available only in a private chat.' };
           }
 
           const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
@@ -173,6 +165,10 @@ export class ContactPlugin implements IPlugin {
       },
       execute: async (args: { limit?: number; filter?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
+          if (ctx.isGroup) {
+            return { success: false, message: 'The saved contact directory can only be listed in a private chat.' };
+          }
+
           const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
           if (!isOwner) {
             return {
@@ -305,6 +301,10 @@ export class ContactPlugin implements IPlugin {
       },
       execute: async (args: { limit?: number }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
+          if (ctx.isGroup) {
+            return { success: false, message: 'Contact exports can only be sent in a private chat.' };
+          }
+
           const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
           if (!isOwner) {
             return {
@@ -367,7 +367,16 @@ export class ContactPlugin implements IPlugin {
         type: 'object',
         properties: {},
       },
-      execute: async (_args: {}, _ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (ctx.isGroup) {
+          return { success: false, message: 'The unreplied-DM scan can only be managed in a private chat.' };
+        }
+        if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
+          return {
+            success: false,
+            message: 'Permission denied: only the bot owner can run the cross-chat unreplied-message scan.',
+          };
+        }
         try {
           const result = await whatsAppClient.replyUnrepliedMessages();
           return {
@@ -386,14 +395,15 @@ export class ContactPlugin implements IPlugin {
     {
       name: 'send_message_to_contact',
       description:
-        'Sends a direct WhatsApp text message to ANY phone number (e.g. "+234 913 191 8009", "09131918009"), contact name, or to the bot\'s boss/creator Ademola (+2348108574293). When asked to message or tell your boss/creator, pass recipient as "boss" or "+2348108574293". Verifies live WhatsApp delivery confirmation.',
+        'Lets the owner send a direct WhatsApp text to an explicitly named recipient. Other users can only ask for a message to be relayed to the configured owner from a private chat. Requires the exact recipient and exact message text; never infers either from recent chat history.',
       parameters: {
         type: 'object',
         properties: {
           recipient: {
             type: 'string',
+            maxLength: 100,
             description:
-              'The phone number with country code (e.g. "+234 913 191 8009", "09131918009"), contact name, or "boss"/"Ademola". Any phone number can be messaged directly without saving first.',
+              'The exact phone number/contact name (owner only), or "boss"/"Ademola" when asking to relay to the configured owner.',
           },
           phone: {
             type: 'string',
@@ -403,9 +413,11 @@ export class ContactPlugin implements IPlugin {
           message: {
             type: 'string',
             description: 'The exact text message to send to the recipient.',
+            minLength: 1,
+            maxLength: 2000,
           },
         },
-        required: ['message'],
+        required: ['recipient', 'message'],
       },
       execute: async (
         args: {
@@ -444,61 +456,26 @@ export class ContactPlugin implements IPlugin {
             /\b(your\s+boss|my\s+boss|the\s+boss|your\s+creator|the\s+creator|your\s+owner|the\s+owner|ademola)\b/i.test(rawRecipient);
 
           if (isBossRecipient) {
-            targetPhone = '2348108574293';
-            targetJid = '2348108574293@s.whatsapp.net';
+            const ownerContact = contactService.getContact('boss');
+            if (!ownerContact?.jid) {
+              return { success: false, message: 'The bot owner contact is not configured.' };
+            }
+            targetPhone = ownerContact.phone_number || '';
+            targetJid = ownerContact.jid;
             targetName = 'Ademola (Boss)';
           }
 
-          // 0. Check if recipient is a relative reference ("him", "her", "them", "that number", "last guy") or empty
-          const isRelativeRef =
-            /^(the\s+)?(last|previous)\s+(guy|person|contact|number|one|dude)|(guy\s+(wey|that|u|you))|^(him|her|them|that\s+number)$/i.test(rawRecipient);
-
-          if (!targetJid && (isRelativeRef || !rawRecipient || rawRecipient === 'undefined')) {
-            // First check recent messages in THIS chat for any phone number mentioned
-            try {
-              const recentInChat = db.prepare(`
-                SELECT message_text FROM chat_logs
-                WHERE chat_jid = ?
-                ORDER BY id DESC LIMIT 8
-              `).all(ctx.chatJid) as Array<{ message_text: string | null }>;
-
-              for (const r of recentInChat) {
-                const txt = r.message_text || '';
-                const phoneMatch = txt.match(/(?:(?:\+|00)?234|0)\s*[789][01]\s*(?:[\s-]?\d{3,4}){2}|\+?\d[\d\s-]{9,}\d/);
-                if (phoneMatch) {
-                  const extracted = contactService.extractPhoneNumber(phoneMatch[0]);
-                  if (extracted && extracted.length >= 7 && extracted.length <= 15) {
-                    targetPhone = extracted;
-                    targetJid = `${extracted}@s.whatsapp.net`;
-                    const saved = contactService.getContact(extracted);
-                    targetName = saved?.custom_name || saved?.display_name || `+${extracted}`;
-                    break;
-                  }
-                }
-              }
-            } catch (err) {
-              console.warn('[ContactPlugin] Error scanning recent chat for phone number:', err);
-            }
-
-            // Fallback: check last outbound contact messaged in another chat (STRICTLY OWNER ONLY)
-            if (!targetJid && isOwner) {
-              try {
-                const lastOutbound = db.prepare(`
-                  SELECT chat_jid FROM chat_logs
-                  WHERE sender_jid = 'bot' AND is_group = 0 AND chat_jid != ?
-                  ORDER BY id DESC LIMIT 1
-                `).get(ctx.chatJid) as { chat_jid: string } | undefined;
-
-                if (lastOutbound && lastOutbound.chat_jid) {
-                  targetJid = lastOutbound.chat_jid;
-                  targetPhone = contactService.extractPhoneNumber(targetJid);
-                  const saved = contactService.getContact(targetPhone || targetJid);
-                  targetName = saved?.custom_name || saved?.display_name || (targetPhone ? `+${targetPhone}` : targetJid);
-                }
-              } catch (err) {
-                console.warn('[ContactPlugin] Error finding last messaged contact:', err);
-              }
-            }
+          if (!isOwner && !isBossRecipient) {
+            return {
+              success: false,
+              message: 'Permission denied: only the bot owner can message arbitrary contacts. You can ask me to relay a message to the owner in a private chat.',
+            };
+          }
+          if (!isOwner && ctx.isGroup && isBossRecipient) {
+            return {
+              success: false,
+              message: 'For privacy, ask me to relay a message to the owner in a private chat.',
+            };
           }
 
           // 1. Direct phone extraction if recipient has digits or matches phone pattern
@@ -553,31 +530,12 @@ export class ContactPlugin implements IPlugin {
             }
           }
 
-          // 4. Recover message content if message is empty or generic confirmation ("do that", "send it", "send the message")
-          const isGenericMessage = !rawMessage || /^(do that|do it|do so|send it|send am|send the message|send the message to him|proceed|yes|confirm)$/i.test(rawMessage);
-          if (isGenericMessage) {
-            try {
-              const recentInChat = db.prepare(`
-                SELECT message_text FROM chat_logs
-                WHERE chat_jid = ?
-                ORDER BY id DESC LIMIT 8
-              `).all(ctx.chatJid) as Array<{ message_text: string | null }>;
-
-              for (const r of recentInChat) {
-                const txt = r.message_text || '';
-                // Check for quotes: “Ademola said he should greet Amina”
-                const quoteMatch = txt.match(/[\u201c"']([^\u201c\u201d"']{3,})[\u201d"']/);
-                if (quoteMatch && quoteMatch[1] && !quoteMatch[1].toLowerCase().includes('message')) {
-                  rawMessage = quoteMatch[1].trim();
-                  break;
-                }
-                const tellMatch = txt.match(/(?:tell|inform|warn|ask)\s+(?:him|her|them|am)\s+(?:say|that\s+)?(.+)/i);
-                if (tellMatch && tellMatch[1]) {
-                  rawMessage = tellMatch[1].trim();
-                  break;
-                }
-              }
-            } catch {}
+          // Never reconstruct outbound text from previous messages or generic confirmations.
+          if (!rawMessage || /^(do that|do it|do so|send it|send am|send the message|send the message to him|proceed|yes|confirm)$/i.test(rawMessage)) {
+            return {
+              success: false,
+              message: 'Please provide the exact text you want me to send.',
+            };
           }
 
           // Clean up leading conversational prefixes from message body
@@ -588,7 +546,7 @@ export class ContactPlugin implements IPlugin {
           if (!cleanMessage) cleanMessage = rawMessage;
 
           // If relaying a message to the bot's boss Ademola from another user or group, attribute it clearly
-          const isTargetAdemola = targetJid === '2348108574293@s.whatsapp.net' || targetPhone === '2348108574293';
+          const isTargetAdemola = userProfileManager.isOwner(targetJid);
           if (!isOwner && isTargetAdemola) {
             const senderPhone = contactService.extractPhoneNumber(ctx.senderJid);
             const senderLabel = ctx.senderName ? `${ctx.senderName} (+${senderPhone || ctx.senderJid.split('@')[0]})` : `+${senderPhone || ctx.senderJid.split('@')[0]}`;
@@ -600,6 +558,28 @@ export class ContactPlugin implements IPlugin {
             // Smart Fallback: Check if the recipient name matches a WhatsApp group!
             const matchedGroup = findKnownGroup(rawRecipient);
             if (matchedGroup && ctx.sock) {
+              if (!isOwner) {
+                try {
+                  const meta = await ctx.sock.groupMetadata(matchedGroup.group_jid);
+                  const senderPhone = contactService.extractPhoneNumber(ctx.senderJid);
+                  const normalizedSender = `${ctx.senderJid.split(':')[0].split('@')[0]}@${ctx.senderJid.split('@')[1] || 's.whatsapp.net'}`;
+                  const requesterIsAdmin = meta.participants?.some((participant: any) => {
+                    const participantId = participant.id
+                      ? `${participant.id.split(':')[0].split('@')[0]}@${participant.id.split('@')[1] || 's.whatsapp.net'}`
+                      : '';
+                    const participantPhone = contactService.extractPhoneNumber(participant.id || '');
+                    const matchesRequester = participant.id === ctx.senderJid ||
+                      participantId === normalizedSender ||
+                      (senderPhone && participantPhone === senderPhone);
+                    return matchesRequester && (participant.admin === 'admin' || participant.admin === 'superadmin');
+                  });
+                  if (!requesterIsAdmin) {
+                    return { success: false, message: 'Permission denied: only the bot owner or a target-group admin can send a message there.' };
+                  }
+                } catch {
+                  return { success: false, message: 'Permission denied: target-group admin status could not be verified.' };
+                }
+              }
               await ctx.sock.sendMessage(matchedGroup.group_jid, { text: cleanMessage });
               chatLogger.logMessage({
                 chatJid: matchedGroup.group_jid,
@@ -697,7 +677,7 @@ export class ContactPlugin implements IPlugin {
           const phoneDisplay = targetPhone ? ` (+${targetPhone})` : '';
           return {
             success: true,
-            message: `✅ DELIVERY CONFIRMED to ${targetName}${phoneDisplay} | Receipt ID: ${receipt.msgId} | Status: ${receipt.statusLabel} | Message: "${finalDispatchMessage}"`,
+            message: `Message dispatched to ${targetName}${phoneDisplay}. WhatsApp status: ${receipt.statusLabel}. Device delivery confirmed: ${receipt.confirmed ? 'yes' : 'no'}.`,
             data: {
               recipient: targetName,
               targetJid,
@@ -705,6 +685,7 @@ export class ContactPlugin implements IPlugin {
               receiptId: receipt.msgId,
               deliveryStatus: receipt.statusLabel,
               confirmed: receipt.confirmed,
+              serverAcknowledged: receipt.serverAcknowledged,
             },
           };
         } catch (err: any) {
@@ -755,6 +736,9 @@ export class ContactPlugin implements IPlugin {
         },
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
+        if (ctx.isGroup) {
+          return { success: false, message: 'Contact reminder campaigns can only be managed in a private chat.' };
+        }
         if (args.only_interacted === false) {
           return {
             success: false,
@@ -800,7 +784,13 @@ export class ContactPlugin implements IPlugin {
         type: 'object',
         properties: {},
       },
-      execute: async (_args: {}, _ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (ctx.isGroup) {
+          return { success: false, message: 'Contact campaign status is available only in a private chat.' };
+        }
+        if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
+          return { success: false, message: 'Permission denied: contact campaign details are private to the bot owner.' };
+        }
         const status = contactReminderService.getStatus();
         const stateDesc = status.isRunning
           ? `🟢 Active (Pacing: dispatching next in ~${status.nextScheduledInSec || 30}s)`
@@ -830,6 +820,9 @@ ${status.lastRecipient ? `- Last Recipient: ${status.lastRecipient}` : ''}`;
         properties: {},
       },
       execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (ctx.isGroup) {
+          return { success: false, message: 'Contact reminder campaigns can only be managed in a private chat.' };
+        }
         const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
         if (!isOwner) {
           return {
@@ -865,6 +858,9 @@ ${status.lastRecipient ? `- Last Recipient: ${status.lastRecipient}` : ''}`;
         args: { count?: number; only_interacted?: boolean },
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
+        if (ctx.isGroup) {
+          return { success: false, message: 'Contact reminders can only be previewed in a private chat.' };
+        }
         if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
           return { success: false, message: 'Permission denied: only the bot owner can preview contact records.' };
         }

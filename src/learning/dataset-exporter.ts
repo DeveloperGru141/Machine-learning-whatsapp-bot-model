@@ -4,6 +4,7 @@ import { db } from '../memory/db.js';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../plugins/types.js';
 import { config } from '../config/env.js';
 import { sensitiveDataFilter } from '../security/sensitive-data-filter.js';
+import { userProfileManager } from '../memory/user-profiles.js';
 
 export class DatasetExporterPlugin implements IPlugin {
   name = 'DatasetExporter';
@@ -20,7 +21,7 @@ export class DatasetExporterPlugin implements IPlugin {
         },
       },
       execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
-        if (!config.bot.owners.includes(ctx.senderJid)) {
+        if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
           return {
             success: false,
             message: 'Permission denied: Only the bot creator (Ademola) has permission to export the fine-tuning training dataset.',

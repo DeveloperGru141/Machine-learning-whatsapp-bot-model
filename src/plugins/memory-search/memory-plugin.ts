@@ -3,6 +3,11 @@ import { memoryService } from '../../memory/memory-service.js';
 import { db, findKnownGroup } from '../../memory/db.js';
 import { vectorStore } from '../../learning/vector-store.js';
 
+function getMemoryChatScope(senderJid: string, currentChatJid: string, isGroup: boolean, includeOtherChats: boolean): string[] {
+  if (isGroup || !includeOtherChats) return [currentChatJid];
+  return memoryService.getChatsForParticipant(senderJid, currentChatJid);
+}
+
 export class MemoryPlugin implements IPlugin {
   name = 'MemoryRecall';
   version = '1.0.0';
@@ -11,7 +16,7 @@ export class MemoryPlugin implements IPlugin {
   tools: BotTool[] = [
     {
       name: 'search_memory',
-      description: 'Searches past messages in this chat. Set all_chats=true to also search chats and groups where you have participated. Chats you were not part of are outside your memory scope.',
+      description: 'Searches past messages in this chat. In a private chat, set all_chats=true to also search other chats and groups where you participated. In a group, searches are limited to that group so private or other group conversations are not disclosed to its members.',
       parameters: {
         type: 'object',
         properties: {
@@ -27,9 +32,7 @@ export class MemoryPlugin implements IPlugin {
         required: ['query'],
       },
       execute: async (args: { query: string; all_chats?: boolean }, ctx: ExecutionContext): Promise<ToolResult> => {
-        const chatJids = args.all_chats
-          ? memoryService.getChatsForParticipant(ctx.senderJid, ctx.chatJid)
-          : [ctx.chatJid];
+        const chatJids = getMemoryChatScope(ctx.senderJid, ctx.chatJid, ctx.isGroup, Boolean(args.all_chats));
         const matches = memoryService.searchChatLogs(args.query, chatJids);
         if (matches.length === 0) {
           return {
@@ -91,7 +94,7 @@ export class MemoryPlugin implements IPlugin {
     {
       name: 'get_cross_chat_activity',
       description:
-        'Recalls recent activity and completed bot actions in this chat and other chats or groups where you have participated. Chats you were not part of are outside your memory scope.',
+        'In a private chat, recalls recent activity and completed bot actions in this chat and other chats or groups where you have participated. In a group, it only reports activity from that group.',
       parameters: {
         type: 'object',
         properties: {
@@ -104,7 +107,7 @@ export class MemoryPlugin implements IPlugin {
       execute: async (args: { limit?: number }, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
           const limit = Math.min(Math.max(Number(args.limit) || 20, 5), 50);
-          const chatJids = memoryService.getChatsForParticipant(_ctx.senderJid, _ctx.chatJid);
+          const chatJids = getMemoryChatScope(_ctx.senderJid, _ctx.chatJid, _ctx.isGroup, true);
           const chatPlaceholders = chatJids.map(() => '?').join(', ');
 
           // Only include chats where the requester has participated.
@@ -280,14 +283,14 @@ export class MemoryPlugin implements IPlugin {
     {
       name: 'list_autonomous_actions',
       description:
-        'Lists recent autonomous events and tool actions in this chat and other chats or groups where you have participated. Use when asked what you have done in those conversations.',
+        'In a private chat, lists recent autonomous events and tool actions in this chat and other chats or groups where you have participated. In a group, lists activity only from that group.',
       parameters: {
         type: 'object',
         properties: {},
       },
       execute: async (_args: {}, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
-          const chatJids = memoryService.getChatsForParticipant(_ctx.senderJid, _ctx.chatJid);
+          const chatJids = getMemoryChatScope(_ctx.senderJid, _ctx.chatJid, _ctx.isGroup, true);
           const recent = db.prepare(`
             SELECT id, action_type, target_chat, target_name, summary, timestamp
             FROM autonomous_actions
@@ -329,7 +332,7 @@ export class MemoryPlugin implements IPlugin {
     {
       name: 'search_group_banter',
       description:
-        'Uses local semantic vector search to recall past group jokes and banter from this group or, when requested, other groups where you have participated.',
+        'Uses local semantic vector search to recall past group jokes and banter from this group or, when requested in a private chat, other groups where you have participated.',
       parameters: {
         type: 'object',
         properties: {
@@ -346,9 +349,12 @@ export class MemoryPlugin implements IPlugin {
       },
       execute: async (args: { query: string; all_groups?: boolean }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
-          const targetChat: string | string[] = args.all_groups
-            ? memoryService.getChatsForParticipant(ctx.senderJid, ctx.chatJid)
-            : ctx.isGroup ? ctx.chatJid : [];
+          const groupJids = ctx.isGroup
+            ? [ctx.chatJid]
+            : args.all_groups
+              ? memoryService.getChatsForParticipant(ctx.senderJid, ctx.chatJid).filter((jid) => jid.endsWith('@g.us'))
+              : [];
+          const targetChat: string | string[] = groupJids.length === 1 ? groupJids[0] : groupJids;
           const results = vectorStore.searchBanter(args.query, targetChat, 4);
 
           if (results.length === 0) {

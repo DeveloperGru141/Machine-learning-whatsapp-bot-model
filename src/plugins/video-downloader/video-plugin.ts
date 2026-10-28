@@ -1,4 +1,4 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import { createRequire } from 'node:module';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { config } from '../../config/env.js';
+import { assertPublicHttpUrl, fetchPublicHttpUrl, readLimitedResponse } from '../../security/url-policy.js';
 const require = createRequire(import.meta.url);
 
 let ffmpegPath: string = '';
@@ -13,7 +14,7 @@ try {
   ffmpegPath = require('ffmpeg-static') || '';
 } catch {}
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // Pure Node.js downloader engine (works seamlessly on Render/Docker/Linux/Windows)
 let alldlInstance: any = null;
@@ -31,7 +32,7 @@ let hasYtDlpCache: boolean | null = null;
 async function checkYtDlp(): Promise<boolean> {
   if (hasYtDlpCache !== null) return hasYtDlpCache;
   try {
-    await execAsync('yt-dlp --version', { timeout: 1500 });
+    await execFileAsync('yt-dlp', ['--version'], { timeout: 1500, windowsHide: true });
     hasYtDlpCache = true;
   } catch {
     hasYtDlpCache = false;
@@ -66,8 +67,9 @@ export class VideoDownloaderPlugin implements IPlugin {
         const rawUrl = (args.url || '').trim();
         console.log(`[VideoDownloader] Request to download: ${rawUrl}`);
 
+        let parsed: URL;
         try {
-          const parsed = new URL(rawUrl);
+          parsed = new URL(rawUrl);
           if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
             return {
               success: false,
@@ -78,7 +80,18 @@ export class VideoDownloaderPlugin implements IPlugin {
           return { success: false, message: 'Invalid URL provided.' };
         }
 
-        const sanitizedUrl = rawUrl.replace(/["']/g, '');
+        const supportedDomains = ['instagram.com', 'tiktok.com', 'youtube.com', 'youtu.be', 'twitter.com', 'x.com', 'facebook.com', 'fb.watch'];
+        const requestHost = parsed.hostname.toLowerCase();
+        if (!supportedDomains.some((domain) => requestHost === domain || requestHost.endsWith(`.${domain}`))) {
+          return { success: false, message: 'That video platform is not supported. Use a public Instagram, TikTok, YouTube, X/Twitter, or Facebook link.' };
+        }
+        try {
+          await assertPublicHttpUrl(parsed);
+        } catch (err: any) {
+          return { success: false, message: `Video URL rejected: ${err.message}` };
+        }
+
+        const sanitizedUrl = parsed.href;
         const tempDir = config.paths.temp;
         if (!fs.existsSync(tempDir)) {
           fs.mkdirSync(tempDir, { recursive: true });
@@ -124,18 +137,18 @@ export class VideoDownloaderPlugin implements IPlugin {
               const res = await platformResolver(sanitizedUrl);
               const directUrl = res?.data?.videoUrl || res?.data?.url || res?.videoUrl || res?.url;
               if (directUrl && typeof directUrl === 'string' && directUrl.startsWith('http')) {
-                const resp = await fetch(directUrl, {
+                const resp = await fetchPublicHttpUrl(directUrl, {
                   headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                   },
                 });
                 if (resp.ok) {
-                  const ab = await resp.arrayBuffer();
-                  if (ab.byteLength > 2048) {
-                    fs.writeFileSync(targetFilePath, Buffer.from(ab));
+                  const buffer = await readLimitedResponse(resp, 60 * 1024 * 1024);
+                  if (buffer.byteLength > 2048) {
+                    fs.writeFileSync(targetFilePath, buffer);
                     downloadedPath = targetFilePath;
                     videoTitle = res?.data?.title || res?.title;
-                    console.log(`[VideoDownloader] Strategy 1 (platform resolver) succeeded (${ab.byteLength} bytes)`);
+                    console.log(`[VideoDownloader] Strategy 1 (platform resolver) succeeded (${buffer.byteLength} bytes)`);
                   }
                 }
               }
@@ -151,12 +164,19 @@ export class VideoDownloaderPlugin implements IPlugin {
           try {
             console.log('[VideoDownloader] Strategy 2: Attempting alldl.download...');
             const dlResult = await alldlInstance.download(sanitizedUrl, targetFilePath, { quality: 'medium' });
-            if (dlResult && dlResult.path && fs.existsSync(dlResult.path)) {
-              const stat = fs.statSync(dlResult.path);
-              if (stat.size > 2048) {
-                downloadedPath = dlResult.path;
-                videoTitle = dlResult.title;
-                console.log(`[VideoDownloader] Strategy 2 succeeded: ${downloadedPath} (${stat.size} bytes)`);
+            if (dlResult && dlResult.path) {
+              const resolvedPath = path.resolve(dlResult.path);
+              const relativePath = path.relative(path.resolve(tempDir), resolvedPath);
+              const isExpectedTempFile = relativePath !== '' && relativePath !== '..' &&
+                !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath) &&
+                path.basename(resolvedPath).startsWith(`vid_${fileId}`);
+              if (isExpectedTempFile && fs.existsSync(resolvedPath)) {
+                const stat = fs.statSync(resolvedPath);
+                if (stat.size > 2048 && stat.size <= 60 * 1024 * 1024) {
+                  downloadedPath = resolvedPath;
+                  videoTitle = dlResult.title;
+                  console.log(`[VideoDownloader] Strategy 2 succeeded: ${downloadedPath} (${stat.size} bytes)`);
+                }
               }
             } else if (fs.existsSync(targetFilePath) && fs.statSync(targetFilePath).size > 2048) {
               downloadedPath = targetFilePath;
@@ -175,19 +195,19 @@ export class VideoDownloaderPlugin implements IPlugin {
             const directVideoUrl = resolved?.data?.videoUrl || resolved?.data?.url || resolved?.videoUrl;
             if (directVideoUrl && typeof directVideoUrl === 'string' && directVideoUrl.startsWith('http')) {
               console.log(`[VideoDownloader] Resolved direct video URL: ${directVideoUrl.slice(0, 80)}...`);
-              const resp = await fetch(directVideoUrl, {
+              const resp = await fetchPublicHttpUrl(directVideoUrl, {
                 headers: {
                   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                   ...(resolved?.data?.headers || {}),
                 },
               });
               if (resp.ok) {
-                const arrayBuffer = await resp.arrayBuffer();
-                if (arrayBuffer.byteLength > 2048) {
-                  fs.writeFileSync(targetFilePath, Buffer.from(arrayBuffer));
+                const buffer = await readLimitedResponse(resp, 60 * 1024 * 1024);
+                if (buffer.byteLength > 2048) {
+                  fs.writeFileSync(targetFilePath, buffer);
                   downloadedPath = targetFilePath;
                   videoTitle = resolved?.data?.title || resolved?.title;
-                  console.log(`[VideoDownloader] Strategy 3 succeeded (${arrayBuffer.byteLength} bytes)`);
+                  console.log(`[VideoDownloader] Strategy 3 succeeded (${buffer.byteLength} bytes)`);
                 }
               }
             }
@@ -210,14 +230,14 @@ export class VideoDownloaderPlugin implements IPlugin {
               const data = (await tikwmRes.json()) as any;
               const playUrl = data?.data?.play || data?.data?.wmplay;
               if (playUrl) {
-                const vidRes = await fetch(playUrl);
+                const vidRes = await fetchPublicHttpUrl(playUrl);
                 if (vidRes.ok) {
-                  const buf = await vidRes.arrayBuffer();
-                  if (buf.byteLength > 2048) {
-                    fs.writeFileSync(targetFilePath, Buffer.from(buf));
+                  const buffer = await readLimitedResponse(vidRes, 60 * 1024 * 1024);
+                  if (buffer.byteLength > 2048) {
+                    fs.writeFileSync(targetFilePath, buffer);
                     downloadedPath = targetFilePath;
                     videoTitle = data?.data?.title;
-                    console.log(`[VideoDownloader] TikWM fallback succeeded (${buf.byteLength} bytes)`);
+                    console.log(`[VideoDownloader] TikWM fallback succeeded (${buffer.byteLength} bytes)`);
                   }
                 }
               } else if (data?.msg && /private|hidden/i.test(data.msg)) {
@@ -238,9 +258,16 @@ export class VideoDownloaderPlugin implements IPlugin {
             if (isInstalled) {
               console.log('[VideoDownloader] Strategy 5: Attempting yt-dlp download...');
               const outputPattern = path.join(tempDir, `vid_${fileId}.%(ext)s`);
-              const ffArg = ffmpegPath ? `--ffmpeg-location "${ffmpegPath}"` : '';
-              const cmd = `yt-dlp ${ffArg} -f "best/bestvideo+bestaudio" --recode-video mp4 --max-filesize 60M --no-playlist -o "${outputPattern}" "${sanitizedUrl}"`;
-              await execAsync(cmd, { timeout: 25_000 });
+              const downloaderArgs = [
+                ...(ffmpegPath ? ['--ffmpeg-location', ffmpegPath] : []),
+                '-f', 'best/bestvideo+bestaudio',
+                '--recode-video', 'mp4',
+                '--max-filesize', '60M',
+                '--no-playlist',
+                '-o', outputPattern,
+                sanitizedUrl,
+              ];
+              await execFileAsync('yt-dlp', downloaderArgs, { timeout: 25_000, windowsHide: true });
               const files = fs.readdirSync(tempDir).filter((f) => f.startsWith(`vid_${fileId}`));
               if (files.length > 0) {
                 const p = path.join(tempDir, files[0]);

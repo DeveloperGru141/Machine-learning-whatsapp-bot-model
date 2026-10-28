@@ -3,6 +3,7 @@ import fs from 'fs';
 import { Client } from '@gradio/client';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { config } from '../../config/env.js';
+import { fetchPublicHttpUrl, readLimitedResponse } from '../../security/url-policy.js';
 
 // Ensure IPv4 first to prevent DNS/TLS timeouts on Windows and regional ISPs
 try {
@@ -94,13 +95,15 @@ export class ImageGenPlugin implements IPlugin {
 
               if (fileUrl && (fileUrl.startsWith('http://') || fileUrl.startsWith('https://'))) {
                 console.log(`[ImageGen] Fetching generated FLUX.1 image: ${fileUrl.slice(0, 60)}...`);
-                const imgRes = await fetch(fileUrl);
+                const imgRes = await fetchPublicHttpUrl(fileUrl, { signal: AbortSignal.timeout(15_000) });
                 if (imgRes.ok) {
-                  const arr = await imgRes.arrayBuffer();
-                  imageBuffer = Buffer.from(arr);
+                  imageBuffer = await readLimitedResponse(imgRes, 20 * 1024 * 1024);
                 }
               } else if (localPath && fs.existsSync(localPath)) {
-                imageBuffer = fs.readFileSync(localPath);
+                const stats = fs.statSync(localPath);
+                if (stats.isFile() && stats.size <= 20 * 1024 * 1024) {
+                  imageBuffer = fs.readFileSync(localPath);
+                }
               }
             }
 

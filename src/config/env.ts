@@ -60,7 +60,9 @@ const envOwners = (process.env.BOT_OWNERS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
-const rawOwners = [...defaultOwners, ...envOwners];
+// An explicit deployment owner list replaces development defaults so a former
+// default owner does not retain access after BOT_OWNERS is configured.
+const rawOwners = envOwners.length > 0 ? envOwners : defaultOwners;
 
 const normalizedOwners = Array.from(
   new Set(

@@ -67,15 +67,16 @@ export class ContextManager {
     chatJid: string,
     userJid: string,
     isGroup: boolean,
-    currentPrompt: string
+    currentPrompt: string,
+    senderName?: string
   ): Promise<ManagedContextResult> {
     // 1. Check if background summarization is needed (> 50 messages since last summary)
     this.checkAndTriggerAutoSummary(chatJid);
 
     // 2. Build full system prompt + cross-chat user profile context
-    let systemPromptText = buildSystemPrompt(userJid, chatJid, isGroup, currentPrompt);
+    let systemPromptText = buildSystemPrompt(userJid, chatJid, isGroup, currentPrompt, senderName);
     const profileSummary = userProfileManager.getProfileSummaryForPrompt(userJid);
-    if (profileSummary) {
+    if (profileSummary && !isGroup) {
       systemPromptText += `\n\n# User Profile Context (Cross-Chat Persistent Memory):\n${profileSummary}\n`;
     }
 

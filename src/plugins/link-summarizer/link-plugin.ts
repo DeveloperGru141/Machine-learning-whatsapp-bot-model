@@ -1,4 +1,5 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
+import { assertPublicHttpUrl, fetchPublicHttpUrl, readLimitedResponse } from '../../security/url-policy.js';
 
 export interface UrlSafetyVerdict {
   url: string;
@@ -95,6 +96,22 @@ export async function inspectUrlSafety(targetUrl: string): Promise<UrlSafetyVerd
     };
   }
 
+  try {
+    parsed = await assertPublicHttpUrl(parsed);
+    url = parsed.href;
+  } catch (err: any) {
+    const reason = String(err?.message || err);
+    const isPrivateTarget = /local and private|resolves to a local or private/i.test(reason);
+    return {
+      url,
+      resolvedUrl: url,
+      isSuspicious: isPrivateTarget,
+      verdict: isPrivateTarget ? 'suspicious' : 'safe',
+      reason: isPrivateTarget ? 'URL targets a local or private network address' : 'URL could not be safely inspected',
+      recommendedAction: isPrivateTarget ? 'delete_and_warn' : 'pass',
+    };
+  }
+
   const hostname = parsed.hostname.toLowerCase();
   const pathname = parsed.pathname.toLowerCase();
   const fullHref = parsed.href.toLowerCase();
@@ -187,14 +204,13 @@ export async function inspectUrlSafety(targetUrl: string): Promise<UrlSafetyVerd
 
   // 4. Web scraping inspection: Follow redirects and inspect page text
   try {
-    const res = await fetch(url, {
+    const res = await fetchPublicHttpUrl(url, {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       },
       signal: AbortSignal.timeout(8000),
-      redirect: 'follow',
     });
 
     const finalUrl = res.url || url;
@@ -216,7 +232,7 @@ export async function inspectUrlSafety(targetUrl: string): Promise<UrlSafetyVerd
     }
 
     if (res.ok) {
-      const html = await res.text();
+      const html = (await readLimitedResponse(res, 1_000_000)).toString('utf8');
       const { title, text } = cleanHtmlContent(html.slice(0, 30000));
       const pageTextLower = `${title} ${text}`.toLowerCase();
 
@@ -397,7 +413,7 @@ export class LinkSummarizerPlugin implements IPlugin {
 
           console.log(`[LinkSummarizer] Fetching content from: ${targetUrl}`);
 
-          const response = await fetch(targetUrl, {
+          const response = await fetchPublicHttpUrl(targetUrl, {
             headers: {
               'User-Agent':
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -405,7 +421,6 @@ export class LinkSummarizerPlugin implements IPlugin {
               'Accept-Language': 'en-US,en;q=0.9',
             },
             signal: AbortSignal.timeout(15000),
-            redirect: 'follow',
           });
 
           if (!response.ok) {
@@ -415,7 +430,7 @@ export class LinkSummarizerPlugin implements IPlugin {
             };
           }
 
-          const rawHtml = await response.text();
+          const rawHtml = (await readLimitedResponse(response, 2_000_000)).toString('utf8');
           if (!rawHtml || rawHtml.trim().length === 0) {
             return {
               success: false,

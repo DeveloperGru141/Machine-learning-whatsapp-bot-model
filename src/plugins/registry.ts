@@ -6,6 +6,18 @@ export class PluginRegistry {
   private tools: Map<string, BotTool> = new Map();
 
   public async registerPlugin(plugin: IPlugin): Promise<void> {
+    const existingPlugin = this.plugins.get(plugin.name);
+    if (existingPlugin) {
+      if (existingPlugin === plugin) return;
+      throw new Error(`Plugin "${plugin.name}" is already registered.`);
+    }
+
+    for (const tool of plugin.tools || []) {
+      if (this.tools.has(tool.name)) {
+        throw new Error(`Tool "${tool.name}" is already registered by another plugin.`);
+      }
+    }
+
     this.plugins.set(plugin.name, plugin);
 
     if (plugin.tools) {
@@ -65,6 +77,69 @@ export class PluginRegistry {
 
   public resolveAlias(name: string): string {
     return PluginRegistry.ALIAS_MAP[name] || name;
+  }
+
+  private validateValue(value: unknown, schema: any, path: string): string | null {
+    if (!schema || typeof schema !== 'object') return null;
+
+    const expectedTypes = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
+    if (expectedTypes.length > 0) {
+      const matchesType = expectedTypes.some((type: string) => {
+        switch (type) {
+          case 'object': return value !== null && typeof value === 'object' && !Array.isArray(value);
+          case 'array': return Array.isArray(value);
+          case 'integer': return typeof value === 'number' && Number.isInteger(value);
+          case 'number': return typeof value === 'number' && Number.isFinite(value);
+          case 'string': return typeof value === 'string';
+          case 'boolean': return typeof value === 'boolean';
+          case 'null': return value === null;
+          default: return true;
+        }
+      });
+      if (!matchesType) return `${path} must be ${expectedTypes.join(' or ')}.`;
+    }
+
+    if (Array.isArray(schema.enum) && !schema.enum.some((item: unknown) => item === value)) {
+      return `${path} must be one of the allowed values.`;
+    }
+    if (typeof value === 'string') {
+      if (typeof schema.minLength === 'number' && value.length < schema.minLength) return `${path} is too short.`;
+      if (typeof schema.maxLength === 'number' && value.length > schema.maxLength) return `${path} is too long.`;
+      if (typeof schema.pattern === 'string' && !new RegExp(schema.pattern).test(value)) return `${path} has an invalid format.`;
+    }
+    if (typeof value === 'number') {
+      if (typeof schema.minimum === 'number' && value < schema.minimum) return `${path} is below its minimum.`;
+      if (typeof schema.maximum === 'number' && value > schema.maximum) return `${path} exceeds its maximum.`;
+    }
+    if (Array.isArray(value)) {
+      if (typeof schema.minItems === 'number' && value.length < schema.minItems) return `${path} has too few items.`;
+      if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) return `${path} has too many items.`;
+      if (schema.items) {
+        for (let index = 0; index < value.length; index++) {
+          const error = this.validateValue(value[index], schema.items, `${path}[${index}]`);
+          if (error) return error;
+        }
+      }
+    }
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      const objectValue = value as Record<string, unknown>;
+      const properties = schema.properties && typeof schema.properties === 'object' ? schema.properties : {};
+      for (const required of schema.required || []) {
+        if (!(required in objectValue)) return `${path}.${required} is required.`;
+      }
+      for (const [key, childValue] of Object.entries(objectValue)) {
+        if (Object.prototype.hasOwnProperty.call(properties, key)) {
+          const error = this.validateValue(childValue, properties[key], `${path}.${key}`);
+          if (error) return error;
+        } else if (schema.additionalProperties === false) {
+          return `${path}.${key} is not an allowed argument.`;
+        } else if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
+          const error = this.validateValue(childValue, schema.additionalProperties, `${path}.${key}`);
+          if (error) return error;
+        }
+      }
+    }
+    return null;
   }
 
   public getAllTools(): BotTool[] {
@@ -134,7 +209,6 @@ export class PluginRegistry {
       text.includes('stats')
     ) {
       selected.add('get_bot_health_status');
-      selected.add('get_bot_analytics');
       selected.add('get_executive_briefing');
     }
 
@@ -168,16 +242,12 @@ export class PluginRegistry {
       selected.add('summarize_group_discussion');
     }
 
-    // 2. WhatsApp Status Posting & Morning Status Broadcast
-    if (
-      text.includes('status') ||
-      text.includes('post') ||
-      text.includes('story') ||
-      text.includes('meme')
-    ) {
+    // Publish tools are exposed only for clear posting requests, not when someone asks about status or memes.
+    const explicitlyAsksToPost = /\b(?:post|publish|share|put|upload)\b/.test(text);
+    if (explicitlyAsksToPost && /\b(?:status|story)\b/.test(text)) {
       selected.add('post_whatsapp_status');
-      selected.add('configure_morning_status_broadcast');
     }
+    if (explicitlyAsksToPost && /\bmeme\b/.test(text)) selected.add('post_channel_meme');
 
     // 3. Web Search & Live Info
     if (
@@ -203,6 +273,12 @@ export class PluginRegistry {
       text.includes('latest stats')
     ) {
       selected.add('web_search');
+    }
+    if (
+      /\b(?:football|soccer|match|game)\b/.test(text) &&
+      /\b(?:score|result|won|winning|played|live)\b/.test(text)
+    ) {
+      selected.add('get_live_football_scores');
     }
 
     // 4. Contact Management, Direct Messaging & Unreplied Catch-Up
@@ -239,9 +315,6 @@ export class PluginRegistry {
       text.includes('save') ||
       text.includes('phone') ||
       text.includes('number') ||
-      text.includes('no ') ||
-      text.endsWith(' no') ||
-      text.includes("s no") ||
       text.includes('micah') ||
       text.includes('vcard') ||
       text.includes('vcf') ||
@@ -272,39 +345,38 @@ export class PluginRegistry {
       selected.add('send_message_to_contact');
     }
 
-    // 6. Reminders, Daily Scheduled Broadcasts, & WhatsApp Channel Motivation
-    if (
-      text.includes('remind') ||
-      text.includes('alarm') ||
-      text.includes('timer') ||
-      text.includes('schedule') ||
-      text.includes('quote') ||
-      text.includes('motivation') ||
-      text.includes('channel') ||
-      text.includes('verse') ||
-      text.includes('broadcast') ||
-      text.includes('daily') ||
-      text.includes('morning')
-    ) {
+    // 6. Reminders and scheduled broadcasts
+    if (text.includes('remind') || text.includes('alarm') || text.includes('timer')) {
       selected.add('set_reminder');
+    }
+    if (text.includes('schedule') && /\b(?:daily|broadcast|morning|quote|verse|motivation)\b/.test(text)) {
       selected.add('schedule_daily_broadcast');
+    }
+    if (text.includes('scheduled broadcast') || text.includes('scheduled reminder') || text.includes('broadcast schedule')) {
       selected.add('list_scheduled_broadcasts');
+    }
+    if (text.includes('cancel') && /\b(?:scheduled|broadcast|reminder)\b/.test(text)) {
       selected.add('cancel_scheduled_broadcast');
-      selected.add('broadcast_group_motivation');
+    }
+    const asksGroupBroadcast = /\b(?:broadcast|send|share|post)\b/.test(text) &&
+      /\b(?:groups|group|everyone)\b/.test(text) &&
+      /\b(?:motivation|motivational|quote|verse|morning|evening|night|roundup|round-up)\b/.test(text);
+    if (asksGroupBroadcast) {
+      if (/\b(?:evening|night|roundup|round-up)\b/.test(text)) selected.add('broadcast_group_evening_roundup');
+      else selected.add('broadcast_group_motivation');
+    }
+    if (text.includes('scrape') && /\bquotes?\b/.test(text)) {
       selected.add('scrape_channel_quotes');
+    }
+    if ((text.includes('list') || text.includes('show')) && /\bquotes?\b/.test(text)) {
       selected.add('list_channel_quotes');
     }
 
     // Memes Channel (0029Vb6oS4LJkK7AvtORyH46) with 2-Hour Cooldown
-    if (
-      text.includes('meme') ||
-      text.includes('cooldown') ||
-      text.includes('funny')
-    ) {
-      selected.add('post_channel_meme');
-      selected.add('scrape_channel_memes');
+    if (text.includes('cooldown') && /meme|status/i.test(text)) {
       selected.add('get_meme_cooldown_status');
     }
+    if (text.includes('scrape') && text.includes('meme')) selected.add('scrape_channel_memes');
 
     // Pattern-Based Sticker Engine
     if (
@@ -370,6 +442,55 @@ export class PluginRegistry {
       selected.add('read_document');
     }
 
+    if (text.includes('export') && (text.includes('chat') || text.includes('conversation') || text.includes('history'))) {
+      selected.add('export_chat');
+    }
+    if (text.includes('export') && /\b(?:training|dataset|fine.?tuning)\b/.test(text)) {
+      selected.add('export_training_data');
+    }
+
+    if (/\b(?:reload|hot reload)\b/.test(text) && /\bplugins?\b/.test(text)) {
+      selected.add('reload_plugins');
+    }
+
+    if (text.includes('contact reminder') || text.includes('save contact reminder')) {
+      selected.add('get_contact_save_reminder_status');
+      if (text.includes('start') || text.includes('begin') || text.includes('run')) {
+        selected.add('start_contact_save_reminders');
+        selected.add('preview_contact_save_reminders');
+      }
+      if (text.includes('pause') || text.includes('stop')) selected.add('pause_contact_save_reminders');
+      if (text.includes('preview')) selected.add('preview_contact_save_reminders');
+    }
+
+    if (text.includes('my groups') || text.includes('groups are you in') || text.includes('groups you are in')) {
+      selected.add('list_my_groups');
+    }
+
+    if (text.includes('view once') || text.includes('view-once')) {
+      selected.add('list_view_once');
+      selected.add('retrieve_view_once');
+    }
+
+    if (text.includes('tts') || text.includes('voice id') || text.includes('voice setting')) {
+      selected.add('get_tts_voice_info');
+      if (text.includes('set') || text.includes('change') || text.includes('switch')) selected.add('set_tts_voice_id');
+    }
+
+    if (text.includes('transcribe') || text.includes('transcription')) selected.add('transcribe_voice_note');
+
+    if (text.includes('proactive check-in') || text.includes('proactive checkin') || text.includes('trigger a check-in')) {
+      selected.add('trigger_proactive_checkin');
+    }
+
+    if (text.includes('suspicious link') || text.includes('check this link') || text.includes('is this link safe')) {
+      selected.add('inspect_suspicious_link');
+    }
+
+    if (text.includes('group banter') || text.includes('inside joke') || text.includes('past joke')) {
+      selected.add('search_group_banter');
+    }
+
     // 9. Memory, Cross-Chat Awareness, & Earlier Conversation Recall
     if (
       text.includes('remember') ||
@@ -415,88 +536,26 @@ export class PluginRegistry {
       selected.add('list_autonomous_actions');
     }
 
-    // 10. Admin Privileges & Group Administration
-    if (
-      text.includes('admin') ||
-      text.includes('privilege') ||
-      text.includes('grant') ||
-      text.includes('revoke')
-    ) {
-      selected.add('grant_admin_privilege');
-      selected.add('revoke_admin_privilege');
-      selected.add('list_admin_privileges');
-    }
-
-    
-    // Group Moderation & Mode Toggle (Available in both Groups and DMs for Remote Admin)
-    if (
-      text.includes('lock') ||
-      text.includes('unlock') ||
-      text.includes('open group') ||
-      text.includes('close group') ||
-      text.includes('mute group') ||
-      text.includes('unmute group') ||
-      text.includes('group locked') ||
-      text.includes('still locked') ||
-      text.includes('unlock it') ||
-      text.includes('open it') ||
-      text.includes('lock it')
-    ) {
-      selected.add('set_group_mode');
-      selected.add('get_group_info');
-    }
-
     if (isGroup) {
-      if (
-        text.includes('tag') ||
-        text.includes('everyone') ||
-        text.includes('kick') ||
-        text.includes('remove') ||
-        text.includes('add') ||
-        text.includes('delete') ||
-        text.includes('revoke') ||
-        text.includes('erase') ||
-        text.includes('clean') ||
-        text.includes('promote') ||
-        text.includes('demote') ||
-        text.includes('admin') ||
-        text.includes('lock') ||
-        text.includes('mute') ||
-        text.includes('unlock') ||
-        text.includes('unmute') ||
-        text.includes('group mode') ||
-        text.includes('subject') ||
-        text.includes('name') ||
-        text.includes('rename') ||
-        text.includes('description') ||
-        text.includes('link') ||
-        text.includes('invite') ||
-        text.includes('disappear') ||
-        text.includes('ephemeral') ||
-        text.includes('approval') ||
-        text.includes('approve') ||
-        text.includes('reject') ||
-        text.includes('request') ||
-        text.includes('pending') ||
-        text.includes('info')
-      ) {
-        selected.add('tag_all');
-        selected.add('kick_member');
-        selected.add('add_member');
-        selected.add('delete_group_message');
-        selected.add('promote_member');
-        selected.add('demote_member');
+      if (/\b(?:tag|mention|ping)\b/.test(text) && /\b(?:everyone|everybody|all members|all)\b/.test(text)) selected.add('tag_all');
+      if (/\b(?:kick|remove)\b/.test(text) && /\b(?:member|user|person|participant)\b/.test(text)) selected.add('kick_member');
+      if (/\b(?:add|invite)\b/.test(text) && /\b(?:member|user|person|participant)\b/.test(text)) selected.add('add_member');
+      if (/\b(?:delete|remove|erase|revoke)\b/.test(text) && /\b(?:message|msg|text)\b/.test(text)) selected.add('delete_group_message');
+      if (/\bpromote\b/.test(text) && /\b(?:admin|member|user|person)\b/.test(text)) selected.add('promote_member');
+      if (/\bdemote\b/.test(text) && /\b(?:admin|member|user|person)\b/.test(text)) selected.add('demote_member');
+
+      if (/\b(?:lock|unlock|open|close|mute|unmute)\b/.test(text) && /\b(?:group|chat|messages|settings)\b/.test(text)) {
         selected.add('set_group_mode');
-        selected.add('set_group_subject');
-        selected.add('set_group_description');
-        selected.add('get_group_invite_link');
-        selected.add('revoke_group_invite_link');
-        selected.add('set_disappearing_messages');
-        selected.add('list_join_requests');
-        selected.add('approve_join_request');
-        selected.add('reject_join_request');
-        selected.add('get_group_info');
       }
+      if (/\b(?:rename|change|update)\b/.test(text) && /\b(?:group name|group subject|subject)\b/.test(text)) selected.add('set_group_subject');
+      if (/\b(?:change|update|edit)\b/.test(text) && /\b(?:group description|description)\b/.test(text)) selected.add('set_group_description');
+      if (/\b(?:get|show|find|share)\b/.test(text) && /\b(?:group )?(?:invite link|join link)\b/.test(text)) selected.add('get_group_invite_link');
+      if (/\b(?:revoke|reset|replace)\b/.test(text) && /\b(?:invite link|join link)\b/.test(text)) selected.add('revoke_group_invite_link');
+      if (/\b(?:disappearing|ephemeral)\b/.test(text)) selected.add('set_disappearing_messages');
+      if (/\b(?:pending|list|show|who)\b/.test(text) && /\b(?:join requests|requests to join)\b/.test(text)) selected.add('list_join_requests');
+      if (/\bapprove\b/.test(text) && /\b(?:join request|participant|request)\b/.test(text)) selected.add('approve_join_request');
+      if (/\breject\b/.test(text) && /\b(?:join request|participant|request)\b/.test(text)) selected.add('reject_join_request');
+      if (/\b(?:group info|group details|who are the admins|list admins|member count)\b/.test(text)) selected.add('get_group_info');
 
       if (
         text.includes('leave') ||
@@ -510,24 +569,18 @@ export class PluginRegistry {
     }
 
     // 11. Group Messaging, Group Search, and Group Joining via Invite Link
-    if (
-      text.includes('group') ||
-      text.includes('space') ||
-      text.includes('channel') ||
-      text.includes('chat.whatsapp.com') ||
-      text.includes('join') ||
-      text.includes('invite') ||
-      text.includes('reply to') ||
-      text.includes('post in') ||
-      text.includes('send to') ||
-      text.includes('tell the group')
-    ) {
+    const asksToMessageGroup = /\b(?:send|tell|post|relay|forward|share)\b/.test(text) && /\b(?:group|groups|space)\b/.test(text);
+    if (asksToMessageGroup) {
       selected.add('send_message_to_group');
+    }
+    if (/\b(?:which|what|list|show)\b/.test(text) && /\b(?:groups|groups? you are in|groups? you joined)\b/.test(text)) {
       selected.add('list_joined_groups');
+    }
+    if (/\b(?:group info|group details|who are the admins|list admins|member count)\b/.test(text)) {
       selected.add('get_group_info');
-      if (text.includes('join') || text.includes('invite') || text.includes('chat.whatsapp.com')) {
-        selected.add('join_group');
-      }
+    }
+    if (text.includes('chat.whatsapp.com') || (/\bjoin\b/.test(text) && /\bgroup\b/.test(text))) {
+      selected.add('join_group');
     }
 
     return Array.from(selected)
@@ -636,8 +689,13 @@ export class PluginRegistry {
       return { success: false, message: `Tool "${name}" is not registered.` };
     }
 
+    const validationError = this.validateValue(args, tool.parameters, 'arguments');
+    if (validationError) {
+      return { success: false, message: `Invalid arguments for ${resolvedName}: ${validationError}` };
+    }
+
     try {
-      return await tool.execute(args || {}, context);
+      return await tool.execute(args, context);
     } catch (err: any) {
       console.error(`[PluginRegistry] Error executing tool "${resolvedName}":`, err);
       return { success: false, message: `Execution failed: ${err.message}` };

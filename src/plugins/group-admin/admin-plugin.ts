@@ -279,6 +279,12 @@ export class GroupAdminPlugin implements IPlugin {
         properties: {},
       },
       execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (ctx.isGroup) {
+          return { success: false, message: 'The bot group directory is available only in a private chat.' };
+        }
+        if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
+          return { success: false, message: 'Permission denied: the bot group directory is private to the owner.' };
+        }
         try {
           if (!ctx.sock?.groupFetchAllParticipating) {
             return { success: false, message: 'Socket not available to fetch groups.' };
@@ -340,6 +346,10 @@ export class GroupAdminPlugin implements IPlugin {
 
         if (!targetGroupJid || !targetGroupJid.endsWith('@g.us')) {
           return { success: false, message: 'Please specify a group or run this inside a WhatsApp group.' };
+        }
+
+        if (targetGroupJid !== ctx.chatJid && !(await this.isUserAdmin(ctx.sock, targetGroupJid, ctx.senderJid))) {
+          return { success: false, message: 'Permission denied: group details are available only to that group\'s admins or the bot owner.' };
         }
 
         try {
@@ -1066,6 +1076,9 @@ export class GroupAdminPlugin implements IPlugin {
         const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
         if (!botIsAdmin)
           return { success: false, message: 'Action failed: I must be made an admin in this group to retrieve invite link.' };
+        const senderIsAdmin = await this.isUserAdmin(ctx.sock, ctx.chatJid, ctx.senderJid);
+        if (!senderIsAdmin)
+          return { success: false, message: 'Permission denied: only group admins can retrieve the invite link.' };
 
         try {
           const code = await ctx.sock.groupInviteCode(ctx.chatJid);
@@ -1175,6 +1188,8 @@ export class GroupAdminPlugin implements IPlugin {
         if (!ctx.isGroup) return { success: false, message: 'This tool is only available in WhatsApp groups.' };
         const botIsAdmin = await this.isBotAdmin(ctx.sock, ctx.chatJid);
         if (!botIsAdmin) return { success: false, message: 'Action failed: I must be made an admin in this group first.' };
+        const senderIsAdmin = await this.isUserAdmin(ctx.sock, ctx.chatJid, ctx.senderJid);
+        if (!senderIsAdmin) return { success: false, message: 'Permission denied: only group admins can inspect pending join requests.' };
 
         try {
           const list = await ctx.sock.groupRequestParticipantsList(ctx.chatJid);
@@ -1307,6 +1322,9 @@ export class GroupAdminPlugin implements IPlugin {
         required: ['invite_link'],
       },
       execute: async (args: { invite_link: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
+          return { success: false, message: 'Permission denied: only the bot owner can make the bot join a group.' };
+        }
         try {
           const raw = (args.invite_link || '').trim();
           const match = raw.match(/(?:chat\.whatsapp\.com\/)?([a-zA-Z0-9_-]{20,24})/);
@@ -1450,6 +1468,13 @@ export class GroupAdminPlugin implements IPlugin {
             return {
               success: false,
               message: `Could not find a group matching "${rawGroup}" among the groups I am in. You can ask me "which groups are you in?" to see my list of groups.`,
+            };
+          }
+
+          if (!(await this.isUserAdmin(ctx.sock, targetGroupJid, ctx.senderJid))) {
+            return {
+              success: false,
+              message: 'Permission denied: only the bot owner or an admin of the target group can send a message there.',
             };
           }
 

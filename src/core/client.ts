@@ -126,6 +126,7 @@ export class WhatsAppClient {
     timeoutMs: number = 2000
   ): Promise<{
     confirmed: boolean;
+    serverAcknowledged: boolean;
     status: 'DELIVERED_TO_DEVICE' | 'SENT_TO_SERVER' | 'READ' | 'DISPATCHED';
     statusLabel: string;
     statusCode: number;
@@ -147,6 +148,7 @@ export class WhatsAppClient {
     if (existing && existing.statusCode >= 3) {
       return {
         confirmed: true,
+        serverAcknowledged: true,
         status: existing.status,
         statusLabel: formatLabel(existing.status),
         statusCode: existing.statusCode,
@@ -162,25 +164,35 @@ export class WhatsAppClient {
       statusCode: number;
       updatedAt: number;
     } | null>((resolve) => {
+      const list = this.deliveryWaiters.get(msgId) || [];
+      const cleanup = () => {
+        const current = this.deliveryWaiters.get(msgId);
+        if (!current) return;
+        const remaining = current.filter((waiter) => waiter !== onDeviceReceipt);
+        if (remaining.length > 0) this.deliveryWaiters.set(msgId, remaining);
+        else this.deliveryWaiters.delete(msgId);
+      };
       const timer = setTimeout(() => {
         const latest = this.deliveryStatusMap.get(msgId);
+        cleanup();
         resolve(latest || null);
       }, timeoutMs);
-
-      const list = this.deliveryWaiters.get(msgId) || [];
-      list.push((info) => {
+      const onDeviceReceipt = (info: { status: 'SENT_TO_SERVER' | 'DELIVERED_TO_DEVICE' | 'READ'; statusCode: number; updatedAt: number }) => {
         if (info.statusCode >= 3) {
           clearTimeout(timer);
+          cleanup();
           resolve(info);
         }
-      });
+      };
+      list.push(onDeviceReceipt);
       this.deliveryWaiters.set(msgId, list);
     });
 
     const finalInfo = ackInfo || this.deliveryStatusMap.get(msgId);
     if (finalInfo) {
       return {
-        confirmed: true,
+        confirmed: finalInfo.statusCode >= 3,
+        serverAcknowledged: finalInfo.statusCode >= 2,
         status: finalInfo.status,
         statusLabel: formatLabel(finalInfo.status),
         statusCode: finalInfo.statusCode,
@@ -194,6 +206,7 @@ export class WhatsAppClient {
     const fallbackStatus = 'DISPATCHED';
     return {
       confirmed: false,
+      serverAcknowledged: false,
       status: fallbackStatus,
       statusLabel: formatLabel(fallbackStatus),
       statusCode: 0,
@@ -1820,9 +1833,9 @@ export class WhatsAppClient {
     const savedContact = contactService.getContact(normalized.senderJid);
     const effectiveSenderName = isOwner
       ? 'Ademola'
-      : savedContact?.custom_name ||
-        contactService.extractFriendlyFirstName(normalized.senderName) ||
-        normalized.senderName;
+      : normalized.isGroup
+        ? contactService.extractFriendlyFirstName(normalized.senderName) || normalized.senderName
+        : savedContact?.custom_name || contactService.extractFriendlyFirstName(normalized.senderName) || normalized.senderName;
 
     const incomingCharLen = (cleanedText || promptText || '').length;
 

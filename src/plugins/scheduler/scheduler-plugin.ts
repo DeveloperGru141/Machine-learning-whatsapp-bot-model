@@ -26,6 +26,7 @@ import { OutboundSender } from '../../core/sender.js';
 import { db } from '../../memory/db.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
 import { contactService } from '../../memory/contact-service.js';
+import { fetchPublicHttpUrl, readLimitedResponse } from '../../security/url-policy.js';
 import {
   broadcastMorningGroupMotivation,
   broadcastEveningGroupRoundup,
@@ -331,7 +332,8 @@ export async function scrapeWebMeme(): Promise<{ imageBuffer: Buffer | null; cap
     clearTimeout(timeout);
 
     if (res.ok) {
-      const data = (await res.json()) as {
+      const jsonBytes = await readLimitedResponse(res, 128 * 1024);
+      const data = JSON.parse(jsonBytes.toString('utf8')) as {
         title?: string;
         url?: string;
         nsfw?: boolean;
@@ -340,12 +342,11 @@ export async function scrapeWebMeme(): Promise<{ imageBuffer: Buffer | null; cap
       if (data.url && !data.nsfw && /\.(jpg|jpeg|png|webp)$/i.test(data.url)) {
         const imgCtrl = new AbortController();
         const imgTimeout = setTimeout(() => imgCtrl.abort(), 8000);
-        const imgRes = await fetch(data.url, { signal: imgCtrl.signal });
+        const imgRes = await fetchPublicHttpUrl(data.url, { signal: imgCtrl.signal });
         clearTimeout(imgTimeout);
 
         if (imgRes.ok) {
-          const arrayBuf = await imgRes.arrayBuffer();
-          const buf = Buffer.from(arrayBuf);
+          const buf = await readLimitedResponse(imgRes, 8 * 1024 * 1024);
           if (buf.length > 1000 && buf.length < 8 * 1024 * 1024) {
             const cleanTitle = (data.title || 'Morning vibes').trim();
             return {
@@ -1177,6 +1178,12 @@ export class SchedulerPlugin implements IPlugin {
         properties: {},
       },
       execute: async (_args: any, _ctx: ExecutionContext): Promise<ToolResult> => {
+        if (_ctx.isGroup) {
+          return { success: false, message: 'The executive briefing is available only in a private chat.' };
+        }
+        if (!userProfileManager.isOwner(_ctx.senderJid, _ctx.senderName)) {
+          return { success: false, message: 'Permission denied: the executive briefing is private to the bot owner.' };
+        }
         try {
           const briefing = await buildExecutiveMorningDigest();
           return { success: true, message: briefing, data: briefing };
@@ -1199,6 +1206,9 @@ export class SchedulerPlugin implements IPlugin {
         },
       },
       execute: async (args: { target_group_jid?: string }, _ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!userProfileManager.isOwner(_ctx.senderJid, _ctx.senderName)) {
+          return { success: false, message: 'Permission denied: only the bot owner can broadcast to participating groups.' };
+        }
         try {
           const sock = (schedulerPlugin as any).activeSocket;
           if (!sock) {
@@ -1244,6 +1254,27 @@ export class SchedulerPlugin implements IPlugin {
         args: { message: string; delay_minutes?: number; time?: string; time_of_day?: string; at?: string },
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
+        if (ctx.isGroup && !userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
+          try {
+            const meta = await ctx.sock.groupMetadata(ctx.chatJid);
+            const senderPhone = contactService.extractPhoneNumber(ctx.senderJid);
+            const senderId = `${ctx.senderJid.split(':')[0].split('@')[0]}@${ctx.senderJid.split('@')[1] || 's.whatsapp.net'}`;
+            const senderIsAdmin = meta.participants?.some((participant: any) => {
+              const participantId = participant.id
+                ? `${participant.id.split(':')[0].split('@')[0]}@${participant.id.split('@')[1] || 's.whatsapp.net'}`
+                : '';
+              const participantPhone = contactService.extractPhoneNumber(participant.id || '');
+              const matchesSender = participant.id === ctx.senderJid || participantId === senderId ||
+                (senderPhone && participantPhone === senderPhone);
+              return matchesSender && (participant.admin === 'admin' || participant.admin === 'superadmin');
+            });
+            if (!senderIsAdmin) {
+              return { success: false, message: 'Permission denied: only group admins can schedule reminders in a group.' };
+            }
+          } catch {
+            return { success: false, message: 'Permission denied: group admin status could not be verified.' };
+          }
+        }
         try {
           if (!this.sock && ctx.sock) {
             this.sock = ctx.sock;
@@ -1317,6 +1348,9 @@ export class SchedulerPlugin implements IPlugin {
         args: { topic: string; time_of_day?: string; group?: string; group_jid?: string; custom_prompt?: string },
         ctx: ExecutionContext
       ): Promise<ToolResult> => {
+        if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
+          return { success: false, message: 'Permission denied: only the bot owner can schedule recurring broadcasts.' };
+        }
         try {
           if (!this.sock && ctx.sock) {
             this.sock = ctx.sock;
@@ -1392,7 +1426,12 @@ export class SchedulerPlugin implements IPlugin {
       },
       execute: async (args: { group?: string; group_jid?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
-          const filterChat = args.group || args.group_jid || (ctx.isGroup ? ctx.chatJid : undefined);
+          const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
+          const filterChat = ctx.isGroup
+            ? ctx.chatJid
+            : isOwner
+              ? args.group || args.group_jid
+              : ctx.chatJid;
           const broadcasts = getActiveDailyBroadcasts(filterChat);
 
           if (broadcasts.length === 0) {
@@ -1433,7 +1472,10 @@ export class SchedulerPlugin implements IPlugin {
         },
         required: ['task_id'],
       },
-      execute: async (args: { task_id: number }): Promise<ToolResult> => {
+      execute: async (args: { task_id: number }, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
+          return { success: false, message: 'Permission denied: only the bot owner can cancel scheduled broadcasts.' };
+        }
         try {
           const ok = cancelScheduledTask(Number(args.task_id));
           if (!ok) {
@@ -1453,6 +1495,12 @@ export class SchedulerPlugin implements IPlugin {
         properties: {},
       },
       execute: async (_args: {}, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (ctx.isGroup) {
+          return { success: false, message: 'The bot group directory is available only in a private chat.' };
+        }
+        if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
+          return { success: false, message: 'Permission denied: group membership details are private to the bot owner.' };
+        }
         try {
           const socket = this.sock || ctx.sock;
           if (!socket) {
@@ -1493,6 +1541,9 @@ export class SchedulerPlugin implements IPlugin {
         properties: {},
       },
       execute: async (_args: {}, _ctx: ExecutionContext): Promise<ToolResult> => {
+        if (_ctx.isGroup) {
+          return { success: true, message: '🟢 Forgelabs assistant is online, healthy, and operational.' };
+        }
         if (!userProfileManager.isOwner(_ctx.senderJid)) {
           return {
             success: true,
@@ -1528,6 +1579,9 @@ export class SchedulerPlugin implements IPlugin {
         },
       },
       execute: async (args: { category?: StatusCategory }, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
+          return { success: false, message: 'Permission denied: only the bot owner can post to WhatsApp Status.' };
+        }
         try {
           const socket = this.sock || ctx.sock || activeSocket;
           if (!socket) {
@@ -1560,6 +1614,9 @@ export class SchedulerPlugin implements IPlugin {
         },
       },
       execute: async (args: { group?: string; group_jid?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
+          return { success: false, message: 'Permission denied: only the bot owner can broadcast to participating groups.' };
+        }
         try {
           const socket = this.sock || ctx.sock || activeSocket;
           if (!socket) {
@@ -1685,6 +1742,9 @@ export class SchedulerPlugin implements IPlugin {
         },
       },
       execute: async (args: { force?: boolean; target?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+        if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
+          return { success: false, message: 'Permission denied: only the bot owner can publish channel memes.' };
+        }
         try {
           const socket = this.sock || ctx.sock || activeSocket;
           if (!socket) {

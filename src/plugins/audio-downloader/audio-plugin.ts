@@ -5,6 +5,7 @@ import { getBotSetting, setBotSetting } from '../../memory/db.js';
 import { userProfileManager } from '../../memory/user-profiles.js';
 import { config } from '../../config/env.js';
 import { OutboundSender } from '../../core/sender.js';
+import { fetchPublicHttpUrl, readLimitedResponse } from '../../security/url-policy.js';
 
 export class AudioDownloaderPlugin implements IPlugin {
   name = 'AudioDownloader';
@@ -78,17 +79,8 @@ export class AudioDownloaderPlugin implements IPlugin {
             targetUrl = `https://${targetUrl}`;
           }
 
-          try {
-            const parsed = new URL(targetUrl);
-            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-              return { success: false, message: 'Invalid audio URL. Only HTTP and HTTPS links are supported.' };
-            }
-          } catch {
-            return { success: false, message: 'Invalid URL provided.' };
-          }
-
           console.log(`[AudioDownloader] Downloading audio from: ${targetUrl}`);
-          const res = await fetch(targetUrl, { signal: AbortSignal.timeout(30000) });
+          const res = await fetchPublicHttpUrl(targetUrl, { signal: AbortSignal.timeout(30000) });
           if (!res.ok) {
             return {
               success: false,
@@ -96,8 +88,7 @@ export class AudioDownloaderPlugin implements IPlugin {
             };
           }
 
-          const arrayBuffer = await res.arrayBuffer();
-          let buffer: any = Buffer.from(arrayBuffer);
+          let buffer: any = await readLimitedResponse(res, 25 * 1024 * 1024);
 
           if (args.asVoiceNote) {
             buffer = await transcodeToOggOpus(buffer);
@@ -222,12 +213,12 @@ export class AudioDownloaderPlugin implements IPlugin {
       execute: async (args: { audio_url?: string }, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
           if (args.audio_url) {
-            const res = await fetch(args.audio_url, { signal: AbortSignal.timeout(20000) });
+            const res = await fetchPublicHttpUrl(args.audio_url, { signal: AbortSignal.timeout(20000) });
             if (!res.ok) {
               return { success: false, message: `Failed to download audio from ${args.audio_url}` };
             }
-            const arrayBuf = await res.arrayBuffer();
-            const analysis = await analyzeVoiceNote(Buffer.from(arrayBuf));
+            const audioBuffer = await readLimitedResponse(res, 25 * 1024 * 1024);
+            const analysis = await analyzeVoiceNote(audioBuffer);
             if (!analysis) {
               return { success: false, message: 'Could not transcribe the provided audio.' };
             }

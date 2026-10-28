@@ -27,19 +27,21 @@ export class UserProfileManager {
       if (!rawOwner) continue;
       const normDigits = normalizePhoneNumber(rawOwner);
       const jid = rawOwner.endsWith('@lid') ? rawOwner : `${normDigits}@s.whatsapp.net`;
-      const ownerPhone = jid.endsWith('@lid') ? '2348108574293' : normDigits;
+      // A LID is not enough to infer a phone number. Seed its owner profile, but only
+      // create an address-book phone record when this configured identifier has one.
+      const ownerPhone = jid.endsWith('@lid') ? '' : normDigits;
       try {
         db.prepare(`
           INSERT INTO user_profiles (user_jid, display_name, preferred_language, personality_notes, first_seen, last_seen, total_messages, is_owner)
-          VALUES (?, 'Ademola', 'en', 'Creator and Owner of Forgelabs Assistant (08108574293)', ?, ?, 0, 1)
+          VALUES (?, 'Ademola', 'en', 'Creator and Owner of Forgelabs Assistant', ?, ?, 0, 1)
           ON CONFLICT(user_jid) DO UPDATE SET is_owner = 1, display_name = 'Ademola'
         `).run(jid, now, now);
 
         if (ownerPhone) {
           db.prepare(`
             INSERT INTO contacts (phone_number, jid, display_name, custom_name, notes, tags, is_auto_saved, is_introduced, created_at, updated_at)
-            VALUES (?, ?, 'Ademola', 'Ademola', 'Creator and Owner of Forgelabs Assistant (08108574293)', 'owner,creator', 0, 1, ?, ?)
-            ON CONFLICT(jid) DO UPDATE SET phone_number = excluded.phone_number, display_name = 'Ademola', custom_name = 'Ademola', notes = 'Creator and Owner of Forgelabs Assistant (08108574293)'
+            VALUES (?, ?, 'Ademola', 'Ademola', 'Creator and Owner of Forgelabs Assistant', 'owner,creator', 0, 1, ?, ?)
+            ON CONFLICT(jid) DO UPDATE SET phone_number = excluded.phone_number, display_name = 'Ademola', custom_name = 'Ademola', notes = 'Creator and Owner of Forgelabs Assistant'
           `).run(ownerPhone, jid, now, now);
         }
       } catch (err: any) {
@@ -58,10 +60,10 @@ export class UserProfileManager {
   }
 
   /**
-   * Determines if a user is an authorized bot owner.
-   * Checks database `is_owner` flag OR environment `config.bot.owners` (08108574293 / 2348108574293 / 102409552584830@lid).
+   * Determines if a user is an authorized bot owner from configured WhatsApp identifiers.
+   * Display names and persisted profile flags are not identity proofs.
    */
-  public isOwner(userJid: string, senderName?: string): boolean {
+  public isOwner(userJid: string, _senderName?: string): boolean {
     if (!userJid) return false;
 
     const normalizedDigits = normalizePhoneNumber(userJid);
@@ -70,42 +72,8 @@ export class UserProfileManager {
       : `${normalizedDigits}@s.whatsapp.net`;
     const digitsOnly = userJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
-    if (
-      digitsOnly === '2348108574293' ||
-      digitsOnly === '08108574293' ||
-      digitsOnly === '102409552584830' ||
-      normalizedJid === '102409552584830@lid' ||
-      normalizedJid === '2348108574293@s.whatsapp.net'
-    ) {
-      return true;
-    }
-
-    if (senderName) {
-      const normalizedAscii = senderName
-        .normalize('NFKD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[øØ]/g, 'o')
-        .replace(/[^a-zA-Z0-9]/g, '')
-        .toLowerCase();
-      if (normalizedAscii.includes('hardezmorlar')) {
-        return true;
-      }
-    }
-
-    // 1. Check SQLite user_profiles table
-    try {
-      const row = db.prepare(`
-        SELECT is_owner FROM user_profiles WHERE user_jid = ? OR user_jid = ?
-      `).get(userJid, normalizedJid) as { is_owner: number } | undefined;
-
-      if (row && Number(row.is_owner) === 1) {
-        return true;
-      }
-    } catch (err) {
-      console.error('[UserProfileManager] Error querying is_owner from DB:', err);
-    }
-
-    // 2. Check config.bot.owners list
+    // Only configured WhatsApp identifiers grant owner privileges. Historical database
+    // flags may have been set from untrusted display names and must not authorize access.
     if (config.bot.owners && Array.isArray(config.bot.owners)) {
       const isConfigOwner = config.bot.owners.some((owner) => {
         if (!owner) return false;
@@ -124,11 +92,13 @@ export class UserProfileManager {
     return false;
   }
 
-  /**
-   * Promotes a user to bot owner in persistent storage.
-   */
+  /** Persist owner profile metadata only for an identifier already configured as an owner. */
   public markAsOwner(userJid: string): void {
     if (!userJid) return;
+    if (!this.isOwner(userJid)) {
+      console.warn('[UserProfileManager] Refused to mark an unconfigured identifier as an owner.');
+      return;
+    }
     const now = Date.now();
     try {
       db.prepare(`
@@ -142,11 +112,13 @@ export class UserProfileManager {
     }
   }
 
-  /**
-   * Demotes an owner back to a regular user.
-   */
+  /** Clear legacy owner metadata; configured owner access is controlled by BOT_OWNERS. */
   public unmarkAsOwner(userJid: string): void {
     if (!userJid) return;
+    if (this.isOwner(userJid)) {
+      console.warn('[UserProfileManager] Configured owners cannot be demoted in the profile database.');
+      return;
+    }
     try {
       db.prepare(`UPDATE user_profiles SET is_owner = 0 WHERE user_jid = ?`).run(userJid);
       console.log(`[UserProfileManager] Demoted user ${userJid} to regular user.`);
@@ -178,10 +150,10 @@ export class UserProfileManager {
         )
         VALUES (?, ?, 'en', '', ?, ?, 1, ?)
         ON CONFLICT(user_jid) DO UPDATE SET
-          display_name = CASE WHEN excluded.is_owner = 1 OR user_profiles.is_owner = 1 THEN 'Ademola' ELSE COALESCE(excluded.display_name, user_profiles.display_name) END,
+          display_name = CASE WHEN excluded.is_owner = 1 THEN 'Ademola' ELSE COALESCE(excluded.display_name, user_profiles.display_name) END,
           last_seen = excluded.last_seen,
           total_messages = user_profiles.total_messages + 1,
-          is_owner = CASE WHEN user_profiles.is_owner = 1 THEN 1 ELSE excluded.is_owner END
+          is_owner = excluded.is_owner
       `).run(userJid, cleanName, now, now, isOwnerFlag);
     } catch (err) {
       console.error(`[UserProfileManager] Error upserting profile for ${userJid}:`, err);

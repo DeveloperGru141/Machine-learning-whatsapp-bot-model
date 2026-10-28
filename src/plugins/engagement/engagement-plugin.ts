@@ -477,6 +477,9 @@ Drop a natural 1-2 sentence ${isContact ? 'check-in / hello' : 'reminder / follo
         },
       },
       execute: async (args: { target_type?: 'contact' | 'group' | 'any'; chat_jid?: string }, context: ExecutionContext): Promise<ToolResult> => {
+        if (!userProfileManager.isOwner(context.senderJid, context.senderName)) {
+          return { success: false, message: 'Permission denied: only the bot owner can trigger cross-chat check-ins.' };
+        }
         const forceType = args.target_type === 'any' || !args.target_type ? undefined : args.target_type;
         const targets = this.findEligibleTargets({
           forceType,

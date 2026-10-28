@@ -1,4 +1,4 @@
-import { exec, execFile } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
@@ -6,8 +6,8 @@ import crypto from 'crypto';
 import { createRequire } from 'node:module';
 import { config } from '../config/env.js';
 import { getBotSetting } from '../memory/db.js';
+import { readLimitedResponse } from '../security/url-policy.js';
 
-const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
 
@@ -290,8 +290,7 @@ export async function synthesizeVoiceNote(
       });
 
       if (response.ok) {
-        const audioArray = await response.arrayBuffer();
-        const mp3Buffer = Buffer.from(audioArray);
+        const mp3Buffer = await readLimitedResponse(response, 12 * 1024 * 1024);
         fs.writeFileSync(tempMp3File, mp3Buffer);
         console.log(`[TTS] ✅ ElevenLabs synthesized ${mp3Buffer.length} bytes of audio.`);
 
@@ -369,16 +368,32 @@ export async function oldSynthesizeVoiceNote(
     fs.writeFileSync(tempTextFile, spokenText, 'utf-8');
 
     const selectedVoice = voice || config.bot.voice || 'en-NG-AbeoNeural';
-    const runners = ['edge-tts', 'python3 -m edge_tts', 'python -m edge_tts'];
+    const runners: Array<{ command: string; prefixArgs: string[] }> = [
+      { command: 'edge-tts', prefixArgs: [] },
+      { command: 'python3', prefixArgs: ['-m', 'edge_tts'] },
+      { command: 'python', prefixArgs: ['-m', 'edge_tts'] },
+    ];
 
     // Slight warm baritone pitch (-2Hz) and natural conversational cadence (-2% rate so Pidgin syllables breathe naturally)
     const runEdgeTts = async (targetVoice: string): Promise<boolean> => {
+      if (!/^[A-Za-z0-9_-]{1,100}$/.test(targetVoice)) {
+        console.warn('[TTS] Rejected an invalid Edge-TTS voice identifier.');
+        return false;
+      }
       for (const runner of runners) {
         try {
-          const cmd = `${runner} --voice "${targetVoice}" --rate="-2%" --pitch="-2Hz" -f "${tempTextFile}" --write-media "${tempMp3File}"`;
-          await execAsync(cmd, { timeout: 15_000 });
-          if (fs.existsSync(tempMp3File) && fs.statSync(tempMp3File).size > 100) {
-            return true;
+          await execFileAsync(runner.command, [
+            ...runner.prefixArgs,
+            '--voice', targetVoice,
+            '--rate=-2%',
+            '--pitch=-2Hz',
+            '-f', tempTextFile,
+            '--write-media', tempMp3File,
+          ], { timeout: 15_000, windowsHide: true, maxBuffer: 1024 * 1024 });
+          if (fs.existsSync(tempMp3File)) {
+            const generatedSize = fs.statSync(tempMp3File).size;
+            if (generatedSize > 100 && generatedSize <= 12 * 1024 * 1024) return true;
+            if (generatedSize > 12 * 1024 * 1024) fs.unlinkSync(tempMp3File);
           }
         } catch {}
       }
@@ -406,8 +421,7 @@ export async function oldSynthesizeVoiceNote(
             signal: AbortSignal.timeout(10_000),
           });
           if (res.ok) {
-            const arrBuf = await res.arrayBuffer();
-            fs.writeFileSync(tempMp3File, Buffer.from(arrBuf));
+            fs.writeFileSync(tempMp3File, await readLimitedResponse(res, 12 * 1024 * 1024));
             generated = true;
           }
         } catch {}
