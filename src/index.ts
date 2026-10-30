@@ -491,15 +491,19 @@ async function bootstrap() {
   console.log('==============================================');
 
   // 1. Initialize SQLite Database & Tables (auto-seeds training exemplars if empty)
+  console.log('[Startup] Initializing SQLite database.');
   initDatabase();
+  console.log('[Startup] SQLite database initialization completed.');
   console.log('📦 Local SQLite Database initialized.');
 
   // 2. Start HTTP Health Server & Periodic Temp/Memory Sweeper
+  console.log('[Startup] Starting HTTP health server.');
   startHealthServer();
   pruneTempAndMemory();
   const cleanupTimer = setInterval(pruneTempAndMemory, 30 * 60 * 1000);
   cleanupTimer.unref();
 
+  console.log('[Startup] Registering active plugins.');
   // 3. Register Active Plugins
   await pluginRegistry.registerPlugin(audioDownloaderPlugin);
   await pluginRegistry.registerPlugin(videoDownloaderPlugin);
@@ -526,6 +530,7 @@ async function bootstrap() {
   console.log(`🔌 Registered ${pluginRegistry.getAllTools().length} tools across plugins.`);
 
   // 4. Connect to WhatsApp via Baileys
+  console.log('[Startup] Starting WhatsApp connection.');
   await whatsAppClient.start();
 }
 
