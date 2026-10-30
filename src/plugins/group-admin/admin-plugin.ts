@@ -31,11 +31,11 @@ export class GroupAdminPlugin implements IPlugin {
     if (!search) return null;
 
     if (search.endsWith('@g.us')) {
-      const known = findKnownGroup(search);
+      const known = await findKnownGroup(search);
       return { jid: search, subject: known?.subject || search };
     }
 
-    const cached = findKnownGroup(search);
+    const cached = await findKnownGroup(search);
     if (cached) {
       return { jid: cached.group_jid, subject: cached.subject };
     }
@@ -49,7 +49,7 @@ export class GroupAdminPlugin implements IPlugin {
         for (const [jid, meta] of Object.entries(participating) as [string, any][]) {
           const sub = (meta.subject || '').toLowerCase();
           if (sub === lowerSearch || sub.includes(lowerSearch) || lowerSearch.includes(sub)) {
-            upsertKnownGroup(jid, meta.subject || search, meta.participants?.length || 0);
+            await upsertKnownGroup(jid, meta.subject || search, meta.participants?.length || 0);
             return { jid, subject: meta.subject || search };
           }
         }
@@ -59,7 +59,7 @@ export class GroupAdminPlugin implements IPlugin {
         for (const [jid, meta] of Object.entries(participating) as [string, any][]) {
           const sub = (meta.subject || '').toLowerCase();
           if (searchWords.some(w => sub.includes(w))) {
-            upsertKnownGroup(jid, meta.subject || search, meta.participants?.length || 0);
+            await upsertKnownGroup(jid, meta.subject || search, meta.participants?.length || 0);
             return { jid, subject: meta.subject || search };
           }
         }
@@ -97,12 +97,12 @@ export class GroupAdminPlugin implements IPlugin {
 
       // Keep known_groups database table in sync with live status
       if (meta.subject) {
-        upsertKnownGroup(groupJid, meta.subject, meta.participants?.length || 0, isAdmin);
+        await upsertKnownGroup(groupJid, meta.subject, meta.participants?.length || 0, isAdmin);
       }
 
       return isAdmin;
     } catch {
-      const cached = findKnownGroup(groupJid);
+      const cached = await findKnownGroup(groupJid);
       return Boolean(cached && cached.is_admin);
     }
   }
@@ -190,7 +190,7 @@ export class GroupAdminPlugin implements IPlugin {
           const lower = cleanInput.toLowerCase().replace(/^@/, '');
           for (const p of meta.participants || []) {
             const num = p.id ? p.id.split('@')[0].split(':')[0].replace(/[^0-9]/g, '') : '';
-            const saved = contactService.getContact(num || p.id);
+            const saved = await contactService.getContact(num || p.id);
             const name = (saved?.custom_name || saved?.display_name || '').toLowerCase();
             if (name.includes(lower) || (num && num.includes(lower))) {
               return { jid: p.id, cleanNumber: num };
@@ -202,7 +202,7 @@ export class GroupAdminPlugin implements IPlugin {
 
     // Fallback: Check contact address book for external contact (e.g. for add_member)
     if (cleanInput) {
-      const savedContact = contactService.getContact(cleanInput);
+      const savedContact = await contactService.getContact(cleanInput);
       if (savedContact && savedContact.phone_number) {
         return {
           jid: `${savedContact.phone_number}@s.whatsapp.net`,
@@ -256,7 +256,7 @@ export class GroupAdminPlugin implements IPlugin {
         text: `⚠️ ${userTag}, group invite links are not permitted here! Your message has been removed.`,
         mentions: [senderJid],
       });
-      logAutonomousAction(
+      await logAutonomousAction(
         'anti_link_moderation',
         chatJid,
         senderJid,
@@ -338,7 +338,7 @@ export class GroupAdminPlugin implements IPlugin {
       execute: async (args: { group?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
         let targetGroupJid = ctx.chatJid;
         if (args.group && args.group.trim()) {
-          const found = findKnownGroup(args.group.trim());
+          const found = await findKnownGroup(args.group.trim());
           if (found) {
             targetGroupJid = found.group_jid;
           }
@@ -361,9 +361,9 @@ export class GroupAdminPlugin implements IPlugin {
           const botIsAdmin = await this.isBotAdmin(ctx.sock, targetGroupJid);
 
           const adminListStr = admins
-            .map((a: any, idx: number) => {
+            .map(async (a: any, idx: number) => {
               const num = a.id ? a.id.split('@')[0].split(':')[0] : '';
-              const saved = contactService.getContact(num || a.id);
+              const saved = await contactService.getContact(num || a.id);
               const name = saved?.custom_name || saved?.display_name || (num ? `+${num}` : 'Admin');
               const badge = a.admin === 'superadmin' ? '👑 Creator/Superadmin' : '🛡️ Admin';
               return `${idx + 1}. *${name}* (${badge})`;
@@ -434,7 +434,7 @@ export class GroupAdminPlugin implements IPlugin {
             text: fullText,
             mentions,
           });
-          chatLogger.logOutboundMessage(ctx.chatJid, fullText);
+          await chatLogger.logOutboundMessage(ctx.chatJid, fullText);
 
           return { success: true, message: `Successfully tagged ${mentions.length} members with the announcement.` };
         } catch (err: any) {
@@ -533,7 +533,7 @@ export class GroupAdminPlugin implements IPlugin {
           const isLid = resolved.cleanNumber && resolved.cleanNumber.length > 13;
           const displayLabel = isLid ? 'The specified member' : `@${resolved.cleanNumber}`;
 
-          logAutonomousAction(
+          await logAutonomousAction(
             'kicked_member',
             ctx.chatJid,
             ctx.senderJid,
@@ -622,7 +622,7 @@ export class GroupAdminPlugin implements IPlugin {
           const status = String(firstResult?.status || '');
 
           if (status === '200') {
-            logAutonomousAction(
+            await logAutonomousAction(
               'added_member',
               ctx.chatJid,
               ctx.senderJid,
@@ -740,7 +740,7 @@ export class GroupAdminPlugin implements IPlugin {
             }
           }
 
-          const lastMsg = chatLogger.getLastMessage(ctx.chatJid, targetSenderJid);
+          const lastMsg = await chatLogger.getLastMessage(ctx.chatJid, targetSenderJid);
           if (lastMsg && lastMsg.message_id) {
             targetId = lastMsg.message_id;
             participantJid = lastMsg.sender_jid;
@@ -766,7 +766,7 @@ export class GroupAdminPlugin implements IPlugin {
           }
 
           await ctx.sock.sendMessage(ctx.chatJid, { delete: keyToDelete });
-          logAutonomousAction(
+          await logAutonomousAction(
             'deleted_message',
             ctx.chatJid,
             ctx.senderJid,
@@ -823,7 +823,7 @@ export class GroupAdminPlugin implements IPlugin {
             };
           }
         } else if (!ctx.isGroup) {
-          const known = getAllKnownGroups(10);
+          const known = await getAllKnownGroups(10);
           const adminGroups = known.filter((g) => g.is_admin);
           if (adminGroups.length === 1) {
             targetGroupJid = adminGroups[0].group_jid;
@@ -867,7 +867,7 @@ export class GroupAdminPlugin implements IPlugin {
             label = '🔓 Group info unlocked: All members can edit group title, icon, and description.';
           }
 
-          logAutonomousAction(
+          await logAutonomousAction(
             'group_moderation',
             targetGroupJid,
             targetGroupSubject || 'Group',
@@ -922,7 +922,7 @@ export class GroupAdminPlugin implements IPlugin {
           const isLid = resolved.cleanNumber && resolved.cleanNumber.length > 13;
           const displayLabel = isLid ? 'The member' : `@${resolved.cleanNumber}`;
 
-          logAutonomousAction('promoted_admin', ctx.chatJid, ctx.senderJid, `Promoted ${resolved.jid} to admin`);
+          await logAutonomousAction('promoted_admin', ctx.chatJid, ctx.senderJid, `Promoted ${resolved.jid} to admin`);
 
           return { success: true, message: `🛡️ ${displayLabel} has been successfully promoted to group admin.` };
         } catch (err: any) {
@@ -995,7 +995,7 @@ export class GroupAdminPlugin implements IPlugin {
           const isLid = resolved.cleanNumber && resolved.cleanNumber.length > 13;
           const displayLabel = isLid ? 'The admin' : `@${resolved.cleanNumber}`;
 
-          logAutonomousAction('demoted_admin', ctx.chatJid, ctx.senderJid, `Demoted ${resolved.jid} to regular member`);
+          await logAutonomousAction('demoted_admin', ctx.chatJid, ctx.senderJid, `Demoted ${resolved.jid} to regular member`);
 
           return { success: true, message: `${displayLabel} has been demoted to a regular member.` };
         } catch (err: any) {
@@ -1027,7 +1027,7 @@ export class GroupAdminPlugin implements IPlugin {
 
         try {
           await ctx.sock.groupUpdateSubject(ctx.chatJid, args.subject.trim());
-          upsertKnownGroup(ctx.chatJid, args.subject.trim(), 0, true);
+          await upsertKnownGroup(ctx.chatJid, args.subject.trim(), 0, true);
           return { success: true, message: `Group name successfully updated to "${args.subject.trim()}".` };
         } catch (err: any) {
           return { success: false, message: `Failed to update group name: ${err.message}` };
@@ -1363,10 +1363,10 @@ export class GroupAdminPlugin implements IPlugin {
           const groupTitle = groupInfo?.subject || 'the group';
 
           if (groupJid) {
-            upsertKnownGroup(groupJid, groupTitle, groupInfo?.size || 0, false);
+            await upsertKnownGroup(groupJid, groupTitle, groupInfo?.size || 0, false);
           }
 
-          logAutonomousAction(
+          await logAutonomousAction(
             'joined_group',
             groupJid || 'group',
             ctx.senderJid,
@@ -1440,7 +1440,7 @@ export class GroupAdminPlugin implements IPlugin {
           let targetGroupJid = '';
           let targetGroupSubject = rawGroup;
 
-          const cached = findKnownGroup(rawGroup);
+          const cached = await findKnownGroup(rawGroup);
           if (cached) {
             targetGroupJid = cached.group_jid;
             targetGroupSubject = cached.subject;
@@ -1455,7 +1455,7 @@ export class GroupAdminPlugin implements IPlugin {
                 if (sub.includes(lowerSearch) || lowerSearch.includes(sub)) {
                   targetGroupJid = jid;
                   targetGroupSubject = meta.subject || rawGroup;
-                  upsertKnownGroup(jid, targetGroupSubject, meta.participants?.length || 0);
+                  await upsertKnownGroup(jid, targetGroupSubject, meta.participants?.length || 0);
                   break;
                 }
               }
@@ -1484,7 +1484,7 @@ export class GroupAdminPlugin implements IPlugin {
           if (args.target_member && args.target_member.trim()) {
             const targetName = args.target_member.trim();
             try {
-              const memberRow = db.prepare(`
+              const memberRow = await db.prepare(`
                 SELECT sender_jid, sender_name FROM chat_logs
                 WHERE chat_jid = ? AND is_group = 1 AND (LOWER(sender_name) LIKE LOWER(?) OR sender_jid LIKE ?)
                 ORDER BY id DESC LIMIT 1
@@ -1509,7 +1509,7 @@ export class GroupAdminPlugin implements IPlugin {
             mentions: mentions.length > 0 ? mentions : undefined,
           });
 
-          chatLogger.logMessage({
+          await chatLogger.logMessage({
             chatJid: targetGroupJid,
             senderJid: 'bot',
             senderName: config.bot.name,
@@ -1519,7 +1519,7 @@ export class GroupAdminPlugin implements IPlugin {
             timestamp: Date.now(),
           });
 
-          logAutonomousAction(
+          await logAutonomousAction(
             'sent_group_message',
             targetGroupJid,
             ctx.senderJid,
@@ -1657,7 +1657,7 @@ export class GroupAdminPlugin implements IPlugin {
           const limit = Math.max(15, Math.min(150, Number(args.message_count) || 60));
           const cutoffTime = Date.now() - hours * 60 * 60 * 1000;
 
-          const rows = db.prepare(`
+          const rows = await db.prepare(`
             SELECT sender_name, message_text, timestamp FROM chat_logs
             WHERE chat_jid = ?
               AND is_noise = 0

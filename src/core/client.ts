@@ -854,7 +854,7 @@ export class WhatsAppClient {
         const payload = rest[0];
         const isProtocolAction = Boolean(payload?.delete || payload?.react || payload?.pollUpdateMessage);
         if (isDirectMessage && !isProtocolAction) {
-          const check = antiBanEngine.canSendOutbound({ chatJid: jid, isGroup: false }, true);
+          const check = await antiBanEngine.canSendOutbound({ chatJid: jid, isGroup: false }, true);
           if (!check.allowed) {
             console.warn(`[AntiBan] 🛡️ Blocked direct socket send: ${check.reason}`);
             throw new Error(check.reason || 'Anti-spam policy blocked this direct message.');
@@ -864,7 +864,7 @@ export class WhatsAppClient {
         if (!isProtocolAction && payload && typeof payload === 'object') {
           safeArgs[0] = OutboundSender.sanitizeOutgoingPayload(payload);
         }
-        return antiBanEngine.scheduleDispatch(jid, () => rawSendMessage(jid, ...safeArgs));
+        return await antiBanEngine.scheduleDispatch(jid, () => rawSendMessage(jid, ...safeArgs));
       };
 
       let lastStandingRefreshAt = 0;
@@ -1093,7 +1093,7 @@ export class WhatsAppClient {
           if (contacts && contacts.length > 0) {
             for (const c of contacts) {
               if (c.id && !c.id.endsWith('@g.us')) {
-                contactService.syncWhatsAppContact(c);
+                await contactService.syncWhatsAppContact(c);
               }
             }
           }
@@ -1103,9 +1103,9 @@ export class WhatsAppClient {
           if (chats && chats.length > 0) {
             for (const chat of chats) {
               if (chat.id && !chat.id.endsWith('@g.us') && (chat.name || (chat as any).notify)) {
-                contactService.autoSaveContact(chat.id, chat.name || (chat as any).notify);
+                await contactService.autoSaveContact(chat.id, chat.name || (chat as any).notify);
               } else if (chat.id && chat.id.endsWith('@g.us') && (chat.name || (chat as any).subject)) {
-                upsertKnownGroup(chat.id, chat.name || (chat as any).subject);
+                await upsertKnownGroup(chat.id, chat.name || (chat as any).subject);
               }
               const embedded = (chat as any).messages;
               if (Array.isArray(embedded)) {
@@ -1144,7 +1144,7 @@ export class WhatsAppClient {
               const normalized = normalizeMessage(msg);
               if (normalized && (normalized.text || normalized.contentType)) {
                 const msgTs = parseTs(msg.messageTimestamp) || (Date.now() - 86400_000);
-                chatLogger.logMessage({
+                await chatLogger.logMessage({
                   chatJid: normalized.chatJid,
                   senderJid: msg.key?.fromMe ? 'bot' : normalized.senderJid,
                   senderName: msg.key?.fromMe ? config.bot.name : normalized.senderName,
@@ -1155,7 +1155,7 @@ export class WhatsAppClient {
                   timestamp: msgTs,
                 });
                 if (!normalized.isGroup && !msg.key?.fromMe) {
-                  contactService.autoSaveContact(normalized.senderJid, normalized.senderName);
+                  await contactService.autoSaveContact(normalized.senderJid, normalized.senderName);
                   loggedDmCount++;
                 }
               }
@@ -1222,11 +1222,11 @@ export class WhatsAppClient {
       });
 
       // Passively record new contacts synced from phonebook
-      this.sock.ev.on('contacts.upsert', (contacts) => {
+      this.sock.ev.on('contacts.upsert', async (contacts) => {
         try {
           for (const c of contacts) {
             if (c.id && !c.id.endsWith('@g.us')) {
-              contactService.syncWhatsAppContact(c);
+              await contactService.syncWhatsAppContact(c);
             }
           }
         } catch {}
@@ -1238,13 +1238,13 @@ export class WhatsAppClient {
           for (const chat of newChats) {
             if (chat.id && chat.id.endsWith('@g.us')) {
               if (chat.name || (chat as any).subject) {
-                upsertKnownGroup(chat.id, chat.name || (chat as any).subject);
+                await upsertKnownGroup(chat.id, chat.name || (chat as any).subject);
               }
               continue;
             }
             if (!chat.id || chat.id.includes('broadcast')) continue;
             if (chat.name || (chat as any).notify) {
-              contactService.autoSaveContact(chat.id, chat.name || (chat as any).notify);
+              await contactService.autoSaveContact(chat.id, chat.name || (chat as any).notify);
             }
             const embedded = (chat as any).messages;
             if (Array.isArray(embedded)) {
@@ -1261,7 +1261,7 @@ export class WhatsAppClient {
                       : Number(m.messageTimestamp);
                   const n = Number(rawVal);
                   const ts = n > 1e11 ? n : n > 0 ? n * 1000 : (Date.now() - 86400_000);
-                  chatLogger.logMessage({
+                  await chatLogger.logMessage({
                     chatJid: normalized.chatJid,
                     senderJid: m.key?.fromMe ? 'bot' : normalized.senderJid,
                     senderName: m.key?.fromMe ? config.bot.name : normalized.senderName,
@@ -1280,11 +1280,11 @@ export class WhatsAppClient {
       });
 
       // Passively record group subject updates
-      this.sock.ev.on('groups.update', (updates) => {
+      this.sock.ev.on('groups.update', async (updates) => {
         try {
           for (const u of updates) {
             if (u.id && u.subject) {
-              upsertKnownGroup(u.id, u.subject);
+              await upsertKnownGroup(u.id, u.subject);
             }
           }
         } catch {}
@@ -1350,7 +1350,7 @@ export class WhatsAppClient {
             );
           })
         );
-        upsertKnownGroup(group.id, group.subject, group.participants?.length || 0, isAdmin);
+        await upsertKnownGroup(group.id, group.subject, group.participants?.length || 0, isAdmin);
       }
       console.log(`[WhatsAppClient] 👥 Synced ${Object.keys(participating).length} participating groups into memory.`);
     } catch (err: any) {
@@ -1406,7 +1406,7 @@ export class WhatsAppClient {
       }
       const normalized = normalizeMessage(msg);
       if (normalized && (normalized.text || normalized.contentType)) {
-        chatLogger.logMessage({
+        await chatLogger.logMessage({
           chatJid: normalized.chatJid,
           senderJid: 'bot',
           senderName: config.bot.name,
@@ -1440,7 +1440,7 @@ export class WhatsAppClient {
 
     const trainingConsent = chatLogger.parseTrainingConsentDirective(normalized.text || '');
     if (trainingConsent !== null && !normalized.isGroup) {
-      chatLogger.setTrainingConsent(normalized.senderJid, trainingConsent);
+      await chatLogger.setTrainingConsent(normalized.senderJid, trainingConsent);
       const consentReply = trainingConsent
         ? 'Training consent is on. Future text exchanges from you may be used in filtered training examples; you can send “!training forget” any time to opt out.'
         : 'Training consent is off. Your future messages will be excluded from training exports, and your prior live examples will be removed the next time the training dataset is rebuilt.';
@@ -1452,7 +1452,7 @@ export class WhatsAppClient {
     }
 
     // 1. Passive Continuous Learning & Analytics: Log EVERY message in all chats
-    const inboundLogId = chatLogger.logMessage({
+    const inboundLogId = await chatLogger.logMessage({
       chatJid: normalized.chatJid,
       senderJid: normalized.senderJid,
       senderName: normalized.senderName,
@@ -1466,18 +1466,18 @@ export class WhatsAppClient {
 
     // Record message health and analytics
     healthMonitor.recordMessage();
-    analyticsEngine.trackEvent('message', { type: normalized.contentType }, normalized.chatJid, normalized.senderJid);
+    await analyticsEngine.trackEvent('message', { type: normalized.contentType }, normalized.chatJid, normalized.senderJid);
 
     // Persistent User Profile Tracking across all chats
-    userProfileManager.upsertProfile(normalized.senderJid, normalized.senderName);
-    userProfileManager.observeMessageLanguage(normalized.senderJid, normalized.text || '');
+    await userProfileManager.upsertProfile(normalized.senderJid, normalized.senderName);
+    await userProfileManager.observeMessageLanguage(normalized.senderJid, normalized.text || '');
 
     // Automatic Contact Saving: passively record and index all contacts
-    const contactSaveStatus = contactService.autoSaveContact(normalized.senderJid, normalized.senderName);
+    const contactSaveStatus = await contactService.autoSaveContact(normalized.senderJid, normalized.senderName);
 
     // Continuous ML Learning: updates linguistic metrics, humor exemplars, and style patterns on every turn
-    patternMiner.analyzeInteraction(normalized.chatJid);
-    batchLearner.recordExchange(normalized.chatJid, normalized.senderJid);
+    await patternMiner.analyzeInteraction(normalized.chatJid);
+    await batchLearner.recordExchange(normalized.chatJid, normalized.senderJid);
 
     // Historical Backlog Evaluation:
     // Drop messages older than 10 minutes to avoid answering ancient messages on boot,
@@ -1575,7 +1575,7 @@ export class WhatsAppClient {
         msg
       );
       if (spamStatus.isSpam) {
-        analyticsEngine.trackEvent('spam_blocked', { action: spamStatus.action }, normalized.chatJid, normalized.senderJid);
+        await analyticsEngine.trackEvent('spam_blocked', { action: spamStatus.action }, normalized.chatJid, normalized.senderJid);
         return;
       }
     }
@@ -1583,7 +1583,7 @@ export class WhatsAppClient {
     // 2. Trigger Evaluation (DM vs Group @mention/quote)
     const botJid = this.sock?.user?.id || '';
     const botLid = this.sock?.user?.lid || '';
-    const { shouldRespond, cleanedText } = shouldRespondToMessage(
+    const { shouldRespond, cleanedText } = await shouldRespondToMessage(
       msg,
       botJid,
       normalized.text,
@@ -1617,7 +1617,7 @@ export class WhatsAppClient {
           queryFilter = nameMatch[1].trim();
         }
 
-        const records = getLatestViewOnceMessages(10, queryFilter);
+        const records = await getLatestViewOnceMessages(10, queryFilter);
         if (records.length === 0) {
           await OutboundSender.replyText(
             this.sock,
@@ -1663,14 +1663,14 @@ export class WhatsAppClient {
     // automatically route their reply back to whoever told the bot to message them, NEVER to owner Ademola!
     if (!normalized.isGroup && this.sock && (normalized.text || normalized.contentType)) {
       const senderPhone = contactService.extractPhoneNumber(normalized.senderJid);
-      const activeRelay = findActiveRelaySession(normalized.senderJid, senderPhone);
+      const activeRelay = await findActiveRelaySession(normalized.senderJid, senderPhone);
 
       if (activeRelay) {
         console.log(
           `[RelayRouting] 🎯 Inbound reply from messaged contact ${normalized.senderJid} -> routing back to origin chat ${activeRelay.origin_chat_jid} (requester: ${activeRelay.requester_jid})`
         );
 
-        const savedContact = contactService.getContact(normalized.senderJid);
+        const savedContact = await contactService.getContact(normalized.senderJid);
         const contactName =
           savedContact?.custom_name ||
           savedContact?.display_name ||
@@ -1714,7 +1714,7 @@ export class WhatsAppClient {
           );
         }
 
-        markRelaySessionReplied(activeRelay.id);
+        await markRelaySessionReplied(activeRelay.id);
         return;
       }
     }
@@ -1740,7 +1740,7 @@ export class WhatsAppClient {
 
     // Passive Contact Introduction Tracking (no unsolicited canned message)
     if (!normalized.isGroup && contactSaveStatus.needsIntroduction) {
-      contactService.markIntroduced(normalized.senderJid);
+      await contactService.markIntroduced(normalized.senderJid);
     }
 
     let promptText = cleanedText;
@@ -1759,8 +1759,8 @@ export class WhatsAppClient {
             if (!fs.existsSync(voiceDir)) fs.mkdirSync(voiceDir, { recursive: true });
             const sampleFile = path.join(voiceDir, 'ademola_voice_sample.ogg');
             fs.writeFileSync(sampleFile, audioBuffer);
-            setBotSetting('ademola_voice_sample_at', String(Date.now()));
-            setBotSetting('ademola_voice_sample_path', sampleFile);
+            await setBotSetting('ademola_voice_sample_at', String(Date.now()));
+            await setBotSetting('ademola_voice_sample_path', sampleFile);
             console.log(`[WhatsAppClient] 🎙️ Saved fresh voice sample from Ademola (${audioBuffer.length} bytes) for TTS voice cloning!`);
           } catch (sampleErr: any) {
             console.warn('[WhatsAppClient] Could not save voice sample:', sampleErr.message);
@@ -1784,7 +1784,7 @@ export class WhatsAppClient {
         console.error('[WhatsAppClient] Voicenote processing error:', err.message);
         promptText = `[User sent a voice message — reply with a natural text response]`;
       }
-      chatLogger.updateLatestMessageText(normalized.chatJid, 'audio', promptText);
+      await chatLogger.updateLatestMessageText(normalized.chatJid, 'audio', promptText);
     } else if (normalized.contentType === 'image') {
       // Process Image: Read visual content with Vision
       try {
@@ -1793,7 +1793,7 @@ export class WhatsAppClient {
         const visionDesc = await analyzeImageBuffer(imgBuffer, cleanedText);
         if (visionDesc) {
           promptText = `[Visual Content Analysis of Attached Image]:\n${visionDesc}\n\nUser Question/Caption: ${cleanedText || 'Describe and answer based on this image'}`;
-          chatLogger.updateLatestMessageText(normalized.chatJid, 'image', promptText);
+          await chatLogger.updateLatestMessageText(normalized.chatJid, 'image', promptText);
         } else if (!promptText) {
           promptText = `[User sent an image without caption]`;
         }
@@ -1810,7 +1810,7 @@ export class WhatsAppClient {
     if (!promptText) return;
 
     const voiceLanguageSample = promptText.match(/message\]: "([\s\S]*?)"\n\[Voice Note Summary\]/)?.[1];
-    userProfileManager.observeMessageLanguage(
+    await userProfileManager.observeMessageLanguage(
       normalized.senderJid,
       voiceLanguageSample || normalized.text || cleanedText || ''
     );
@@ -1821,8 +1821,8 @@ export class WhatsAppClient {
 
     // Contextual Message Reactions when tagged in group
     if (this.sock && messageReactor.shouldReact(promptText, normalized.isGroup)) {
-      const emoji = messageReactor.getReactionEmoji(promptText);
-      messageReactor.reactToMessage(this.sock, msg, emoji).catch(() => {});
+      const emoji = await messageReactor.getReactionEmoji(promptText);
+      await messageReactor.reactToMessage(this.sock, msg, emoji).catch(() => {});
     }
 
     // 3. Build Execution Context
@@ -1830,7 +1830,7 @@ export class WhatsAppClient {
     if (!sock) return;
 
     const isOwner = userProfileManager.isOwner(normalized.senderJid, normalized.senderName);
-    const savedContact = contactService.getContact(normalized.senderJid);
+    const savedContact = await contactService.getContact(normalized.senderJid);
     const effectiveSenderName = isOwner
       ? 'Ademola'
       : normalized.isGroup
@@ -1918,7 +1918,7 @@ export class WhatsAppClient {
     // 4. Dispatch via the bounded concurrency queue and shared outbound rate controls.
     const trackLiveDm = !normalized.isGroup && Number.isSafeInteger(inboundLogId) && Number(inboundLogId) > 0;
     const liveAttemptClaimed = trackLiveDm
-      ? chatLogger.claimUnrepliedAttempt(Number(inboundLogId), normalized.chatJid)
+      ? await chatLogger.claimUnrepliedAttempt(Number(inboundLogId), normalized.chatJid)
       : false;
     let liveAttemptCompleted = false;
     if (trackLiveDm) {
@@ -1940,7 +1940,7 @@ export class WhatsAppClient {
           await antiBanEngine.simulateReadingDelay(incomingCharLen, normalized.isGroup, isOwner);
           await agentHarness.handleMessage(promptText, context);
           if (liveAttemptClaimed) {
-            chatLogger.finishUnrepliedAttempt(Number(inboundLogId), liveOutboundDispatched);
+            await chatLogger.finishUnrepliedAttempt(Number(inboundLogId), liveOutboundDispatched);
             liveAttemptCompleted = true;
           }
 
@@ -1953,22 +1953,22 @@ export class WhatsAppClient {
                 try {
                   const mentions = normalized.isGroup && normalized.senderJid ? [normalized.senderJid] : undefined;
                   await OutboundSender.sendSticker(sock, normalized.chatJid, match.absolutePath, msg, mentions);
-                  chatLogger.logOutboundSticker(normalized.chatJid, match.filename, match.vibe);
+                  await chatLogger.logOutboundSticker(normalized.chatJid, match.filename, match.vibe);
                 } catch {}
               }, 1200);
             }
           }
         } catch (err: any) {
           if (liveAttemptClaimed) {
-            chatLogger.finishUnrepliedAttempt(Number(inboundLogId), false, err?.message || String(err));
+            await chatLogger.finishUnrepliedAttempt(Number(inboundLogId), false, err?.message || String(err));
             liveAttemptCompleted = true;
           }
           console.error('[WhatsAppClient] Error in agent handler:', err.message);
           healthMonitor.recordError(err);
-          analyticsEngine.trackEvent('error', { error: err.message }, normalized.chatJid, normalized.senderJid);
+          await analyticsEngine.trackEvent('error', { error: err.message }, normalized.chatJid, normalized.senderJid);
         } finally {
           if (liveAttemptClaimed && !liveAttemptCompleted) {
-            chatLogger.finishUnrepliedAttempt(Number(inboundLogId), false, 'Incoming handler ended without a confirmed outbound send');
+            await chatLogger.finishUnrepliedAttempt(Number(inboundLogId), false, 'Incoming handler ended without a confirmed outbound send');
           }
           if (trackLiveDm) this.releaseActiveInboundDmChat(normalized.chatJid);
           if (stopTyping) {
@@ -1979,7 +1979,7 @@ export class WhatsAppClient {
     });
     if (!enqueued) {
       if (liveAttemptClaimed) {
-        chatLogger.finishUnrepliedAttempt(Number(inboundLogId), false, 'Request queue rejected the inbound message');
+        await chatLogger.finishUnrepliedAttempt(Number(inboundLogId), false, 'Request queue rejected the inbound message');
       }
       if (trackLiveDm) this.releaseActiveInboundDmChat(normalized.chatJid);
       console.warn(`[WhatsAppClient] Request queue full; skipped reply for ${normalized.chatJid}.`);
@@ -2028,7 +2028,7 @@ export class WhatsAppClient {
       let chatName = isGroup ? 'Group Chat' : senderName;
       if (isGroup) {
         try {
-          const knownGroup = db.prepare('SELECT subject FROM known_groups WHERE group_jid = ?').get(chatJid) as { subject: string } | undefined;
+          const knownGroup = await db.prepare('SELECT subject FROM known_groups WHERE group_jid = ?').get(chatJid) as { subject: string } | undefined;
           if (knownGroup?.subject) chatName = knownGroup.subject;
         } catch {}
       }
@@ -2053,7 +2053,7 @@ export class WhatsAppClient {
 
       if (buffer && buffer.length > 0) {
         fs.writeFileSync(filePath, buffer);
-        saveViewOnceMessage({
+        await saveViewOnceMessage({
           message_id: msgId,
           chat_jid: chatJid,
           chat_name: chatName,
@@ -2098,7 +2098,7 @@ export class WhatsAppClient {
 
         const mentions = normalized.isGroup && normalized.senderJid ? [normalized.senderJid] : undefined;
         await OutboundSender.sendSticker(this.sock, normalized.chatJid, match.absolutePath, msg, mentions);
-        chatLogger.logOutboundSticker(normalized.chatJid, match.filename, match.vibe);
+        await chatLogger.logOutboundSticker(normalized.chatJid, match.filename, match.vibe);
         console.log(`[StickerEngine] 🎨 Replied to sticker with matching vibe "${match.vibe}" sticker: ${match.filename} (tagged: ${normalized.senderName})`);
       }
     } catch (err: any) {
@@ -2170,7 +2170,7 @@ export class WhatsAppClient {
             finalImgPath = await getOrGenerateMemeMedia(msgId, caption, null);
           } catch {}
         }
-        saveChannelMeme(
+        await saveChannelMeme(
           caption,
           finalImgPath ? 'image' : 'text',
           null,
@@ -2190,7 +2190,7 @@ export class WhatsAppClient {
               finalImgPath = await getOrGenerateQuoteMedia(msgId, parsed.quote, parsed.author, parsed.niche, null);
             } catch {}
           }
-          saveChannelQuote(
+          await saveChannelQuote(
             parsed.quote,
             parsed.author,
             parsed.niche,
@@ -2246,7 +2246,7 @@ export class WhatsAppClient {
       const now = Date.now();
       const catchupFrom = restrictionGuard.catchupFrom();
       const oldestEligible = Math.min(now - 30 * 24 * 60 * 60 * 1000, catchupFrom ?? Number.MAX_SAFE_INTEGER);
-      const candidates = contactService.getUnrepliedChats(
+      const candidates = await contactService.getUnrepliedChats(
         oldestEligible,
         Math.min(250, Math.max(20, batchLimit * 10)),
         now
@@ -2308,7 +2308,7 @@ export class WhatsAppClient {
         );
         const inboundLogId = Number(chat.id);
         if (!Number.isSafeInteger(inboundLogId) || inboundLogId <= 0 ||
-            !chatLogger.claimUnrepliedAttempt(inboundLogId, chat.chatJid)) {
+            !await chatLogger.claimUnrepliedAttempt(inboundLogId, chat.chatJid)) {
           this.releaseActiveInboundDmChat(chat.chatJid);
           continue;
         }
@@ -2341,7 +2341,7 @@ export class WhatsAppClient {
 
           const sock = this.sock;
           const isOwner = userProfileManager.isOwner(chat.senderJid, chat.senderName);
-          const savedContact = contactService.getContact(chat.senderJid);
+          const savedContact = await contactService.getContact(chat.senderJid);
           const effectiveSenderName = isOwner
             ? 'Ademola'
             : savedContact?.custom_name ||
@@ -2374,7 +2374,7 @@ export class WhatsAppClient {
           };
 
           await agentHarness.handleMessage(chat.lastMessage, context);
-          chatLogger.finishUnrepliedAttempt(inboundLogId, outboundDispatched);
+          await chatLogger.finishUnrepliedAttempt(inboundLogId, outboundDispatched);
           if (outboundDispatched) {
             repliedCount++;
             repliedNames.push(effectiveSenderName);
@@ -2383,7 +2383,7 @@ export class WhatsAppClient {
             console.warn(`[WhatsAppClient] No outbound reply was dispatched to ${effectiveSenderName}; retry has been scheduled.`);
           }
         } catch (err: any) {
-          chatLogger.finishUnrepliedAttempt(inboundLogId, false, err?.message || String(err));
+          await chatLogger.finishUnrepliedAttempt(inboundLogId, false, err?.message || String(err));
           console.error(`[WhatsAppClient] Error replying to ${chat.senderName}:`, err.message);
         } finally {
           this.releaseActiveInboundDmChat(chat.chatJid);

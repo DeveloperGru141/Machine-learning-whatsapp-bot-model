@@ -252,8 +252,8 @@ export async function synthesizeVoiceNote(
   const tempMp3File = path.join(tempDir, `tts_${hash}.mp3`);
   const tempOggFile = path.join(tempDir, `tts_${hash}.ogg`);
 
-  const dynamicVoiceId = getBotSetting('elevenlabs_voice_id', config.elevenlabs?.voiceId) || 'pNInz6obpgDQGcFmaJgB';
-  const dynamicProvider = getBotSetting('tts_provider', 'elevenlabs');
+  const dynamicVoiceId = await getBotSetting('elevenlabs_voice_id', config.elevenlabs?.voiceId) || 'pNInz6obpgDQGcFmaJgB';
+  const dynamicProvider = await getBotSetting('tts_provider', 'elevenlabs');
   const elevenLabsVoice = voice || dynamicVoiceId;
   const elevenLabsModel = config.elevenlabs?.modelId || 'eleven_multilingual_v2';
   const elevenLabsApiKey = config.elevenlabs?.apiKey;

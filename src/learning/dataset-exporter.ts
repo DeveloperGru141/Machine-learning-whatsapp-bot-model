@@ -31,7 +31,7 @@ export class DatasetExporterPlugin implements IPlugin {
         try {
           const outputPath = path.resolve('./data/finetune_dataset.jsonl');
 
-          const directPairs = db.prepare(`
+          const directPairs = await db.prepare(`
             SELECT system_prompt, user_message, assistant_response
             FROM fine_tuning_pairs
             WHERE source_type IN ('bundled_curated', 'curated_seed', 'public_dataset')

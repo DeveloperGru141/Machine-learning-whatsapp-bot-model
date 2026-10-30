@@ -182,18 +182,18 @@ export const SEED_CHANNEL_QUOTES: Array<{
 /**
  * Seeds initial curated quotes if the database is currently empty.
  */
-export function seedChannelQuotesIfEmpty(): void {
+export async function seedChannelQuotesIfEmpty(): Promise<void> {
   try {
     // 1. Clean up legacy placeholder references in DB
     try {
-      db.prepare(`UPDATE channel_quotes SET image_path = NULL WHERE image_path LIKE '%quote_tech_coding.jpg%' OR image_path LIKE '%quote_wealth_business.jpg%' OR image_path LIKE '%quote_academic_discipline.jpg%' OR image_path LIKE '%quote_general_growth.jpg%'`).run();
+      await db.prepare(`UPDATE channel_quotes SET image_path = NULL WHERE image_path LIKE '%quote_tech_coding.jpg%' OR image_path LIKE '%quote_wealth_business.jpg%' OR image_path LIKE '%quote_academic_discipline.jpg%' OR image_path LIKE '%quote_general_growth.jpg%'`).run();
     } catch {}
 
-    const countRow = db.prepare('SELECT COUNT(*) as count FROM channel_quotes').get() as { count: number };
+    const countRow = await db.prepare('SELECT COUNT(*) as count FROM channel_quotes').get() as { count: number };
     if (!countRow || countRow.count === 0) {
       console.log(`[ChannelQuotes] 📖 Seeding ${SEED_CHANNEL_QUOTES.length} initial quotes from ${WHATSAPP_CHANNEL_NAME}...`);
       for (const item of SEED_CHANNEL_QUOTES) {
-        saveChannelQuote(item.quote, item.author, item.niche, WHATSAPP_CHANNEL_INVITE_CODE, undefined, null);
+        await saveChannelQuote(item.quote, item.author, item.niche, WHATSAPP_CHANNEL_INVITE_CODE, undefined, null);
       }
     }
   } catch (err: any) {
@@ -276,7 +276,7 @@ export async function scrapeWhatsAppChannelQuotes(
   let channelJid: string | null = null;
 
   try {
-    seedChannelQuotesIfEmpty();
+    await seedChannelQuotesIfEmpty();
 
     console.log(`[ChannelQuotes] 🔍 Querying WhatsApp Channel metadata for invite code: ${WHATSAPP_CHANNEL_INVITE_CODE}...`);
     const metadata: any = await (socket as any).newsletterMetadata?.('invite', WHATSAPP_CHANNEL_INVITE_CODE);
@@ -308,7 +308,7 @@ export async function scrapeWhatsAppChannelQuotes(
           let ocrAttempts = 0;
           for (const msg of messages) {
             const existing = msg.id
-              ? db.prepare(
+              ? await db.prepare(
                   'SELECT image_path FROM channel_quotes WHERE channel_source = ? AND channel_message_id = ? LIMIT 1'
                 ).get(WHATSAPP_CHANNEL_INVITE_CODE, msg.id) as { image_path: string | null } | undefined
               : undefined;
@@ -338,7 +338,7 @@ export async function scrapeWhatsAppChannelQuotes(
                 msg.id
               );
             }
-            const saved = saveChannelQuote(
+            const saved = await saveChannelQuote(
               parsed.quote,
               parsed.author,
               parsed.niche,
@@ -416,7 +416,7 @@ export async function broadcastMorningGroupMotivation(
   socket: WASocket,
   targetGroupJid?: string
 ): Promise<{ groupsContacted: number; deliveredGroups: string[] }> {
-  seedChannelQuotesIfEmpty();
+  await seedChannelQuotesIfEmpty();
 
   // Try scraping fresh quotes first if online
   try {
@@ -428,7 +428,7 @@ export async function broadcastMorningGroupMotivation(
 
   if (targetGroupJid) {
     let groupSubject = 'WhatsApp Group';
-    const known = getAllKnownGroups().find((g) => g.group_jid === targetGroupJid);
+    const known = (await getAllKnownGroups()).find((g) => g.group_jid === targetGroupJid);
     if (known) {
       groupSubject = known.subject;
     }
@@ -438,7 +438,7 @@ export async function broadcastMorningGroupMotivation(
     const groupMap = new Map<string, string>();
 
     // 1. Local database known groups
-    const dbGroups = getAllKnownGroups(50);
+    const dbGroups = await getAllKnownGroups(50);
     for (const g of dbGroups) {
       if (g.group_jid && g.subject) {
         groupMap.set(g.group_jid, g.subject);
@@ -452,7 +452,7 @@ export async function broadcastMorningGroupMotivation(
         for (const [jid, metadata] of Object.entries(liveGroups)) {
           if (jid && metadata?.subject) {
             groupMap.set(jid, metadata.subject);
-            upsertKnownGroup(jid, metadata.subject, metadata.participants?.length || 0);
+            await upsertKnownGroup(jid, metadata.subject, metadata.participants?.length || 0);
           }
         }
       } catch (err: any) {
@@ -479,7 +479,7 @@ export async function broadcastMorningGroupMotivation(
     try {
       // Per-group daily anti-spam guard: Never send more than 1 morning greeting per calendar day to any group
       const startOfTodayWat = getStartOfTodayWat();
-      const recentSend = db.prepare(`
+      const recentSend = await db.prepare(`
         SELECT COUNT(*) as count FROM chat_logs 
         WHERE chat_jid = ? 
           AND sender_jid = 'bot'
@@ -487,7 +487,7 @@ export async function broadcastMorningGroupMotivation(
           AND timestamp >= ?
       `).get(group.id, startOfTodayWat) as { count: number } | undefined;
 
-      const recentAutonomous = db.prepare(`
+      const recentAutonomous = await db.prepare(`
         SELECT COUNT(*) as count FROM autonomous_actions
         WHERE action_type = 'morning_group_motivation'
           AND target_chat = ?
@@ -503,7 +503,7 @@ export async function broadcastMorningGroupMotivation(
       const niche = detectGroupNiche(group.subject);
 
       // 2. Select freshest quote matching this niche
-      const quote = getFreshestQuoteForNiche(niche);
+      const quote = await getFreshestQuoteForNiche(niche);
       if (!quote) {
         console.warn(`[ChannelQuotes] No quote found for niche: ${niche}`);
         continue;
@@ -524,15 +524,15 @@ export async function broadcastMorningGroupMotivation(
       } else {
         await socket.sendMessage(group.id, { text: messageText });
       }
-      chatLogger.logOutboundMessage(group.id, messageText);
-      markQuoteUsed(quote.id);
+      await chatLogger.logOutboundMessage(group.id, messageText);
+      await markQuoteUsed(quote.id);
       deliveredGroups.push(group.subject);
 
       console.log(
         `[ChannelQuotes] ✅ Delivered morning motivation to "${group.subject}" (${niche}): "${quote.quote_text.slice(0, 30)}..."`
       );
 
-      logAutonomousAction('morning_group_motivation', group.id, group.subject, `Delivered morning quote (${niche})`);
+      await logAutonomousAction('morning_group_motivation', group.id, group.subject, `Delivered morning quote (${niche})`);
 
       // 5. Anti-ban pacing between groups
       if (i < targetGroups.length - 1) {
@@ -638,7 +638,7 @@ export async function broadcastEveningGroupRoundup(
 
   if (targetGroupJid) {
     let groupSubject = 'WhatsApp Group';
-    const known = getAllKnownGroups().find((g) => g.group_jid === targetGroupJid);
+    const known = (await getAllKnownGroups()).find((g) => g.group_jid === targetGroupJid);
     if (known) {
       groupSubject = known.subject;
     }
@@ -646,7 +646,7 @@ export async function broadcastEveningGroupRoundup(
   } else {
     const groupMap = new Map<string, string>();
 
-    const dbGroups = getAllKnownGroups(50);
+    const dbGroups = await getAllKnownGroups(50);
     for (const g of dbGroups) {
       if (g.group_jid && g.subject) {
         groupMap.set(g.group_jid, g.subject);
@@ -659,7 +659,7 @@ export async function broadcastEveningGroupRoundup(
         for (const [jid, metadata] of Object.entries(liveGroups)) {
           if (jid && metadata?.subject) {
             groupMap.set(jid, metadata.subject);
-            upsertKnownGroup(jid, metadata.subject, metadata.participants?.length || 0);
+            await upsertKnownGroup(jid, metadata.subject, metadata.participants?.length || 0);
           }
         }
       } catch (err: any) {
@@ -685,7 +685,7 @@ export async function broadcastEveningGroupRoundup(
     const group = targetGroups[i];
     try {
       const startOfTodayWat = getStartOfTodayWat();
-      const recentSend = db.prepare(`
+      const recentSend = await db.prepare(`
         SELECT COUNT(*) as count FROM chat_logs 
         WHERE chat_jid = ? 
           AND sender_jid = 'bot'
@@ -693,7 +693,7 @@ export async function broadcastEveningGroupRoundup(
           AND timestamp >= ?
       `).get(group.id, startOfTodayWat) as { count: number } | undefined;
 
-      const recentAutonomous = db.prepare(`
+      const recentAutonomous = await db.prepare(`
         SELECT COUNT(*) as count FROM autonomous_actions
         WHERE action_type = 'evening_group_roundup'
           AND target_chat = ?
@@ -731,11 +731,11 @@ export async function broadcastEveningGroupRoundup(
         await socket.sendMessage(group.id, { text: messageText });
       }
 
-      chatLogger.logOutboundMessage(group.id, messageText);
+      await chatLogger.logOutboundMessage(group.id, messageText);
       deliveredGroups.push(group.subject);
 
       console.log(`[ChannelQuotes] 🌙 Delivered evening roundup to "${group.subject}": "${nightQuote.quote_text.slice(0, 30)}..."`);
-      logAutonomousAction('evening_group_roundup', group.id, group.subject, `Delivered evening roundup & night reflection`);
+      await logAutonomousAction('evening_group_roundup', group.id, group.subject, `Delivered evening roundup & night reflection`);
 
       if (i < targetGroups.length - 1) {
         await new Promise((resolve) => setTimeout(resolve, interGroupPauseMs));

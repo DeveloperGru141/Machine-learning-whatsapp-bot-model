@@ -57,9 +57,9 @@ export class StyleAdapter {
     return 'tech';
   }
 
-  public getStyleContext(chatJid: string, incomingText?: string): StyleAdapterContext {
+  public async getStyleContext(chatJid: string, incomingText?: string): Promise<StyleAdapterContext> {
     // 1. Fetch learned profile for this chat
-    const profile = db.prepare(`
+    const profile = await db.prepare(`
       SELECT sticker_ratio, avg_length, formality_style, top_emojis
       FROM chat_style_profiles
       WHERE chat_jid = ?
@@ -96,7 +96,7 @@ export class StyleAdapter {
     if (incomingText && incomingText.trim().length >= 4) {
       try {
         const queryVec = vectorStore.embed(incomingText);
-        const candidates = db.prepare(`
+        const candidates = await db.prepare(`
           SELECT context_text, response_text, response_type
           FROM dialogue_exemplars
           WHERE response_type != 'sticker' AND response_text IS NOT NULL AND response_text != ''
@@ -125,7 +125,7 @@ export class StyleAdapter {
     }
 
     if (targetVibe && exemplars.length < 3) {
-      const targeted = db.prepare(`
+      const targeted = await db.prepare(`
         SELECT context_text, response_text, response_type
         FROM dialogue_exemplars
         WHERE response_type != 'sticker' AND response_text IS NOT NULL AND response_text != ''
@@ -164,7 +164,7 @@ export class StyleAdapter {
     const remainingSlots = 5 - exemplars.length;
     if (remainingSlots > 0) {
       const existingContexts = new Set(exemplars.map((e) => e.context_text));
-      const general = db.prepare(`
+      const general = await db.prepare(`
         SELECT context_text, response_text, response_type
         FROM dialogue_exemplars
         WHERE response_type != 'sticker' AND response_text IS NOT NULL AND response_text != ''

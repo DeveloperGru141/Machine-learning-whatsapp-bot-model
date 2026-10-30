@@ -29,12 +29,12 @@ export function recordGroupInteraction(groupJid: string): void {
   groupChipInStates.set(groupJid, state);
 }
 
-export function shouldRespondToMessage(
+export async function shouldRespondToMessage(
   msg: WAMessage,
   botJid: string,
   rawText: string,
   botLid?: string
-): TriggerCheckResult {
+): Promise<TriggerCheckResult> {
   const isGroup = msg.key.remoteJid?.endsWith('@g.us') || false;
 
   // Never respond to our own outbound messages UNLESS it is "Message Yourself" (owner testing the bot on the bot's phone)
@@ -113,7 +113,7 @@ export function shouldRespondToMessage(
   // Check 2b: Was the quoted stanza ID a message dispatched by the bot?
   if (!isQuoted && contextInfo?.stanzaId) {
     try {
-      const found = db
+      const found = await db
         .prepare(`SELECT 1 FROM chat_logs WHERE message_id = ? AND sender_jid = 'bot' LIMIT 1`)
         .get(contextInfo.stanzaId);
       if (found) {
@@ -126,7 +126,7 @@ export function shouldRespondToMessage(
   const isSticker = Boolean(m?.stickerMessage || msg.message?.stickerMessage);
   if (isSticker && isGroup && !isQuoted) {
     try {
-      const lastBotMsg = db
+      const lastBotMsg = await db
         .prepare(`SELECT timestamp FROM chat_logs WHERE chat_jid = ? AND sender_jid = 'bot' ORDER BY id DESC LIMIT 1`)
         .get(groupJid) as { timestamp: number } | undefined;
       if (lastBotMsg && Date.now() - Number(lastBotMsg.timestamp) < 90_000) {

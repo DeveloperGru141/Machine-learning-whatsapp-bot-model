@@ -136,8 +136,8 @@ export class AudioDownloaderPlugin implements IPlugin {
         const cleanVoice = args.voice_id.trim();
         const provider = args.provider || (cleanVoice.includes('en-NG') || cleanVoice === 'edge-tts' ? 'edge-tts' : 'elevenlabs');
 
-        setBotSetting('elevenlabs_voice_id', cleanVoice);
-        setBotSetting('tts_provider', provider);
+        await setBotSetting('elevenlabs_voice_id', cleanVoice);
+        await setBotSetting('tts_provider', provider);
 
         return {
           success: true,
@@ -158,10 +158,10 @@ export class AudioDownloaderPlugin implements IPlugin {
         properties: {},
       },
       execute: async (_args: {}, _ctx: ExecutionContext): Promise<ToolResult> => {
-        const activeVoice = getBotSetting('elevenlabs_voice_id', config.elevenlabs?.voiceId || 'pNInz6obpgDQGcFmaJgB');
-        const activeProvider = getBotSetting('tts_provider', 'elevenlabs');
-        const sampleAt = getBotSetting('ademola_voice_sample_at', '');
-        const samplePath = getBotSetting('ademola_voice_sample_path', '');
+        const activeVoice = await getBotSetting('elevenlabs_voice_id', config.elevenlabs?.voiceId || 'pNInz6obpgDQGcFmaJgB');
+        const activeProvider = await getBotSetting('tts_provider', 'elevenlabs');
+        const sampleAt = await getBotSetting('ademola_voice_sample_at', '');
+        const samplePath = await getBotSetting('ademola_voice_sample_path', '');
 
         const hasSample = Boolean(sampleAt && samplePath);
         const sampleDateStr = hasSample ? new Date(parseInt(sampleAt, 10)).toLocaleString() : 'None recorded yet';

@@ -4,7 +4,7 @@ import { db } from '../memory/db.js';
 import { healthMonitor } from './health-monitor.js';
 
 // Initialize the analytics_events table immediately upon module load
-db.exec(`
+await db.exec(`
   CREATE TABLE IF NOT EXISTS analytics_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
@@ -29,7 +29,7 @@ export class AnalyticsEngine {
   /**
    * Records an analytics event into SQLite
    */
-  public trackEvent(type: string, data?: any, chatJid?: string, senderJid?: string): void {
+  public async trackEvent(type: string, data?: any, chatJid?: string, senderJid?: string): Promise<void> {
     try {
       const serializedData =
         data !== undefined
@@ -38,7 +38,7 @@ export class AnalyticsEngine {
             : JSON.stringify(data)
           : null;
 
-      this.insertEventStmt.run(
+      await this.insertEventStmt.run(
         type,
         serializedData,
         chatJid ?? null,
@@ -53,16 +53,16 @@ export class AnalyticsEngine {
   /**
    * Generates a 24-hour summary report of bot usage, activity, and health
    */
-  public generateDailySummary(): string {
+  public async generateDailySummary(): Promise<string> {
     const since = Date.now() - 24 * 60 * 60 * 1000;
 
     // 1. Total Messages Handled
     let totalMessages = 0;
     try {
-      const msgRow = db
+      const msgRow = await db
         .prepare(`SELECT COUNT(*) as count FROM chat_logs WHERE timestamp >= ?`)
         .get(since) as { count: number } | undefined;
-      const eventMsgRow = db
+      const eventMsgRow = await db
         .prepare(
           `SELECT COUNT(*) as count FROM analytics_events 
            WHERE timestamp >= ? AND event_type IN ('message', 'incoming_message', 'message_processed')`
@@ -77,7 +77,7 @@ export class AnalyticsEngine {
     // 2. Top 5 Most Active Users
     let topUsers: Array<{ name: string; count: number }> = [];
     try {
-      const userRows = db
+      const userRows = await db
         .prepare(
           `SELECT COALESCE(sender_name, sender_jid) as name, COUNT(*) as count
            FROM chat_logs
@@ -91,7 +91,7 @@ export class AnalyticsEngine {
       if (userRows.length > 0) {
         topUsers = userRows;
       } else {
-        const eventUserRows = db
+        const eventUserRows = await db
           .prepare(
             `SELECT sender_jid as name, COUNT(*) as count
              FROM analytics_events
@@ -110,7 +110,7 @@ export class AnalyticsEngine {
     // 3. Top 5 Most Used Tools / Plugins
     let topTools: Array<{ tool_name: string; count: number }> = [];
     try {
-      const toolRows = db
+      const toolRows = await db
         .prepare(
           `SELECT COALESCE(event_data, event_type) as tool_name, COUNT(*) as count
            FROM analytics_events
@@ -130,7 +130,7 @@ export class AnalyticsEngine {
     const healthReport = healthMonitor.getHealthReport();
     let dbErrors = 0;
     try {
-      const errRow = db
+      const errRow = await db
         .prepare(
           `SELECT COUNT(*) as count FROM analytics_events 
            WHERE timestamp >= ? AND event_type IN ('error', 'exception')`
@@ -226,7 +226,7 @@ export class AnalyticsEngine {
           restrictionGuard.logSkip('periodic analytics report');
           return;
         }
-        const summary = this.generateDailySummary();
+        const summary = await this.generateDailySummary();
         await sock.sendMessage(targetJid, { text: summary });
         console.log(`[AnalyticsEngine] Successfully sent periodic analytics report to ${targetJid}`);
       } catch (err: any) {

@@ -4,6 +4,12 @@ import path from 'path';
 
 dotenv.config({ override: true });
 
+// Render's service is currently at its environment-variable cap. Load Turso
+// credentials from a secret file when configured; dotenv leaves this a no-op
+// locally if the file is absent.
+const tursoSecretsFile = process.env.TURSO_SECRETS_FILE || '/etc/secrets/turso.env';
+dotenv.config({ path: tursoSecretsFile, override: true });
+
 const envSchema = z.object({
   LLM_PROVIDER: z.enum(['openrouter', 'groq']).default('groq'),
   OPENROUTER_API_KEY: z.string().optional(),
@@ -30,6 +36,8 @@ const envSchema = z.object({
   PAIRING_PHONE_NUMBER: z.string().default('07058967815'),
   SESSIONS_DIR: z.string().default('./sessions'),
   DATABASE_PATH: z.string().default('./data/bot.sqlite'),
+  TURSO_DATABASE_URL: z.string().optional(),
+  TURSO_AUTH_TOKEN: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -120,6 +128,10 @@ export const config = {
     sessions: path.resolve(process.env.SESSIONS_DIR || './sessions'),
     database: path.resolve(process.env.DATABASE_PATH || './data/bot.sqlite'),
     temp: path.resolve('./data/temp'),
+  },
+  turso: {
+    databaseUrl: process.env.TURSO_DATABASE_URL || '',
+    authToken: process.env.TURSO_AUTH_TOKEN || '',
   },
 };
 

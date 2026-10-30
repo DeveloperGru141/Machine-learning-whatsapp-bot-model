@@ -17,7 +17,7 @@ export class MessageReactor {
    * Analyzes message text and context, querying learned patterns from dialogue_exemplars,
    * and returns an appropriate emoji reaction.
    */
-  public getReactionEmoji(text: string): string {
+  public async getReactionEmoji(text: string): Promise<string> {
     const raw = (text || '').trim();
     const lower = raw.toLowerCase();
 
@@ -53,7 +53,7 @@ export class MessageReactor {
     // 2. Query dialogue_exemplars for learned patterns matching the vibe classification
     if (vibe) {
       try {
-        const rows = db.prepare(`
+        const rows = await db.prepare(`
           SELECT response_text, vibe_classification
           FROM dialogue_exemplars
           WHERE vibe_classification = ?
@@ -78,7 +78,7 @@ export class MessageReactor {
 
     // 3. If no keyword triggered, check if dialogue_exemplars has a direct context match
     try {
-      const contextMatch = db.prepare(`
+      const contextMatch = await db.prepare(`
         SELECT response_text, vibe_classification
         FROM dialogue_exemplars
         WHERE ? LIKE ('%' || context_text || '%')

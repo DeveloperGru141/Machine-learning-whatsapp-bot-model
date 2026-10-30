@@ -55,7 +55,7 @@ export class ContactPlugin implements IPlugin {
           if (!targetPhone) {
             targetPhone = ctx.senderJid;
           }
-          const result = contactService.saveContact(targetPhone, args.name, args.notes);
+          const result = await contactService.saveContact(targetPhone, args.name, args.notes);
 
           if (!result.success || !result.contact) {
             return { success: false, message: result.message };
@@ -102,7 +102,7 @@ export class ContactPlugin implements IPlugin {
 
           if (isBossQuery) {
             const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
-            const ownerContact = contactService.getContact('boss');
+            const ownerContact = await contactService.getContact('boss');
             const includePhone = isOwner && explicitlyRequestsPhone && !ctx.isGroup && Boolean(ownerContact?.phone_number);
             return {
               success: true,
@@ -127,7 +127,7 @@ export class ContactPlugin implements IPlugin {
             };
           }
 
-          const contact = contactService.getContact(args.query);
+          const contact = await contactService.getContact(args.query);
           if (!contact) {
             return {
               success: false,
@@ -178,7 +178,7 @@ export class ContactPlugin implements IPlugin {
           }
 
           const limit = Math.min(Math.max(Number(args.limit) || 25, 1), 100);
-          let contacts = contactService.getAllContacts(limit);
+          let contacts = await contactService.getAllContacts(limit);
           if (args.filter) {
             const f = args.filter.toLowerCase();
             contacts = contacts.filter(
@@ -244,14 +244,14 @@ export class ContactPlugin implements IPlugin {
 
           // If name omitted, look up in contacts or default to senderName
           if (!targetName && targetPhone) {
-            const saved = contactService.getContact(targetPhone);
+            const saved = await contactService.getContact(targetPhone);
             targetName = saved?.custom_name || saved?.display_name || ctx.senderName;
           }
 
           let cleanPhone = contactService.extractPhoneNumber(targetPhone);
           const isLid = ctx.senderJid.endsWith('@lid') || (targetPhone && targetPhone.endsWith('@lid')) || !cleanPhone || cleanPhone.length > 15 || /^10\d{13,}$/.test(cleanPhone);
           if (isLid) {
-            const saved = contactService.getContact(ctx.senderJid);
+            const saved = await contactService.getContact(ctx.senderJid);
             if (saved && saved.phone_number && !saved.jid.endsWith('@lid') && saved.phone_number.length <= 15) {
               cleanPhone = saved.phone_number;
             } else {
@@ -314,7 +314,7 @@ export class ContactPlugin implements IPlugin {
           }
 
           const limit = Math.min(Math.max(Number(args.limit) || 2000, 1), 5000);
-          const { vcfContent, count } = contactService.exportVcf(limit);
+          const { vcfContent, count } = await contactService.exportVcf(limit);
 
           if (count === 0 || !vcfContent) {
             return {
@@ -456,7 +456,7 @@ export class ContactPlugin implements IPlugin {
             /\b(your\s+boss|my\s+boss|the\s+boss|your\s+creator|the\s+creator|your\s+owner|the\s+owner|ademola)\b/i.test(rawRecipient);
 
           if (isBossRecipient) {
-            const ownerContact = contactService.getContact('boss');
+            const ownerContact = await contactService.getContact('boss');
             if (!ownerContact?.jid) {
               return { success: false, message: 'The bot owner contact is not configured.' };
             }
@@ -487,18 +487,18 @@ export class ContactPlugin implements IPlugin {
             if (digits && digits.length >= 7 && digits.length <= 15) {
               targetPhone = digits;
               targetJid = `${digits}@s.whatsapp.net`;
-              const saved = isOwner ? contactService.getContact(digits) : null;
+              const saved = isOwner ? await contactService.getContact(digits) : null;
               if (saved) {
                 targetName = saved.custom_name || saved.display_name || targetName;
               } else if (isOwner && args.name && args.name.trim() && !/^\+?\d+$/.test(args.name.trim())) {
-                contactService.saveContact(digits, args.name.trim());
+                await contactService.saveContact(digits, args.name.trim());
                 targetName = args.name.trim();
               } else {
                 targetName = `+${digits}`;
               }
             } else if (isOwner) {
               // 2. Look up in contactService by name or nickname (STRICTLY OWNER ONLY)
-              const saved = contactService.getContact(rawRecipient);
+              const saved = await contactService.getContact(rawRecipient);
               if (saved) {
                 targetName = saved.custom_name || saved.display_name || rawRecipient;
                 targetPhone = saved.phone_number;
@@ -509,7 +509,7 @@ export class ContactPlugin implements IPlugin {
                 }
               } else {
                 // 3. Fallback search in SQLite contacts table (exclude accidental Crypto Boss match)
-                const row = db.prepare(`
+                const row = await db.prepare(`
                   SELECT * FROM contacts
                   WHERE (display_name LIKE ? OR custom_name LIKE ? OR notes LIKE ?)
                     AND display_name != 'Crypto Boss😊'
@@ -556,7 +556,7 @@ export class ContactPlugin implements IPlugin {
 
           if (!targetJid) {
             // Smart Fallback: Check if the recipient name matches a WhatsApp group!
-            const matchedGroup = findKnownGroup(rawRecipient);
+            const matchedGroup = await findKnownGroup(rawRecipient);
             if (matchedGroup && ctx.sock) {
               if (!isOwner) {
                 try {
@@ -581,7 +581,7 @@ export class ContactPlugin implements IPlugin {
                 }
               }
               await ctx.sock.sendMessage(matchedGroup.group_jid, { text: cleanMessage });
-              chatLogger.logMessage({
+              await chatLogger.logMessage({
                 chatJid: matchedGroup.group_jid,
                 senderJid: 'bot',
                 senderName: config.bot.name,
@@ -629,7 +629,7 @@ export class ContactPlugin implements IPlugin {
             console.warn(`[ContactPlugin] onWhatsApp check warning for ${lookupTarget}:`, waErr.message);
           }
 
-          const outboundCheck = antiBanEngine.canSendOutbound({ chatJid: targetJid, isGroup: false }, true);
+          const outboundCheck = await antiBanEngine.canSendOutbound({ chatJid: targetJid, isGroup: false }, true);
           if (!outboundCheck.allowed) {
             return {
               success: false,
@@ -657,7 +657,7 @@ export class ContactPlugin implements IPlugin {
           // is automatically forwarded back to whoever requested it (or to the group where the request was made),
           // NEVER blindly to the owner Ademola.
           try {
-            recordRelaySession({
+            await recordRelaySession({
               requesterJid: ctx.senderJid,
               requesterName: ctx.senderName,
               originChatJid: ctx.chatJid,
@@ -791,7 +791,7 @@ export class ContactPlugin implements IPlugin {
         if (!userProfileManager.isOwner(ctx.senderJid, ctx.senderName)) {
           return { success: false, message: 'Permission denied: contact campaign details are private to the bot owner.' };
         }
-        const status = contactReminderService.getStatus();
+        const status = await contactReminderService.getStatus();
         const stateDesc = status.isRunning
           ? `🟢 Active (Pacing: dispatching next in ~${status.nextScheduledInSec || 30}s)`
           : status.isPaused
@@ -865,7 +865,7 @@ ${status.lastRecipient ? `- Last Recipient: ${status.lastRecipient}` : ''}`;
           return { success: false, message: 'Permission denied: only the bot owner can preview contact records.' };
         }
         const count = Math.min(args.count || 5, 10);
-        const previews = contactReminderService.preview(count, true);
+        const previews = await contactReminderService.preview(count, true);
 
         if (previews.length === 0) {
           return {

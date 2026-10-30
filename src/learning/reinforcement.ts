@@ -31,14 +31,14 @@ export class ReinforcementEngine {
    * 2. Extracts and saves the learned correction rule into bot_corrections and user/group facts.
    * 3. Returns the extracted learned rule.
    */
-  public handleCorrection(
+  public async handleCorrection(
     chatJid: string,
     userJid: string,
     correctionText: string
-  ): { handled: boolean; learnedRule?: string } {
+  ): Promise<{ handled: boolean; learnedRule?: string }> {
     try {
       // 1. Look up the most recent bot message in this chat
-      const lastBotRow = db.prepare(`
+      const lastBotRow = await db.prepare(`
         SELECT id, message_text FROM chat_logs
         WHERE chat_jid = ? AND sender_jid = 'bot' AND message_text IS NOT NULL
         ORDER BY id DESC LIMIT 1
@@ -53,14 +53,14 @@ export class ReinforcementEngine {
 
       // 2. Direct Negative Reinforcement: Slash quality score of flawed response in dialogue_exemplars
       try {
-        db.prepare(`
+        await db.prepare(`
           UPDATE dialogue_exemplars
           SET quality_score = 0.0
           WHERE chat_jid = ? AND response_text = ?
         `).run(chatJid, botMistake);
 
         // Delete any severely penalized exemplars
-        db.prepare(`
+        await db.prepare(`
           DELETE FROM dialogue_exemplars
           WHERE quality_score <= 0.2
         `).run();
@@ -73,7 +73,7 @@ export class ReinforcementEngine {
 
       // 4. Save into bot_corrections table
       const now = Date.now();
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO bot_corrections (chat_jid, user_jid, bot_message_text, correction_text, learned_rule, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(chatJid, userJid, botMistake, userFeedback, learnedRule, now);
@@ -81,13 +81,13 @@ export class ReinforcementEngine {
       // 5. Reinforce into user_facts or group_facts for persistent cross-session memory
       const isGroup = chatJid.endsWith('@g.us');
       if (isGroup) {
-        db.prepare(`
+        await db.prepare(`
           INSERT INTO group_facts (group_jid, topic, summary, updated_at)
           VALUES (?, ?, ?, ?)
           ON CONFLICT(group_jid, topic) DO UPDATE SET summary = excluded.summary, updated_at = excluded.updated_at
         `).run(chatJid, `Correction: ${userFeedback.slice(0, 30)}`, learnedRule, now);
       } else {
-        db.prepare(`
+        await db.prepare(`
           INSERT INTO user_facts (user_jid, fact, category, updated_at)
           VALUES (?, ?, 'correction', ?)
           ON CONFLICT(user_jid, fact) DO UPDATE SET updated_at = excluded.updated_at
@@ -105,9 +105,9 @@ export class ReinforcementEngine {
   /**
    * Retrieves active learned corrections for this chat to inject into the system prompt.
    */
-  public getActiveCorrections(chatJid: string, limit = 3): string[] {
+  public async getActiveCorrections(chatJid: string, limit = 3): Promise<string[]> {
     try {
-      const rows = db.prepare(`
+      const rows = await db.prepare(`
         SELECT learned_rule FROM bot_corrections
         WHERE chat_jid = ?
         ORDER BY id DESC LIMIT ?

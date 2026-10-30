@@ -67,7 +67,7 @@ export async function deliverViewOnceMediaToOwner(
       });
     }
 
-    markViewOnceRetrieved(record.id);
+    await markViewOnceRetrieved(record.id);
     return true;
   } catch (err: any) {
     console.error(`[ViewOnce] Failed to deliver media to owner:`, err.message);
@@ -122,7 +122,7 @@ const retrieveViewOnceTool: BotTool = {
       };
     }
 
-    const records = getLatestViewOnceMessages(10, args.query);
+    const records = await getLatestViewOnceMessages(10, args.query);
     if (records.length === 0) {
       return {
         success: false,
@@ -198,7 +198,7 @@ const listViewOnceTool: BotTool = {
       };
     }
 
-    const records = getLatestViewOnceMessages(args.limit || 5, args.query);
+    const records = await getLatestViewOnceMessages(args.limit || 5, args.query);
     if (records.length === 0) {
       return {
         success: true,

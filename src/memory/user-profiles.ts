@@ -21,7 +21,7 @@ export class UserProfileManager {
   /**
    * Seeds configured bot owners into user_profiles and contacts with Ademola identity.
    */
-  public seedOwners(): void {
+  public async seedOwners(): Promise<void> {
     const now = Date.now();
     for (const rawOwner of config.bot.owners) {
       if (!rawOwner) continue;
@@ -31,14 +31,14 @@ export class UserProfileManager {
       // create an address-book phone record when this configured identifier has one.
       const ownerPhone = jid.endsWith('@lid') ? '' : normDigits;
       try {
-        db.prepare(`
+        await db.prepare(`
           INSERT INTO user_profiles (user_jid, display_name, preferred_language, personality_notes, first_seen, last_seen, total_messages, is_owner)
           VALUES (?, 'Ademola', 'en', 'Creator and Owner of Forgelabs Assistant', ?, ?, 0, 1)
           ON CONFLICT(user_jid) DO UPDATE SET is_owner = 1, display_name = 'Ademola'
         `).run(jid, now, now);
 
         if (ownerPhone) {
-          db.prepare(`
+          await db.prepare(`
             INSERT INTO contacts (phone_number, jid, display_name, custom_name, notes, tags, is_auto_saved, is_introduced, created_at, updated_at)
             VALUES (?, ?, 'Ademola', 'Ademola', 'Creator and Owner of Forgelabs Assistant', 'owner,creator', 0, 1, ?, ?)
             ON CONFLICT(jid) DO UPDATE SET phone_number = excluded.phone_number, display_name = 'Ademola', custom_name = 'Ademola', notes = 'Creator and Owner of Forgelabs Assistant'
@@ -51,7 +51,7 @@ export class UserProfileManager {
 
     // Ensure key saved contacts like Micah (+2349126433601) are always seeded on cloud deployments
     try {
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO contacts (phone_number, jid, display_name, custom_name, notes, tags, is_auto_saved, is_introduced, created_at, updated_at)
         VALUES ('2349126433601', '2349126433601@s.whatsapp.net', 'Micah', 'Micah', 'Ademola colleague & friend', '[]', 0, 1, ?, ?)
         ON CONFLICT(jid) DO UPDATE SET phone_number = '2349126433601', custom_name = COALESCE(contacts.custom_name, 'Micah')
@@ -93,7 +93,7 @@ export class UserProfileManager {
   }
 
   /** Persist owner profile metadata only for an identifier already configured as an owner. */
-  public markAsOwner(userJid: string): void {
+  public async markAsOwner(userJid: string): Promise<void> {
     if (!userJid) return;
     if (!this.isOwner(userJid)) {
       console.warn('[UserProfileManager] Refused to mark an unconfigured identifier as an owner.');
@@ -101,7 +101,7 @@ export class UserProfileManager {
     }
     const now = Date.now();
     try {
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO user_profiles (user_jid, display_name, preferred_language, personality_notes, first_seen, last_seen, total_messages, is_owner)
         VALUES (?, 'Ademola', 'en', '', ?, ?, 0, 1)
         ON CONFLICT(user_jid) DO UPDATE SET is_owner = 1, display_name = 'Ademola', last_seen = excluded.last_seen
@@ -113,14 +113,14 @@ export class UserProfileManager {
   }
 
   /** Clear legacy owner metadata; configured owner access is controlled by BOT_OWNERS. */
-  public unmarkAsOwner(userJid: string): void {
+  public async unmarkAsOwner(userJid: string): Promise<void> {
     if (!userJid) return;
     if (this.isOwner(userJid)) {
       console.warn('[UserProfileManager] Configured owners cannot be demoted in the profile database.');
       return;
     }
     try {
-      db.prepare(`UPDATE user_profiles SET is_owner = 0 WHERE user_jid = ?`).run(userJid);
+      await db.prepare(`UPDATE user_profiles SET is_owner = 0 WHERE user_jid = ?`).run(userJid);
       console.log(`[UserProfileManager] Demoted user ${userJid} to regular user.`);
     } catch (err) {
       console.error(`[UserProfileManager] Failed to unmark owner ${userJid}:`, err);
@@ -131,7 +131,7 @@ export class UserProfileManager {
    * Creates or updates a user profile, updates display name if provided,
    * updates last_seen timestamp, and increments the total message count.
    */
-  public upsertProfile(userJid: string, senderName?: string): UserProfile {
+  public async upsertProfile(userJid: string, senderName?: string): Promise<UserProfile> {
     const now = Date.now();
     const isOwnerFlag = this.isOwner(userJid, senderName) ? 1 : 0;
     const trimmed = senderName?.trim() || '';
@@ -143,7 +143,7 @@ export class UserProfileManager {
     const cleanName = isOwnerFlag === 1 ? 'Ademola' : isGenericOrDigits ? null : trimmed;
 
     try {
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO user_profiles (
           user_jid, display_name, preferred_language, personality_notes,
           first_seen, last_seen, total_messages, is_owner
@@ -160,7 +160,7 @@ export class UserProfileManager {
     }
 
     return (
-      this.getProfile(userJid) || {
+      (await this.getProfile(userJid)) || {
         user_jid: userJid,
         display_name: cleanName,
         preferred_language: 'en',
@@ -176,10 +176,10 @@ export class UserProfileManager {
   /**
    * Retrieves full profile for a user, or null if not yet encountered.
    */
-  public getProfile(userJid: string): UserProfile | null {
+  public async getProfile(userJid: string): Promise<UserProfile | null> {
     if (!userJid) return null;
     try {
-      const row = db.prepare(`
+      const row = await db.prepare(`
         SELECT user_jid, display_name, preferred_language, language_source,
                language_candidate, language_candidate_count, personality_notes,
                first_seen, last_seen, total_messages, is_owner
@@ -248,7 +248,7 @@ export class UserProfileManager {
   }
 
   /** Learn explicit requests immediately and inferred preferences only after repeated clear evidence. */
-  public observeMessageLanguage(userJid: string, text: string): void {
+  public async observeMessageLanguage(userJid: string, text: string): Promise<void> {
     if (!userJid || !text) return;
     const supportedLanguages = 'english|nigerian pidgin|pidgin|yoruba|hausa|igbo|french|spanish|portuguese|arabic|german|italian|swahili|indonesian|turkish|japanese|korean|chinese|mandarin|russian|hindi|bengali|thai|greek|hebrew|ukrainian';
     const explicit = text.match(new RegExp(`\\b(?:please\\s+)?(?:reply|respond|speak|talk|write)\\s+(?:to me\\s+)?(?:in|using)\\s+(${supportedLanguages})\\b`, 'i'))
@@ -258,14 +258,14 @@ export class UserProfileManager {
       const code = alias.includes('pidgin') ? 'pcm' : alias === 'mandarin' ? 'zh' :
         Object.entries(this.languageNames).find(([, name]) => name.toLowerCase() === alias)?.[0];
       if (code) {
-        db.prepare(`UPDATE user_profiles SET preferred_language = ?, language_source = 'explicit', language_candidate = NULL, language_candidate_count = 0 WHERE user_jid = ?`).run(code, userJid);
+        await db.prepare(`UPDATE user_profiles SET preferred_language = ?, language_source = 'explicit', language_candidate = NULL, language_candidate_count = 0 WHERE user_jid = ?`).run(code, userJid);
         return;
       }
     }
 
     const detected = this.detectMessageLanguage(text);
     if (!detected || detected.confidence < 0.82) return;
-    const profile = this.getProfile(userJid);
+    const profile = await this.getProfile(userJid);
     if (profile?.language_source === 'explicit') return;
     try {
       const nextCount = profile?.preferred_language === detected.code ? 3 : 1;
@@ -274,18 +274,18 @@ export class UserProfileManager {
         : 0;
       const count = nextCount === 3 ? 3 : priorCandidate + 1;
       if (count >= 3) {
-        db.prepare(`UPDATE user_profiles SET preferred_language = ?, language_source = 'inferred', language_candidate = NULL, language_candidate_count = 0 WHERE user_jid = ?`).run(detected.code, userJid);
+        await db.prepare(`UPDATE user_profiles SET preferred_language = ?, language_source = 'inferred', language_candidate = NULL, language_candidate_count = 0 WHERE user_jid = ?`).run(detected.code, userJid);
       } else {
-        db.prepare(`UPDATE user_profiles SET language_candidate = ?, language_candidate_count = ? WHERE user_jid = ?`).run(detected.code, count, userJid);
+        await db.prepare(`UPDATE user_profiles SET language_candidate = ?, language_candidate_count = ? WHERE user_jid = ?`).run(detected.code, count, userJid);
       }
     } catch (err) {
       console.warn('[UserProfileManager] Could not persist language signal:', err);
     }
   }
 
-  public getLanguageInstruction(userJid: string, incomingText?: string): string {
+  public async getLanguageInstruction(userJid: string, incomingText?: string): Promise<string> {
     const detected = incomingText ? this.detectMessageLanguage(incomingText) : null;
-    const profile = this.getProfile(userJid);
+    const profile = await this.getProfile(userJid);
     const savedCode = profile?.preferred_language || 'en';
     const savedLabel = this.languageNames[savedCode] || savedCode;
     if (profile?.language_source === 'explicit') {
@@ -304,7 +304,7 @@ export class UserProfileManager {
    * Stores a preference in `user_facts` with category='preference'.
    * Synchronizes preferred_language if key corresponds to language.
    */
-  public setPreference(userJid: string, key: string, value: string): void {
+  public async setPreference(userJid: string, key: string, value: string): Promise<void> {
     if (!userJid || !key) return;
     const cleanKey = key.trim();
     const cleanValue = value.trim();
@@ -313,13 +313,13 @@ export class UserProfileManager {
 
     try {
       // Remove any prior conflicting value for the same preference key
-      db.prepare(`
+      await db.prepare(`
         DELETE FROM user_facts
         WHERE user_jid = ? AND category = 'preference' AND (fact = ? OR fact LIKE ?)
       `).run(userJid, factText, `${cleanKey}: %`);
 
       // Store new preference in user_facts
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO user_facts (user_jid, fact, category, updated_at)
         VALUES (?, ?, 'preference', ?)
         ON CONFLICT(user_jid, fact) DO UPDATE SET updated_at = excluded.updated_at
@@ -330,7 +330,7 @@ export class UserProfileManager {
         const alias = cleanValue.toLowerCase();
         const languageCode = alias.includes('pidgin') ? 'pcm' : alias === 'mandarin' ? 'zh' :
           Object.entries(this.languageNames).find(([code, name]) => code === alias || name.toLowerCase() === alias)?.[0] || alias;
-        db.prepare(`
+        await db.prepare(`
           UPDATE user_profiles SET preferred_language = ?, language_source = 'explicit' WHERE user_jid = ?
         `).run(languageCode, userJid);
       }
@@ -344,10 +344,10 @@ export class UserProfileManager {
   /**
    * Updates personality traits or behavioural notes for the user.
    */
-  public updatePersonalityNotes(userJid: string, notes: string): void {
+  public async updatePersonalityNotes(userJid: string, notes: string): Promise<void> {
     if (!userJid) return;
     try {
-      db.prepare(`
+      await db.prepare(`
         UPDATE user_profiles SET personality_notes = ? WHERE user_jid = ?
       `).run(notes.trim(), userJid);
     } catch (err) {
@@ -358,10 +358,10 @@ export class UserProfileManager {
   /**
    * Retrieves all preference key-value pairs stored for the user.
    */
-  public getPreferences(userJid: string): Record<string, string> {
+  public async getPreferences(userJid: string): Promise<Record<string, string>> {
     if (!userJid) return {};
     try {
-      const rows = db.prepare(`
+      const rows = await db.prepare(`
         SELECT fact FROM user_facts
         WHERE user_jid = ? AND category = 'preference'
         ORDER BY updated_at ASC
@@ -386,21 +386,21 @@ export class UserProfileManager {
    * Generates a compact string describing the user for injection into LLM prompts.
    * Includes: name, owner status, preferences, fact count, and personality notes.
    */
-  public getProfileSummaryForPrompt(userJid: string): string {
+  public async getProfileSummaryForPrompt(userJid: string): Promise<string> {
     if (!userJid) return '';
 
     try {
-      const profile = this.getProfile(userJid);
+      const profile = await this.getProfile(userJid);
       const owner = this.isOwner(userJid);
 
       // Fact count from user_facts
-      const factRow = db.prepare(`
+      const factRow = await db.prepare(`
         SELECT COUNT(*) as count FROM user_facts WHERE user_jid = ?
       `).get(userJid) as { count: number } | undefined;
       const factCount = factRow?.count ?? 0;
 
       // Top preferences
-      const prefRows = db.prepare(`
+      const prefRows = await db.prepare(`
         SELECT fact FROM user_facts
         WHERE user_jid = ? AND category = 'preference'
         ORDER BY updated_at DESC LIMIT 5

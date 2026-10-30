@@ -61,7 +61,7 @@ export class StickerPlugin implements IPlugin {
             await OutboundSender.sendSticker(ctx.sock, ctx.chatJid, match.absolutePath, ctx.rawMessage, mentions);
           }
 
-          chatLogger.logOutboundSticker(ctx.chatJid, match.filename, match.vibe);
+          await chatLogger.logOutboundSticker(ctx.chatJid, match.filename, match.vibe);
 
           return {
             success: true,

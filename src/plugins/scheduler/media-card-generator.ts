@@ -294,7 +294,7 @@ export async function getOrGenerateMemeMedia(
   // Update DB if this is a known numeric meme ID
   if (typeof memeId === 'number' || /^\d+$/.test(String(memeId))) {
     try {
-      db.prepare('UPDATE channel_memes SET image_path = ? WHERE id = ?').run(targetPath, Number(memeId));
+      await db.prepare('UPDATE channel_memes SET image_path = ? WHERE id = ?').run(targetPath, Number(memeId));
     } catch {}
   }
 
@@ -328,7 +328,7 @@ export async function getOrGenerateQuoteMedia(
 
   if (typeof quoteId === 'number' || /^\d+$/.test(String(quoteId))) {
     try {
-      db.prepare('UPDATE channel_quotes SET image_path = ? WHERE id = ?').run(targetPath, Number(quoteId));
+      await db.prepare('UPDATE channel_quotes SET image_path = ? WHERE id = ?').run(targetPath, Number(quoteId));
     } catch {}
   }
 

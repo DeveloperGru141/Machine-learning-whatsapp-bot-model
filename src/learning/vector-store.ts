@@ -118,14 +118,14 @@ export class VectorStore {
   /**
    * Indexes a memorable group banter message into the vector database.
    */
-  public indexBanter(
+  public async indexBanter(
     chatJid: string,
     senderJid: string,
     senderName: string,
     messageText: string,
     contextText?: string,
     vibe: string = 'banter'
-  ): void {
+  ): Promise<void> {
     if (!messageText || messageText.trim().length < 3) return;
 
     try {
@@ -135,7 +135,7 @@ export class VectorStore {
       const serialized = this.serializeVector(vec);
       const now = Date.now();
 
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO group_banter_vectors (chat_jid, sender_jid, sender_name, message_text, context_text, vibe, embedding, timestamp)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(chatJid, senderJid, senderName, cleanMessage, contextText || null, vibe, serialized, now);
@@ -147,7 +147,7 @@ export class VectorStore {
   /**
    * Searches past group banter using local vector semantic search.
    */
-  public searchBanter(query: string, chatJid?: string | string[], topK: number = 3): BanterSearchResult[] {
+  public async searchBanter(query: string, chatJid?: string | string[], topK: number = 3): Promise<BanterSearchResult[]> {
     if (!query || query.trim().length < 2) return [];
 
     try {
@@ -166,7 +166,7 @@ export class VectorStore {
       }
       sql += ` ORDER BY id DESC LIMIT 250`;
 
-      const rows = db.prepare(sql).all(...params) as Array<{
+      const rows = await db.prepare(sql).all(...params) as Array<{
         id: number;
         chat_jid: string;
         sender_name: string;
@@ -220,10 +220,10 @@ export class VectorStore {
   /**
    * Scans chat_logs for historical high-humor/banter group messages and indexes them into vector space.
    */
-  public indexHistoricalBanter(): { indexedCount: number } {
+  public async indexHistoricalBanter(): Promise<{ indexedCount: number }> {
     try {
       // Find historical group messages that were banter/humor or have laughter
-      const rows = db.prepare(`
+      const rows = await db.prepare(`
         SELECT l.chat_jid, l.sender_jid, l.sender_name, l.message_text, l.timestamp
         FROM chat_logs l
         WHERE l.is_group = 1 

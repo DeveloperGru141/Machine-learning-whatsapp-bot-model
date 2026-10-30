@@ -204,7 +204,7 @@ export class AntiBanEngine {
    * - In DMs: The user MUST have texted the bot first (inbound in chat_logs) or be an owner.
    * - In Groups: The bot MUST be tagged/mentioned or quoted, or this is the bot's own join intro.
    */
-  public canSendOutbound(params: OutboundCheckParams, enforcePolicy: boolean = false): { allowed: boolean; reason?: string } {
+  public async canSendOutbound(params: OutboundCheckParams, enforcePolicy: boolean = false): Promise<{ allowed: boolean; reason?: string }> {
     const { chatJid, isGroup, isGroupMention, isBotAddedToGroup } = params;
 
     // Fast-path ONLY for synthetic livetest suite (unless explicit enforcement is requested)
@@ -246,7 +246,7 @@ export class AntiBanEngine {
     // A caller-supplied reply flag or owner-command flag must not authorize a cold DM.
     // Verify an actual recent inbound message in the exact conversation before allowing any send.
     try {
-      const inboundRecord = db.prepare(
+      const inboundRecord = await db.prepare(
         `SELECT MAX(timestamp) AS last_inbound_at
          FROM chat_logs
          WHERE chat_jid = ? AND is_group = 0 AND sender_jid != 'bot'`

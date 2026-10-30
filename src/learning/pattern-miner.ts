@@ -25,10 +25,10 @@ export class PatternMiner {
    * Evaluates a newly received message in the context of recent chat turns
    * and extracts conversational patterns, style metrics, and exemplars.
    */
-  public analyzeInteraction(chatJid: string): void {
+  public async analyzeInteraction(chatJid: string): Promise<void> {
     try {
       // Get the last 4 clean, non-noise messages in chronological order
-      const recent = db.prepare(`
+      const recent = await db.prepare(`
         SELECT * FROM chat_logs
         WHERE chat_jid = ? AND is_noise = 0
         ORDER BY id DESC LIMIT 4
@@ -56,7 +56,7 @@ export class PatternMiner {
 
           // If in a group chat, index into local vector search space for future group banter retrieval
           if (current.is_group) {
-            vectorStore.indexBanter(
+            await vectorStore.indexBanter(
               chatJid,
               current.sender_jid,
               current.sender_name || 'Member',
@@ -78,7 +78,7 @@ export class PatternMiner {
       ) {
         // Direct Reinforcement: Check if user is correcting a mistake or rebuking the bot
         if (reinforcementEngine.isCorrection(current.message_text)) {
-          reinforcementEngine.handleCorrection(chatJid, current.sender_jid, current.message_text);
+          await reinforcementEngine.handleCorrection(chatJid, current.sender_jid, current.message_text);
         } else {
           this.evaluateBotFeedback(chatJid, previous.message_text, current.message_text);
         }
@@ -100,13 +100,13 @@ export class PatternMiner {
    * - Explicit disapproval (e.g. 'shut up', 'you too dey talk') lowers quality score.
    * - CRITICAL: When a user ignores the bot or changes topic, it is NEVER penalized. Silence is completely neutral.
    */
-  public evaluateBotFeedback(chatJid: string, botMessageText: string | null, userReaction: string): void {
+  public async evaluateBotFeedback(chatJid: string, botMessageText: string | null, userReaction: string): Promise<void> {
     if (!botMessageText) return;
     const trimmedBot = botMessageText.trim();
 
     if (this.positiveFeedbackRegex.test(userReaction)) {
       try {
-        db.prepare(`
+        await db.prepare(`
           UPDATE dialogue_exemplars
           SET quality_score = MIN(2.5, quality_score + 0.4)
           WHERE chat_jid = ? AND response_text = ?
@@ -114,7 +114,7 @@ export class PatternMiner {
       } catch {}
     } else if (this.explicitDisapprovalRegex.test(userReaction)) {
       try {
-        db.prepare(`
+        await db.prepare(`
           UPDATE dialogue_exemplars
           SET quality_score = MAX(0.2, quality_score - 0.5)
           WHERE chat_jid = ? AND response_text = ?
@@ -124,7 +124,7 @@ export class PatternMiner {
     // No penalty for being ignored or left on read - users ignore messages for any random reason.
   }
 
-  private recordDialogueExemplar(chatJid: string, contextText: string, responseText: string, vibe: string): void {
+  private async recordDialogueExemplar(chatJid: string, contextText: string, responseText: string, vibe: string): Promise<void> {
     if (!contextText || !responseText) return;
     const trimmedContext = contextText.trim();
     const trimmedResponse = responseText.trim();
@@ -153,7 +153,7 @@ export class PatternMiner {
       return;
     }
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO dialogue_exemplars (chat_jid, context_text, response_text, response_type, sticker_filename, vibe_classification, quality_score, created_at)
       VALUES (?, ?, ?, 'text', NULL, ?, 1.0, ?)
     `).run(chatJid, trimmedContext, trimmedResponse, vibe, Date.now());
@@ -163,8 +163,8 @@ export class PatternMiner {
    * Computes the rolling linguistic profile of a chat:
    * average length, sticker frequency, dominant emojis, and formality style.
    */
-  public updateChatStyleProfile(chatJid: string): void {
-    const stats = db.prepare(`
+  public async updateChatStyleProfile(chatJid: string): Promise<void> {
+    const stats = await db.prepare(`
       SELECT 
         COUNT(*) as total,
         AVG(CASE WHEN content_type = 'text' THEN LENGTH(COALESCE(message_text, '')) ELSE NULL END) as avg_len
@@ -184,7 +184,7 @@ export class PatternMiner {
     // Extract dominant emojis from recent messages in this chat
     let topEmojisJson = '["😂","🤝","🔥"]';
     try {
-      const recentLogs = db.prepare(`
+      const recentLogs = await db.prepare(`
         SELECT message_text FROM chat_logs
         WHERE chat_jid = ? AND content_type = 'text' AND message_text IS NOT NULL
         ORDER BY id DESC LIMIT 50
@@ -207,7 +207,7 @@ export class PatternMiner {
       }
     } catch {}
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO chat_style_profiles (chat_jid, total_messages, sticker_ratio, avg_length, top_emojis, formality_style, updated_at)
       VALUES (?, ?, 0.0, ?, ?, ?, ?)
       ON CONFLICT(chat_jid) DO UPDATE SET

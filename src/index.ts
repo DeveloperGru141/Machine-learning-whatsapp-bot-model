@@ -8,7 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import http from 'http';
 import { config } from './config/env.js';
-import { db, initDatabase } from './memory/db.js';
+import { db, runDatabasePostInitMaintenance } from './memory/db.js';
 import { pluginRegistry } from './plugins/registry.js';
 import { audioDownloaderPlugin } from './plugins/audio-downloader/audio-plugin.js';
 import { memoryPlugin } from './plugins/memory-search/memory-plugin.js';
@@ -386,7 +386,7 @@ function startHealthServer() {
         return;
       }
       try {
-        const rows = db.prepare(`SELECT id, chat_jid, sender_name, is_group, content_type, message_text, is_noise, timestamp FROM chat_logs ORDER BY id DESC LIMIT 25`).all();
+        const rows = await db.prepare(`SELECT id, chat_jid, sender_name, is_group, content_type, message_text, is_noise, timestamp FROM chat_logs ORDER BY id DESC LIMIT 25`).all();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ count: rows.length, logs: rows }, null, 2));
       } catch (err: any) {
@@ -491,10 +491,9 @@ async function bootstrap() {
   console.log('==============================================');
 
   // 1. Initialize SQLite Database & Tables (auto-seeds training exemplars if empty)
-  console.log('[Startup] Initializing SQLite database.');
-  initDatabase();
-  console.log('[Startup] SQLite database initialization completed.');
-  console.log('📦 Local SQLite Database initialized.');
+  console.log(`[Startup] Database initialization completed using ${config.turso.databaseUrl ? 'Turso remote' : 'local SQLite fallback'}.`);
+  console.log('📦 Database initialized.');
+  void await runDatabasePostInitMaintenance();
 
   // 2. Start HTTP Health Server & Periodic Temp/Memory Sweeper
   console.log('[Startup] Starting HTTP health server.');
@@ -543,7 +542,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('🚨 [UnhandledRejection]', reason);
 });
 
-bootstrap().catch((err) => {
+await bootstrap().catch((err) => {
   console.error('❌ Failed to start bot:', err);
   process.exit(1);
 });

@@ -98,7 +98,7 @@ export async function buildExecutiveMorningDigest(): Promise<string> {
   // 1. Overnight & Unreplied DMs
   let unrepliedSection = '• *Direct Messages*: All DMs are replied and up to date! 🟢';
   try {
-    const unreplied = contactService.getUnrepliedChats();
+    const unreplied = await contactService.getUnrepliedChats();
     const filtered = unreplied.filter(
       (c: any) => c.chatJid && !c.chatJid.endsWith('@g.us') && !c.chatJid.includes('broadcast')
     );
@@ -116,7 +116,7 @@ export async function buildExecutiveMorningDigest(): Promise<string> {
     const endOfToday = new Date();
     endOfToday.setHours(23, 59, 59, 999);
 
-    const pendingToday = db.prepare(`
+    const pendingToday = await db.prepare(`
       SELECT topic, message, time_of_day, fire_at FROM scheduled_tasks
       WHERE status = 'pending'
         AND fire_at >= ? AND fire_at <= ?
@@ -177,7 +177,7 @@ export async function buildExecutiveMorningDigest(): Promise<string> {
 /**
  * Generates a comprehensive morning system health report for owner Ademola.
  */
-export function buildBotHealthReport(): string {
+export async function buildBotHealthReport(): Promise<string> {
   const report = healthMonitor.getHealthReport();
   const uptimeHours = Math.floor(report.uptime / 3600);
   const uptimeMinutes = Math.floor((report.uptime % 3600) / 60);
@@ -187,11 +187,11 @@ export function buildBotHealthReport(): string {
   let totalContacts = 0;
   let activeBroadcastsCount = 0;
   try {
-    const logsRow = db.prepare('SELECT COUNT(*) as count FROM chat_logs').get() as { count: number };
+    const logsRow = await db.prepare('SELECT COUNT(*) as count FROM chat_logs').get() as { count: number };
     totalChatLogs = logsRow?.count || 0;
-    const contactsRow = db.prepare('SELECT COUNT(*) as count FROM contacts').get() as { count: number };
+    const contactsRow = await db.prepare('SELECT COUNT(*) as count FROM contacts').get() as { count: number };
     totalContacts = contactsRow?.count || 0;
-    const broadcastsRow = db
+    const broadcastsRow = await db
       .prepare("SELECT COUNT(*) as count FROM scheduled_tasks WHERE recurring_cron = 'daily' AND status = 'pending'")
       .get() as { count: number };
     activeBroadcastsCount = broadcastsRow?.count || 0;
@@ -255,11 +255,11 @@ async function generateMorningContent(topic: string, customPrompt?: string): Pro
     normTopic === 'morning_briefing' ||
     normTopic === 'daily_briefing'
   ) {
-    return buildExecutiveMorningDigest();
+    return await buildExecutiveMorningDigest();
   }
 
   if (normTopic === 'bot_health_status') {
-    return buildBotHealthReport();
+    return await buildBotHealthReport();
   }
 
   if (normTopic === 'motivational_quotes') {
@@ -397,7 +397,7 @@ export async function scrapeLiveTechNewsStatus(): Promise<string> {
  * Collects verified contact JIDs so Baileys can broadcast WhatsApp Status updates safely without timing out.
  * Strictly caps to maximum 25 recipients to prevent Baileys USync query timeouts.
  */
-export function getStatusRecipientJids(socket?: WASocket | null): string[] {
+export async function getStatusRecipientJids(socket?: WASocket | null): Promise<string[]> {
   const jidSet = new Set<string>();
   jidSet.add('2348108574293@s.whatsapp.net'); // Owner Ademola
   jidSet.add('2349014896714@s.whatsapp.net'); // Bot number
@@ -409,14 +409,14 @@ export function getStatusRecipientJids(socket?: WASocket | null): string[] {
 
   try {
     // Only real participants from chat logs who have interacted with the bot (have active sessions)
-    const logRows = db
+    const logRows = await db
       .prepare(`SELECT DISTINCT sender_jid FROM chat_logs WHERE sender_jid LIKE '%@s.whatsapp.net'`)
       .all() as Array<{ sender_jid: string }>;
     for (const r of logRows) {
       if (r.sender_jid) jidSet.add(r.sender_jid);
     }
 
-    const contactRows = db
+    const contactRows = await db
       .prepare(`SELECT jid FROM contacts WHERE status IN ('replied', 'active') AND jid LIKE '%@s.whatsapp.net' LIMIT 15`)
       .all() as Array<{ jid: string }>;
     for (const r of contactRows) {
@@ -521,7 +521,7 @@ export async function postMorningStatusBundle(
   socket: WASocket,
   category: StatusCategory = 'all'
 ): Promise<{ postedCount: number; postedTypes: string[] }> {
-  const statusJidList = getStatusRecipientJids(socket);
+  const statusJidList = await getStatusRecipientJids(socket);
   const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.LIVETEST_RUNNER);
   const slidePauseMs = isTest ? 20 : 12_000;
 
@@ -555,7 +555,7 @@ export async function postMorningStatusBundle(
             {},
             statusJidList
           );
-          chatLogger.logOutboundMessage('status@broadcast', '[Status: Motion Design] Forgelabs Assistant Intro Video');
+          await chatLogger.logOutboundMessage('status@broadcast', '[Status: Motion Design] Forgelabs Assistant Intro Video');
           postedTypes.push('motion_intro');
         } else {
           console.warn('[StatusPoster] Notice: status_motion_design.mp4 not found in candidate paths:', candidatePaths);
@@ -568,11 +568,11 @@ export async function postMorningStatusBundle(
           { backgroundColor: '#1b263b', font: 1 },
           statusJidList
         );
-        chatLogger.logOutboundMessage('status@broadcast', `[Status: Bible Verse] ${text}`);
+        await chatLogger.logOutboundMessage('status@broadcast', `[Status: Bible Verse] ${text}`);
         postedTypes.push('bible_verse');
       } else if (cat === 'motivational_quote') {
         try { await scrapeWhatsAppChannelQuotes(socket); } catch {}
-        const quote = getFreshestQuoteForNiche('general_growth');
+        const quote = await getFreshestQuoteForNiche('general_growth');
         const text = quote
           ? `🌅 *MORNING MOTIVATION*\n\n> "${quote.quote_text}"\n— *${quote.author || 'Quotes📖'}*`
           : FALLBACK_MOTIVATIONAL[Math.floor(Math.random() * FALLBACK_MOTIVATIONAL.length)];
@@ -598,7 +598,7 @@ export async function postMorningStatusBundle(
             statusJidList
           );
         }
-        chatLogger.logOutboundMessage('status@broadcast', `[Status: Motivation] ${text}`);
+        await chatLogger.logOutboundMessage('status@broadcast', `[Status: Motivation] ${text}`);
         postedTypes.push('motivational_quote');
       } else if (cat === 'tech_news') {
         const text = await scrapeLiveTechNewsStatus();
@@ -608,20 +608,20 @@ export async function postMorningStatusBundle(
           { backgroundColor: '#2b2d42', font: 1 },
           statusJidList
         );
-        chatLogger.logOutboundMessage('status@broadcast', `[Status: Tech News] ${text}`);
+        await chatLogger.logOutboundMessage('status@broadcast', `[Status: Tech News] ${text}`);
         postedTypes.push('tech_news');
       } else if (cat === 'meme') {
-        const statusPolicy = getStatusMemePostingStatus();
+        const statusPolicy = await getStatusMemePostingStatus();
         if (!statusPolicy.canPost) {
           console.log(`[StatusPoster] Skipping meme: ${statusPolicy.postedToday}/${statusPolicy.dailyLimit} status memes posted today; spacing remaining ${statusPolicy.remainingMinutes} minute(s).`);
         } else {
-          const reservation = reserveStatusMemePost();
+          const reservation = await reserveStatusMemePost();
           if (!reservation) {
             console.log('[StatusPoster] Skipping meme because another send reserved the remaining daily slot.');
           } else {
             try {
                   try { await scrapeWhatsAppChannelMemes(socket); } catch {}
-                  const meme = getFreshestMemeForPosting();
+                  const meme = await getFreshestMemeForPosting();
                   const sourceImagePath = meme?.media_type === 'image' && meme.image_path && fs.existsSync(meme.image_path)
                     ? meme.image_path
                     : null;
@@ -666,11 +666,11 @@ export async function postMorningStatusBundle(
                       );
                     }
                   }
-                  chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${postedCaption}`);
-                  if (meme && usedMeme) markMemePosted(meme.id);
+                  await chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${postedCaption}`);
+                  if (meme && usedMeme) await markMemePosted(meme.id);
                   postedTypes.push('meme');
             } finally {
-              releaseStatusMemePost(reservation);
+              await releaseStatusMemePost(reservation);
             }
           }
         }
@@ -699,9 +699,9 @@ const STATUS_MEME_WINDOW_START_MINUTE = 13 * 60;
 const STATUS_MEME_WINDOW_END_MINUTE = 20 * 60 + 59;
 
 /** Returns a randomized future slot in the 13:00–20:59 WAT status-meme window. */
-export function getNextRandomStatusMemeFireAt(now = Date.now(), skipToday = false): number {
+export async function getNextRandomStatusMemeFireAt(now = Date.now(), skipToday = false): Promise<number> {
   const timezone = 'Africa/Lagos';
-  const status = getStatusMemePostingStatus(now);
+  const status = await getStatusMemePostingStatus(now);
   const today = getTimeZoneParts(new Date(now), timezone);
   const earliestAt = Math.max(now + 5 * 60_000, status.lastPostedAt + STATUS_MEME_MIN_INTERVAL_MS);
   const earliestParts = getTimeZoneParts(new Date(earliestAt), timezone);
@@ -762,7 +762,7 @@ export class SchedulerPlugin implements IPlugin {
     console.log('[Scheduler] Initializing reminder scheduler loop (every 30s)...');
 
     // Seed motivational quotes from WhatsApp channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k)
-    seedChannelQuotesIfEmpty();
+    await seedChannelQuotesIfEmpty();
     // Automatically ensure daily morning health status report is registered for owner Ademola (08108574293)
     this.ensureOwnerHealthSchedule();
     // Automatically ensure daily morning WhatsApp Status posting (memes, tech news, bible verses, motivation) at 07:00 AM
@@ -772,7 +772,7 @@ export class SchedulerPlugin implements IPlugin {
     // Automatically ensure daily evening group roundup & night reflection at 21:00 WAT across all participating groups
     this.ensureEveningGroupRoundupSchedule();
     // Seed memes from WhatsApp channel Memes (0029Vb6oS4LJkK7AvtORyH46)
-    seedChannelMemesIfEmpty();
+    await seedChannelMemesIfEmpty();
     // Automatically ensure one additional status meme at a randomized afternoon/evening time.
     this.ensureTwoHourMemeSchedule();
 
@@ -793,11 +793,11 @@ export class SchedulerPlugin implements IPlugin {
    * Automatically schedules a daily morning health status broadcast to owner Ademola (08108574293) at 07:00 AM.
    * Strictly targets next 07:00 AM WAT—NEVER performs reboot catch-up to prevent spamming Ademola on deploys.
    */
-  public ensureOwnerHealthSchedule(): void {
+  public async ensureOwnerHealthSchedule(): Promise<void> {
     try {
       const ownerPhone = '2348108574293';
       const ownerJid = `${ownerPhone}@s.whatsapp.net`;
-      const existing = db
+      const existing = await db
         .prepare(`SELECT id, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'owner_health_report' AND status = 'pending'`)
         .get(ownerJid) as { id: number; fire_at: number } | undefined;
 
@@ -805,7 +805,7 @@ export class SchedulerPlugin implements IPlugin {
       const fireAt = getNextFireAtForTimeOfDay('07:00');
 
       if (existing) {
-        db.prepare(`
+        await db.prepare(`
           UPDATE scheduled_tasks
           SET time_of_day = '07:00',
               fire_at = ?,
@@ -815,7 +815,7 @@ export class SchedulerPlugin implements IPlugin {
         `).run(fireAt, existing.id);
         console.log(`[Scheduler] 🩺 Synchronized daily morning health report for owner Ademola (fireAt: ${new Date(fireAt).toLocaleString()}).`);
       } else {
-        insertScheduledTask(
+        await insertScheduledTask(
           ownerJid,
           ownerJid,
           'Daily owner system health report',
@@ -838,18 +838,18 @@ export class SchedulerPlugin implements IPlugin {
    * featuring the animated winking avatar motion design video, web-scraped memes, live tech news, Bible verses, and motivational quotes.
    * Strictly targets next 07:00 AM WAT (zero reboot catch-up).
    */
-  public ensureMorningStatusSchedule(): void {
+  public async ensureMorningStatusSchedule(): Promise<void> {
     try {
       const statusJid = 'status@broadcast';
       // Strictly target next 07:00 AM WAT (zero boot catch-up to prevent repeated status posting on deploys)
       const fireAt = getNextFireAtForTimeOfDay('07:00');
 
-      const existing = db
+      const existing = await db
         .prepare(`SELECT id, time_of_day, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_status_post' AND status = 'pending'`)
         .get(statusJid) as { id: number; time_of_day: string; fire_at: number } | undefined;
 
       if (existing) {
-        db.prepare(`
+        await db.prepare(`
           UPDATE scheduled_tasks
           SET time_of_day = '07:00',
               fire_at = ?,
@@ -859,7 +859,7 @@ export class SchedulerPlugin implements IPlugin {
         `).run(fireAt, existing.id);
         console.log(`[Scheduler] 📸 Synchronized daily morning WhatsApp Status schedule to next 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
       } else {
-        insertScheduledTask(
+        await insertScheduledTask(
           statusJid,
           '2348108574293@s.whatsapp.net',
           'Daily 7:00 AM WhatsApp Status: Winking Avatar Motion Design & Morning Bundle',
@@ -882,18 +882,18 @@ export class SchedulerPlugin implements IPlugin {
    * greeting members warmly and sharing a niche-tailored quote scraped from WhatsApp Channel Quotes📖 (0029Vb7S3VAFCCoXEIdW5n2k).
    * Strictly targets next 07:00 AM WAT (zero reboot catch-up to prevent spamming groups).
    */
-  public ensureMorningGroupMotivationSchedule(): void {
+  public async ensureMorningGroupMotivationSchedule(): Promise<void> {
     try {
       const broadcastJid = 'all_groups@broadcast';
       // Strictly target next 07:00 AM WAT (zero boot catch-up to eliminate duplicate group broadcasts on deploys)
       const fireAt = getNextFireAtForTimeOfDay('07:00');
 
-      const existing = db
+      const existing = await db
         .prepare(`SELECT id, time_of_day, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'morning_group_motivation' AND status = 'pending'`)
         .get(broadcastJid) as { id: number; time_of_day: string; fire_at: number } | undefined;
 
       if (existing) {
-        db.prepare(`
+        await db.prepare(`
           UPDATE scheduled_tasks
           SET time_of_day = '07:00',
               fire_at = ?,
@@ -903,7 +903,7 @@ export class SchedulerPlugin implements IPlugin {
         `).run(fireAt, existing.id);
         console.log(`[Scheduler] 🌅 Synchronized daily morning group motivation schedule to next 07:00 AM WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
       } else {
-        insertScheduledTask(
+        await insertScheduledTask(
           broadcastJid,
           '2348108574293@s.whatsapp.net',
           'Daily 7:00 AM Group Motivation & Morning Greetings',
@@ -925,17 +925,17 @@ export class SchedulerPlugin implements IPlugin {
    * Automatically schedules the daily 09:00 PM (21:00 WAT) evening roundup and night reflection quote
    * across all participating WhatsApp groups.
    */
-  public ensureEveningGroupRoundupSchedule(): void {
+  public async ensureEveningGroupRoundupSchedule(): Promise<void> {
     try {
       const broadcastJid = 'all_groups@broadcast';
       const fireAt = getNextFireAtForTimeOfDay('21:00');
 
-      const existing = db
+      const existing = await db
         .prepare("SELECT id, time_of_day, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'evening_group_roundup' AND status = 'pending'")
         .get(broadcastJid);
 
       if (existing) {
-        db.prepare(`
+        await db.prepare(`
           UPDATE scheduled_tasks
           SET time_of_day = '21:00',
               fire_at = ?,
@@ -945,7 +945,7 @@ export class SchedulerPlugin implements IPlugin {
         `).run(fireAt, existing.id);
         console.log(`[Scheduler] 🌙 Synchronized daily evening group roundup schedule to next 21:00 WAT (fireAt: ${new Date(fireAt).toLocaleString()}).`);
       } else {
-        insertScheduledTask(
+        await insertScheduledTask(
           broadcastJid,
           '2348108574293@s.whatsapp.net',
           'Daily 9:00 PM Group Evening Roundup & Night Reflection',
@@ -965,15 +965,15 @@ export class SchedulerPlugin implements IPlugin {
 
 
   /** Automatically schedules one extra status meme per day in a randomized WAT time window. */
-  public ensureTwoHourMemeSchedule(): void {
+  public async ensureTwoHourMemeSchedule(): Promise<void> {
     try {
       const statusJid = 'status@broadcast';
-      const existing = db
+      const existing = await db
         .prepare(`SELECT id, fire_at FROM scheduled_tasks WHERE chat_jid = ? AND topic = 'channel_meme_2hr_post' AND status = 'pending'`)
         .get(statusJid) as { id: number; fire_at: number } | undefined;
 
       const now = Date.now();
-      const fireAt = getNextRandomStatusMemeFireAt(now);
+      const fireAt = await getNextRandomStatusMemeFireAt(now);
       const existingParts = existing ? getTimeZoneParts(new Date(existing.fire_at), 'Africa/Lagos') : null;
       const existingMinute = existingParts ? existingParts.hour * 60 + existingParts.minute : -1;
       const existingIsInWindow = existingMinute >= STATUS_MEME_WINDOW_START_MINUTE && existingMinute <= STATUS_MEME_WINDOW_END_MINUTE;
@@ -982,11 +982,11 @@ export class SchedulerPlugin implements IPlugin {
       if (existing) {
         // Keep a valid pending randomized slot; migrate old fixed two-hour slots to the new window.
         if (!existingIsUsable) {
-          db.prepare(`UPDATE scheduled_tasks SET fire_at = ? WHERE id = ?`).run(fireAt, existing.id);
+          await db.prepare(`UPDATE scheduled_tasks SET fire_at = ? WHERE id = ?`).run(fireAt, existing.id);
           console.log(`[Scheduler] 🎲 Updated status meme task #${existing.id} to ${new Date(fireAt).toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })} WAT.`);
         }
       } else {
-        insertScheduledTask(
+        await insertScheduledTask(
           statusJid,
           '2348108574293@s.whatsapp.net',
           'Randomized Daily WhatsApp Status Meme',
@@ -1028,7 +1028,7 @@ export class SchedulerPlugin implements IPlugin {
     try {
       const socket = this.sock || activeSocket;
       const now = Date.now();
-      const dueTasks = getPendingTasks(now);
+      const dueTasks = await getPendingTasks(now);
 
       if (dueTasks.length === 0) return;
 
@@ -1045,21 +1045,21 @@ export class SchedulerPlugin implements IPlugin {
         try {
           // 1. Daily randomized Status meme slot (subject to the status daily cap and spacing rule).
           if (task.topic === 'channel_meme_2hr_post') {
-            const status = getStatusMemePostingStatus();
+            const status = await getStatusMemePostingStatus();
             if (!status.canPost) {
-              const retryAt = getNextRandomStatusMemeFireAt(Date.now());
-              rescheduleRecurringTask(task.id, retryAt);
+              const retryAt = await getNextRandomStatusMemeFireAt(Date.now());
+              await rescheduleRecurringTask(task.id, retryAt);
               console.log(`[Scheduler] ⏭️ Status meme task #${task.id} skipped by daily/spacing policy; next randomized slot is ${new Date(retryAt).toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })} WAT.`);
               continue;
             }
 
-            const nextFireAt = getNextRandomStatusMemeFireAt(Date.now(), true);
-            rescheduleRecurringTask(task.id, nextFireAt);
+            const nextFireAt = await getNextRandomStatusMemeFireAt(Date.now(), true);
+            await rescheduleRecurringTask(task.id, nextFireAt);
             try {
               const result = await postChannelMemeWithCooldown(socket, false, task.chat_jid);
               if (!result.success) {
-                const retryAt = getNextRandomStatusMemeFireAt(Date.now());
-                rescheduleRecurringTask(task.id, retryAt);
+                const retryAt = await getNextRandomStatusMemeFireAt(Date.now());
+                await rescheduleRecurringTask(task.id, retryAt);
                 console.warn(`[Scheduler] Status meme task #${task.id} could not post; next eligible randomized slot is ${new Date(retryAt).toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })} WAT. ${result.message}`);
               } else {
                 console.log(`[Scheduler] ✅ Status meme task #${task.id} posted; next daily slot is ${new Date(nextFireAt).toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })} WAT.`);
@@ -1073,8 +1073,8 @@ export class SchedulerPlugin implements IPlugin {
           // 2. Daily 07:00 AM WhatsApp Status Bundle (motion design video, Bible verse, quotes, tech news, meme)
           if (task.topic === 'morning_status_post') {
             const nextFireAt = advanceToNextDay(task.fire_at);
-            rescheduleRecurringTask(task.id, nextFireAt);
-            setBotSetting('last_morning_status_date', getTodayWatDate());
+            await rescheduleRecurringTask(task.id, nextFireAt);
+            await setBotSetting('last_morning_status_date', getTodayWatDate());
             try {
               await postMorningStatusBundle(socket, 'all');
               console.log(
@@ -1089,8 +1089,8 @@ export class SchedulerPlugin implements IPlugin {
           // 3. Daily 07:00 AM Morning Group Motivation across all participating groups
           if (task.topic === 'morning_group_motivation') {
             const nextFireAt = advanceToNextDay(task.fire_at);
-            rescheduleRecurringTask(task.id, nextFireAt);
-            setBotSetting('last_morning_group_motivation_date', getTodayWatDate());
+            await rescheduleRecurringTask(task.id, nextFireAt);
+            await setBotSetting('last_morning_group_motivation_date', getTodayWatDate());
             try {
               await broadcastMorningGroupMotivation(socket);
               console.log(
@@ -1104,7 +1104,7 @@ export class SchedulerPlugin implements IPlugin {
           // Daily 21:00 WAT Evening Group Roundup & Night Reflection
           if (task.topic === 'evening_group_roundup') {
             const nextFireAt = advanceToNextDay(task.fire_at);
-            rescheduleRecurringTask(task.id, nextFireAt);
+            await rescheduleRecurringTask(task.id, nextFireAt);
             try {
               const res = await broadcastEveningGroupRoundup(socket);
               console.log(
@@ -1120,16 +1120,16 @@ export class SchedulerPlugin implements IPlugin {
           // 4. Daily 07:00 AM Owner Health Report
           if (task.topic === 'owner_health_report') {
             const nextFireAt = advanceToNextDay(task.fire_at);
-            rescheduleRecurringTask(task.id, nextFireAt);
-            setBotSetting('last_owner_health_report_date', getTodayWatDate());
+            await rescheduleRecurringTask(task.id, nextFireAt);
+            await setBotSetting('last_owner_health_report_date', getTodayWatDate());
             try {
               const outboundText = await generateMorningContent('owner_health_report', task.custom_prompt || task.message);
               if (task.chat_jid === 'status@broadcast') {
-                await safeSendStatus(socket, { text: outboundText }, { backgroundColor: '#2b2d42', font: 1 }, getStatusRecipientJids(socket));
+                await safeSendStatus(socket, { text: outboundText }, { backgroundColor: '#2b2d42', font: 1 }, await getStatusRecipientJids(socket));
               } else {
                 await socket.sendMessage(task.chat_jid, { text: outboundText });
               }
-              chatLogger.logOutboundMessage(task.chat_jid, outboundText);
+              await chatLogger.logOutboundMessage(task.chat_jid, outboundText);
               console.log(
                 `[Scheduler] 🔄 Daily owner health report #${task.id} sent and rescheduled for next 07:00 WAT (${new Date(nextFireAt).toLocaleString()}).`
               );
@@ -1156,28 +1156,28 @@ export class SchedulerPlugin implements IPlugin {
           }
 
           if (task.chat_jid === 'status@broadcast') {
-            await safeSendStatus(socket, { text: outboundText }, { backgroundColor: '#2b2d42', font: 1 }, getStatusRecipientJids(socket));
+            await safeSendStatus(socket, { text: outboundText }, { backgroundColor: '#2b2d42', font: 1 }, await getStatusRecipientJids(socket));
           } else {
             await socket.sendMessage(task.chat_jid, {
               text: outboundText,
               mentions: task.sender_jid ? [task.sender_jid] : [],
             });
           }
-          chatLogger.logOutboundMessage(task.chat_jid, outboundText);
+          await chatLogger.logOutboundMessage(task.chat_jid, outboundText);
 
           // If recurring daily, advance fire_at by 24 hours
           if (task.recurring_cron === 'daily') {
             const nextFireAt = advanceToNextDay(task.fire_at);
-            rescheduleRecurringTask(task.id, nextFireAt);
+            await rescheduleRecurringTask(task.id, nextFireAt);
             const nextFormatted = new Date(nextFireAt).toLocaleString();
             console.log(`[Scheduler] 🔄 Daily broadcast #${task.id} sent and rescheduled for tomorrow at ${nextFormatted}.`);
           } else {
-            markTaskFired(task.id);
+            await markTaskFired(task.id);
             console.log(`[Scheduler] Fired reminder #${task.id} to chat ${task.chat_jid}`);
           }
         } catch (taskErr: any) {
           console.error(`[Scheduler] Error firing task #${task.id}:`, taskErr.message);
-          markTaskFailed(task.id);
+          await markTaskFailed(task.id);
         }
       }
     } catch (err: any) {
@@ -1319,7 +1319,7 @@ export class SchedulerPlugin implements IPlugin {
             fireAt = Date.now() + 10 * 60 * 1000;
           }
 
-          const taskId = insertScheduledTask(ctx.chatJid, ctx.senderJid, args.message.trim(), fireAt, null, 'custom');
+          const taskId = await insertScheduledTask(ctx.chatJid, ctx.senderJid, args.message.trim(), fireAt, null, 'custom');
           const scheduledDate = new Date(fireAt);
           const timeFormatted = scheduledDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -1405,7 +1405,7 @@ export class SchedulerPlugin implements IPlugin {
             minute: '2-digit',
           });
 
-          const taskId = insertScheduledTask(
+          const taskId = await insertScheduledTask(
             targetChat,
             ctx.senderJid,
             `Daily ${topic} morning broadcast`,
@@ -1451,7 +1451,7 @@ export class SchedulerPlugin implements IPlugin {
             : isOwner
               ? args.group || args.group_jid
               : ctx.chatJid;
-          const broadcasts = getActiveDailyBroadcasts(filterChat);
+          const broadcasts = await getActiveDailyBroadcasts(filterChat);
 
           if (broadcasts.length === 0) {
             return {
@@ -1496,7 +1496,7 @@ export class SchedulerPlugin implements IPlugin {
           return { success: false, message: 'Permission denied: only the bot owner can cancel scheduled broadcasts.' };
         }
         try {
-          const ok = cancelScheduledTask(Number(args.task_id));
+          const ok = await cancelScheduledTask(Number(args.task_id));
           if (!ok) {
             return { success: false, message: `Could not find an active scheduled broadcast with ID #${args.task_id}.` };
           }
@@ -1571,7 +1571,7 @@ export class SchedulerPlugin implements IPlugin {
         }
 
         try {
-          const reportText = buildBotHealthReport();
+          const reportText = await buildBotHealthReport();
           return {
             success: true,
             message: reportText,
@@ -1687,7 +1687,7 @@ export class SchedulerPlugin implements IPlugin {
           }
 
           const res = await scrapeWhatsAppChannelQuotes(socket);
-          const stats = getChannelQuotesStats();
+          const stats = await getChannelQuotesStats();
           return {
             success: true,
             message: `Scraped Quotes📖 channel (JID: ${res.channelJid || 'pending'}). Total stored quotes in bank: ${stats.total} (${JSON.stringify(stats.byNiche)}).`,
@@ -1714,10 +1714,10 @@ export class SchedulerPlugin implements IPlugin {
       },
       execute: async (args: { niche?: string }): Promise<ToolResult> => {
         try {
-          const allQuotes = getAllChannelQuotes(30);
+          const allQuotes = await getAllChannelQuotes(30);
           const filterNiche = args.niche && args.niche !== 'all' ? args.niche : null;
           const filtered = filterNiche ? allQuotes.filter((q) => q.niche === filterNiche) : allQuotes;
-          const stats = getChannelQuotesStats();
+          const stats = await getChannelQuotesStats();
 
           if (filtered.length === 0) {
             return {
@@ -1796,7 +1796,7 @@ export class SchedulerPlugin implements IPlugin {
             return { success: false, message: 'WhatsApp socket is not connected.' };
           }
           const res = await scrapeWhatsAppChannelMemes(socket);
-          const cooldown = getMemeCooldownStatus();
+          const cooldown = await getMemeCooldownStatus();
           return {
             success: true,
             message: `Scraped Memes channel. Added ${res.newMemesSaved} new memes. Next post cooldown: ${cooldown.remainingMinutes} min(s) remaining.`,
@@ -1816,9 +1816,9 @@ export class SchedulerPlugin implements IPlugin {
         properties: {},
       },
       execute: async (): Promise<ToolResult> => {
-        const status = getMemeCooldownStatus();
-        const statusPolicy = getStatusMemePostingStatus();
-        const nextStatusSlot = getNextRandomStatusMemeFireAt();
+        const status = await getMemeCooldownStatus();
+        const statusPolicy = await getStatusMemePostingStatus();
+        const nextStatusSlot = await getNextRandomStatusMemeFireAt();
         return {
           success: true,
           message: `Status memes today: ${statusPolicy.postedToday}/${statusPolicy.dailyLimit}; ${statusPolicy.canPost ? 'eligible now' : `not eligible yet (${statusPolicy.remainingMinutes} minute(s) spacing remaining)`}. Next randomized slot: ${new Date(nextStatusSlot).toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })} WAT. Group meme cooldown: ${status.canPost ? 'clear' : `${status.remainingMinutes} minute(s) remaining`}.`,

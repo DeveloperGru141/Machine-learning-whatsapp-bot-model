@@ -112,9 +112,9 @@ export class ChatCleaner {
   /**
    * One-time or periodic scan over existing rows in chat_logs to flag noisy rows.
    */
-  public cleanExistingLogs(): { totalScanned: number; flaggedNoise: number } {
+  public async cleanExistingLogs(): Promise<{ totalScanned: number; flaggedNoise: number }> {
     try {
-      const rows = db.prepare(`
+      const rows = await db.prepare(`
         SELECT id, message_text, content_type
         FROM chat_logs
         WHERE is_noise = 0 AND message_text IS NOT NULL
@@ -125,7 +125,7 @@ export class ChatCleaner {
 
       for (const row of rows) {
         if (this.isNoise(row.message_text, row.content_type)) {
-          updateStmt.run(row.id);
+          await updateStmt.run(row.id);
           flagged++;
         }
       }

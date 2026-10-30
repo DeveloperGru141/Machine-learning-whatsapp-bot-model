@@ -1,26 +1,97 @@
-import { DatabaseSync } from 'node:sqlite';
-import { createRequire } from 'node:module';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createClient, type Client, type InArgs, type InValue, type Transaction } from '@libsql/client';
 import { config } from '../config/env.js';
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'node:url';
 
-const require = createRequire(import.meta.url);
-
-// Ensure data directory exists
+// Use the managed Turso database directly when credentials are configured.
+// Keep a local libSQL file as the development fallback.
 const dbDir = path.dirname(config.paths.database);
 if (!fs.existsSync(dbDir)) {
   fs.mkdirSync(dbDir, { recursive: true });
 }
 
-export const db = new DatabaseSync(config.paths.database);
+if (Boolean(config.turso.databaseUrl) !== Boolean(config.turso.authToken)) {
+  throw new Error('Turso requires both TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.');
+}
+
+const transactionContext = new AsyncLocalStorage<Transaction>();
+const localUrl = pathToFileURL(config.paths.database).toString();
+const client: Client = config.turso.databaseUrl
+  ? createClient({
+      url: config.turso.databaseUrl,
+      authToken: config.turso.authToken,
+      readYourWrites: true,
+    })
+  : createClient({ url: localUrl });
+
+function statementArgs(args: unknown[]): InArgs {
+  return args.map((value) => (value === undefined ? null : value)) as InValue[];
+}
+
+class AsyncDatabaseStatement {
+  constructor(private readonly sql: string) {}
+
+  private execute(args: unknown[] = []) {
+    const statement = { sql: this.sql, args: statementArgs(args) };
+    const transaction = transactionContext.getStore();
+    return transaction ? transaction.execute(statement) : client.execute(statement);
+  }
+
+  async run(...args: unknown[]): Promise<{ changes: number; lastInsertRowid?: number }> {
+    const result = await this.execute(args);
+    return {
+      changes: Number(result.rowsAffected),
+      lastInsertRowid: result.lastInsertRowid == null ? undefined : Number(result.lastInsertRowid),
+    };
+  }
+
+  async get(...args: unknown[]): Promise<Record<string, unknown> | undefined> {
+    const result = await this.execute(args);
+    return result.rows[0] as Record<string, unknown> | undefined;
+  }
+
+  async all(...args: unknown[]): Promise<Array<Record<string, unknown>>> {
+    const result = await this.execute(args);
+    return result.rows as Array<Record<string, unknown>>;
+  }
+}
+
+export const db = {
+  prepare(sql: string): AsyncDatabaseStatement {
+    return new AsyncDatabaseStatement(sql);
+  },
+
+  async exec(sql: string): Promise<void> {
+    const transaction = transactionContext.getStore();
+    if (transaction) {
+      await transaction.executeMultiple(sql);
+      return;
+    }
+    await client.executeMultiple(sql);
+  },
+
+  async transaction<T>(operation: () => Promise<T> | T): Promise<T> {
+    const transaction = await client.transaction('write');
+    try {
+      const result = await transactionContext.run(transaction, operation);
+      await transaction.commit();
+      return result;
+    } catch (error) {
+      if (!transaction.closed) await transaction.rollback();
+      throw error;
+    }
+  },
+
+  close(): void {
+    client.close();
+  },
+};
 
 // Initialize database tables
-export function initDatabase() {
-  db.exec(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA busy_timeout = 10000;
-    PRAGMA synchronous = NORMAL;
-
+export async function initDatabase() {
+  await db.exec(`
     -- Raw chat message stream for pattern learning and context
     CREATE TABLE IF NOT EXISTS chat_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -371,19 +442,19 @@ export function initDatabase() {
 
   // Safe migration for existing databases
   try {
-    db.exec(`ALTER TABLE contacts ADD COLUMN is_introduced INTEGER DEFAULT 0;`);
+    await db.exec(`ALTER TABLE contacts ADD COLUMN is_introduced INTEGER DEFAULT 0;`);
   } catch {
     // Column already exists
   }
 
   try {
-    db.exec(`ALTER TABLE chat_logs ADD COLUMN is_noise INTEGER DEFAULT 0;`);
+    await db.exec(`ALTER TABLE chat_logs ADD COLUMN is_noise INTEGER DEFAULT 0;`);
   } catch {
     // Column already exists
   }
 
   try {
-    db.exec(`ALTER TABLE chat_logs ADD COLUMN message_id TEXT;`);
+    await db.exec(`ALTER TABLE chat_logs ADD COLUMN message_id TEXT;`);
   } catch {
     // Column already exists
   }
@@ -393,23 +464,23 @@ export function initDatabase() {
     ['language_candidate', 'TEXT'],
     ['language_candidate_count', 'INTEGER NOT NULL DEFAULT 0'],
   ]) {
-    try { db.exec(`ALTER TABLE user_profiles ADD COLUMN ${column} ${definition};`); } catch {}
+    try { await db.exec(`ALTER TABLE user_profiles ADD COLUMN ${column} ${definition};`); } catch {}
   }
-  try { db.exec("ALTER TABLE fine_tuning_pairs ADD COLUMN source_type TEXT NOT NULL DEFAULT 'unknown';"); } catch {}
+  try { await db.exec("ALTER TABLE fine_tuning_pairs ADD COLUMN source_type TEXT NOT NULL DEFAULT 'unknown';"); } catch {}
 
   try {
-    db.exec(`ALTER TABLE channel_quotes ADD COLUMN image_path TEXT;`);
+    await db.exec(`ALTER TABLE channel_quotes ADD COLUMN image_path TEXT;`);
   } catch {
     // Column already exists
   }
 
   try {
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_chat_logs_clean ON chat_logs(chat_jid, is_noise, timestamp);`);
+    await db.exec(`CREATE INDEX IF NOT EXISTS idx_chat_logs_clean ON chat_logs(chat_jid, is_noise, timestamp);`);
   } catch {}
 
   // Ensure contacts who already have bot replies in chat_logs are marked as introduced
   try {
-    db.exec(`
+    await db.exec(`
       UPDATE contacts
       SET is_introduced = 1
       WHERE is_introduced = 0
@@ -421,14 +492,14 @@ export function initDatabase() {
     `);
   } catch {}
 
-  seedContactsFromVcfIfEmpty();
-  cleanTrainingTablesAndSeedUnreplied();
+  await seedContactsFromVcfIfEmpty();
+  await cleanTrainingTablesAndSeedUnreplied();
 }
 
-function cleanTrainingTablesAndSeedUnreplied(): void {
+async function cleanTrainingTablesAndSeedUnreplied(): Promise<void> {
   try {
     // Purge any accidental raw tool tags or error strings from fine_tuning_pairs & dialogue_exemplars
-    db.exec(`
+    await db.exec(`
       DELETE FROM fine_tuning_pairs
       WHERE LOWER(assistant_response) LIKE '%<tool_call>%'
          OR LOWER(assistant_response) LIKE '%<function=%'
@@ -444,29 +515,34 @@ function cleanTrainingTablesAndSeedUnreplied(): void {
 
     // Permanently purge any stale 'Marv' (230652813291679@lid) entries across all tables so it never loops
     try {
-      db.prepare(`DELETE FROM chat_logs WHERE chat_jid = '230652813291679@lid' OR sender_name = 'Marv' OR LOWER(message_text) LIKE '%so you really are alive%'`).run();
-      db.prepare(`DELETE FROM contacts WHERE jid = '230652813291679@lid' OR phone_number = '230652813291679' OR LOWER(display_name) = 'marv'`).run();
-      db.prepare(`DELETE FROM user_profiles WHERE user_jid = '230652813291679@lid' OR LOWER(display_name) = 'marv'`).run();
-      db.prepare(`DELETE FROM learning_checkpoints WHERE chat_jid = '230652813291679@lid'`).run();
-      db.prepare(`DELETE FROM analytics_events WHERE chat_jid = '230652813291679@lid'`).run();
-      db.prepare(`DELETE FROM fine_tuning_pairs WHERE user_message LIKE '%So you really are alive%' OR system_prompt LIKE '%Marv%'`).run();
+      await db.prepare(`DELETE FROM chat_logs WHERE chat_jid = '230652813291679@lid' OR sender_name = 'Marv' OR LOWER(message_text) LIKE '%so you really are alive%'`).run();
+      await db.prepare(`DELETE FROM contacts WHERE jid = '230652813291679@lid' OR phone_number = '230652813291679' OR LOWER(display_name) = 'marv'`).run();
+      await db.prepare(`DELETE FROM user_profiles WHERE user_jid = '230652813291679@lid' OR LOWER(display_name) = 'marv'`).run();
+      await db.prepare(`DELETE FROM learning_checkpoints WHERE chat_jid = '230652813291679@lid'`).run();
+      await db.prepare(`DELETE FROM analytics_events WHERE chat_jid = '230652813291679@lid'`).run();
+      await db.prepare(`DELETE FROM fine_tuning_pairs WHERE user_message LIKE '%So you really are alive%' OR system_prompt LIKE '%Marv%'`).run();
     } catch {}
 
-    // Clean existing chat logs to flag noise
-    try {
-      const { chatCleaner } = require('../learning/chat-cleaner.js');
-      chatCleaner.cleanExistingLogs();
-    } catch {}
-
-    // Index historical group banter vectors for local semantic search
-    try {
-      const { vectorStore } = require('../learning/vector-store.js');
-      vectorStore.indexHistoricalBanter();
-    } catch {}
   } catch {}
 }
 
-function seedContactsFromVcfIfEmpty(): void {
+export async function runDatabasePostInitMaintenance(): Promise<void> {
+  try {
+    const { chatCleaner } = await import('../learning/chat-cleaner.js');
+    await chatCleaner.cleanExistingLogs();
+  } catch (error) {
+    console.warn('[DB] Existing chat-log cleanup skipped:', error);
+  }
+
+  try {
+    const { vectorStore } = await import('../learning/vector-store.js');
+    await vectorStore.indexHistoricalBanter();
+  } catch (error) {
+    console.warn('[DB] Historical vector indexing skipped:', error);
+  }
+}
+
+async function seedContactsFromVcfIfEmpty(): Promise<void> {
   try {
     const vcfPath = path.resolve('./data/contacts.vcf');
     if (!fs.existsSync(vcfPath)) return;
@@ -480,9 +556,8 @@ function seedContactsFromVcfIfEmpty(): void {
     `);
 
     const now = Date.now();
-    let imported = 0;
-    db.exec('BEGIN TRANSACTION');
-    try {
+    const imported = await db.transaction(async () => {
+      let count = 0;
       for (const card of cards) {
         const fnMatch = card.match(/^FN:(.*)$/m);
         const telMatch = card.match(/waid=(\d+)/) || card.match(/TEL[^:]*:\+?(\d+)/);
@@ -493,25 +568,21 @@ function seedContactsFromVcfIfEmpty(): void {
         if (!displayName || !phone) continue;
         const jid = lidMatch ? `${phone}@lid` : `${phone}@s.whatsapp.net`;
         const notes = noteMatch?.[1] ? noteMatch[1].replace(/\\n/g, '\n').trim() : null;
-        insertContact.run(phone, jid, displayName, notes, now, now);
-        imported++;
+        await insertContact.run(phone, jid, displayName, notes, now, now);
+        count++;
       }
-      db.exec('COMMIT');
-      if (imported > 0) {
-        console.log(`📇 [DB] Synced ${imported} contact cards from contacts.vcf.`);
-      }
-    } catch {
-      try { db.exec('ROLLBACK'); } catch {}
-    }
+      return count;
+    });
+    if (imported > 0) console.log(`📇 [DB] Synced ${imported} contact cards from contacts.vcf.`);
   } catch {}
 }
 
 // Auto-initialize tables on module load
-initDatabase();
+await initDatabase();
 
-export function logAutonomousAction(actionType: string, targetChat: string, targetName: string, summary: string): void {
+export async function logAutonomousAction(actionType: string, targetChat: string, targetName: string, summary: string): Promise<void> {
   try {
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO autonomous_actions (action_type, target_chat, target_name, summary, timestamp)
       VALUES (?, ?, ?, ?, ?)
     `).run(actionType, targetChat, targetName, summary, Date.now());
@@ -520,9 +591,9 @@ export function logAutonomousAction(actionType: string, targetChat: string, targ
   }
 }
 
-export function getRecentAutonomousActions(limit = 10): Array<{ id: number; action_type: string; target_chat: string; target_name: string; summary: string; timestamp: number }> {
+export async function getRecentAutonomousActions(limit = 10): Promise<Array<{ id: number; action_type: string; target_chat: string; target_name: string; summary: string; timestamp: number }>> {
   try {
-    return db.prepare(`
+    return await db.prepare(`
       SELECT id, action_type, target_chat, target_name, summary, timestamp
       FROM autonomous_actions
       ORDER BY id DESC LIMIT ?
@@ -540,12 +611,12 @@ export interface KnownGroup {
   updated_at: number;
 }
 
-export function upsertKnownGroup(groupJid: string, subject: string, memberCount: number = 0, isAdmin: boolean = false): void {
+export async function upsertKnownGroup(groupJid: string, subject: string, memberCount: number = 0, isAdmin: boolean = false): Promise<void> {
   try {
     const cleanSubject = (subject || '').trim();
     if (!groupJid || !cleanSubject) return;
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO known_groups (group_jid, subject, member_count, is_admin, updated_at)
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(group_jid) DO UPDATE SET
@@ -559,9 +630,9 @@ export function upsertKnownGroup(groupJid: string, subject: string, memberCount:
   }
 }
 
-export function getAllKnownGroups(limit = 50): KnownGroup[] {
+export async function getAllKnownGroups(limit = 50): Promise<KnownGroup[]> {
   try {
-    return db.prepare(`
+    return await db.prepare(`
       SELECT group_jid, subject, member_count, is_admin, updated_at
       FROM known_groups
       ORDER BY updated_at DESC
@@ -572,17 +643,17 @@ export function getAllKnownGroups(limit = 50): KnownGroup[] {
   }
 }
 
-export function findKnownGroup(nameOrJid: string): KnownGroup | null {
+export async function findKnownGroup(nameOrJid: string): Promise<KnownGroup | null> {
   try {
     const raw = (nameOrJid || '').trim();
     if (!raw) return null;
 
     if (raw.endsWith('@g.us')) {
-      const byJid = db.prepare('SELECT * FROM known_groups WHERE group_jid = ?').get(raw) as unknown as KnownGroup;
+      const byJid = await db.prepare('SELECT * FROM known_groups WHERE group_jid = ?').get(raw) as unknown as KnownGroup;
       if (byJid) return byJid;
     }
 
-    const bySub = db.prepare(`
+    const bySub = await db.prepare(`
       SELECT * FROM known_groups
       WHERE LOWER(subject) = LOWER(?) OR LOWER(subject) LIKE LOWER(?)
       ORDER BY CASE WHEN LOWER(subject) = LOWER(?) THEN 0 ELSE 1 END, updated_at DESC
@@ -595,9 +666,9 @@ export function findKnownGroup(nameOrJid: string): KnownGroup | null {
   }
 }
 
-export function setGroupAdminStatus(groupJid: string, isAdmin: boolean): void {
+export async function setGroupAdminStatus(groupJid: string, isAdmin: boolean): Promise<void> {
   try {
-    db.prepare(`
+    await db.prepare(`
       UPDATE known_groups SET is_admin = ?, updated_at = ? WHERE group_jid = ?
     `).run(isAdmin ? 1 : 0, Date.now(), groupJid);
   } catch (err: any) {
@@ -619,7 +690,7 @@ export interface RelaySession {
   replied_at: number | null;
 }
 
-export function recordRelaySession(params: {
+export async function recordRelaySession(params: {
   requesterJid: string;
   requesterName?: string;
   originChatJid: string;
@@ -627,9 +698,9 @@ export function recordRelaySession(params: {
   targetJid: string;
   targetPhone?: string;
   dispatchedText: string;
-}): number {
+}): Promise<number> {
   try {
-    const res = db.prepare(`
+    const res = await db.prepare(`
       INSERT INTO contact_relay_sessions (
         requester_jid, requester_name, origin_chat_jid, origin_is_group,
         target_jid, target_phone, dispatched_text, status, created_at
@@ -651,19 +722,19 @@ export function recordRelaySession(params: {
   }
 }
 
-export function findActiveRelaySession(senderJid: string, senderPhone?: string): RelaySession | null {
+export async function findActiveRelaySession(senderJid: string, senderPhone?: string): Promise<RelaySession | null> {
   try {
     const maxAge = Date.now() - 48 * 60 * 60 * 1000; // Active within past 48 hours
     const cleanPhone = senderPhone ? senderPhone.replace(/\D/g, '') : '';
 
-    let row = db.prepare(`
+    let row = await db.prepare(`
       SELECT * FROM contact_relay_sessions
       WHERE target_jid = ? AND status = 'pending' AND created_at >= ?
       ORDER BY id DESC LIMIT 1
     `).get(senderJid, maxAge) as unknown as RelaySession | undefined;
 
     if (!row && cleanPhone) {
-      row = db.prepare(`
+      row = await db.prepare(`
         SELECT * FROM contact_relay_sessions
         WHERE target_phone = ? AND status = 'pending' AND created_at >= ?
         ORDER BY id DESC LIMIT 1
@@ -672,7 +743,7 @@ export function findActiveRelaySession(senderJid: string, senderPhone?: string):
 
     // Also match if senderJid is an LID or vice-versa
     if (!row && senderJid.endsWith('@lid')) {
-      row = db.prepare(`
+      row = await db.prepare(`
         SELECT * FROM contact_relay_sessions
         WHERE target_jid = ? AND status = 'pending' AND created_at >= ?
         ORDER BY id DESC LIMIT 1
@@ -686,9 +757,9 @@ export function findActiveRelaySession(senderJid: string, senderPhone?: string):
   }
 }
 
-export function markRelaySessionReplied(id: number): void {
+export async function markRelaySessionReplied(id: number): Promise<void> {
   try {
-    db.prepare(`
+    await db.prepare(`
       UPDATE contact_relay_sessions
       SET status = 'replied', replied_at = ?
       WHERE id = ?
@@ -716,21 +787,21 @@ export interface ChannelQuote {
 /**
  * Inserts or updates a quote scraped from the WhatsApp channel.
  */
-export function saveChannelQuote(
+export async function saveChannelQuote(
   quoteText: string,
   author?: string | null,
   niche: QuoteNiche = 'general_growth',
   channelSource: string = '0029Vb7S3VAFCCoXEIdW5n2k',
   messageId?: string | null,
   imagePath?: string | null
-): boolean {
+): Promise<boolean> {
   try {
     const cleanText = (quoteText || '').trim();
     if (!cleanText || cleanText.length < 10) return false;
 
     const cleanAuthor = author ? author.trim() : null;
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO channel_quotes (quote_text, author, niche, image_path, channel_source, channel_message_id, used_count, last_used_at, created_at)
       VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)
       ON CONFLICT(quote_text) DO UPDATE SET
@@ -748,10 +819,10 @@ export function saveChannelQuote(
 /**
  * Retrieves the freshest, least recently used quote matching a specific niche.
  */
-export function getFreshestQuoteForNiche(niche: QuoteNiche): ChannelQuote | null {
+export async function getFreshestQuoteForNiche(niche: QuoteNiche): Promise<ChannelQuote | null> {
   try {
     // Pick from matching niche with lowest used_count, ordered by last_used_at ASC
-    let quote = db.prepare(`
+    let quote = await db.prepare(`
       SELECT * FROM channel_quotes
       WHERE niche = ?
       ORDER BY CASE WHEN instr(image_path, 'newsletter_') > 0 THEN 0 ELSE 1 END,
@@ -761,7 +832,7 @@ export function getFreshestQuoteForNiche(niche: QuoteNiche): ChannelQuote | null
 
     // Fallback to general_growth if niche has no quotes yet
     if (!quote) {
-      quote = db.prepare(`
+      quote = await db.prepare(`
         SELECT * FROM channel_quotes
         ORDER BY used_count ASC, last_used_at ASC, RANDOM()
         LIMIT 1
@@ -778,9 +849,9 @@ export function getFreshestQuoteForNiche(niche: QuoteNiche): ChannelQuote | null
 /**
  * Marks a quote as used so the scheduler rotates smoothly without repeating recently used quotes.
  */
-export function markQuoteUsed(id: number): void {
+export async function markQuoteUsed(id: number): Promise<void> {
   try {
-    db.prepare(`
+    await db.prepare(`
       UPDATE channel_quotes
       SET used_count = used_count + 1, last_used_at = ?
       WHERE id = ?
@@ -793,9 +864,9 @@ export function markQuoteUsed(id: number): void {
 /**
  * Returns all stored channel quotes with pagination.
  */
-export function getAllChannelQuotes(limit = 100): ChannelQuote[] {
+export async function getAllChannelQuotes(limit = 100): Promise<ChannelQuote[]> {
   try {
-    return db.prepare(`
+    return await db.prepare(`
       SELECT * FROM channel_quotes
       ORDER BY id DESC
       LIMIT ?
@@ -808,10 +879,10 @@ export function getAllChannelQuotes(limit = 100): ChannelQuote[] {
 /**
  * Retrieves statistics about stored quotes.
  */
-export function getChannelQuotesStats(): { total: number; byNiche: Record<string, number> } {
+export async function getChannelQuotesStats(): Promise<{ total: number; byNiche: Record<string, number> }> {
   try {
-    const totalRow = db.prepare('SELECT COUNT(*) as count FROM channel_quotes').get() as { count: number };
-    const rows = db.prepare('SELECT niche, COUNT(*) as count FROM channel_quotes GROUP BY niche').all() as Array<{ niche: string; count: number }>;
+    const totalRow = await db.prepare('SELECT COUNT(*) as count FROM channel_quotes').get() as { count: number };
+    const rows = await db.prepare('SELECT niche, COUNT(*) as count FROM channel_quotes GROUP BY niche').all() as Array<{ niche: string; count: number }>;
     const byNiche: Record<string, number> = {};
     for (const r of rows) {
       byNiche[r.niche] = r.count;
@@ -841,19 +912,19 @@ export interface ChannelMeme {
 /**
  * Inserts or updates a meme scraped from the WhatsApp channel (0029Vb6oS4LJkK7AvtORyH46).
  */
-export function saveChannelMeme(
+export async function saveChannelMeme(
   caption: string,
   mediaType: 'image' | 'video' | 'text' = 'text',
   mediaUrl?: string | null,
   imagePath?: string | null,
   channelSource: string = '0029Vb6oS4LJkK7AvtORyH46',
   messageId?: string | null
-): boolean {
+): Promise<boolean> {
   try {
     const cleanCaption = (caption || '').trim();
     if (!cleanCaption || cleanCaption.length < 5) return false;
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO channel_memes (caption, media_type, media_url, image_path, channel_source, channel_message_id, used_count, last_posted_at, created_at)
       VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)
     `).run(cleanCaption, mediaType, mediaUrl || null, imagePath || null, channelSource, messageId || null, Date.now());
@@ -867,9 +938,9 @@ export function saveChannelMeme(
 /**
  * Retrieves the freshest, least recently posted meme for the next 2-hour interval.
  */
-export function getFreshestMemeForPosting(): ChannelMeme | null {
+export async function getFreshestMemeForPosting(): Promise<ChannelMeme | null> {
   try {
-    const meme = db.prepare(`
+    const meme = await db.prepare(`
       SELECT * FROM channel_memes
       ORDER BY CASE WHEN media_type = 'image' AND instr(image_path, 'newsletter_') > 0 THEN 0 ELSE 1 END,
                used_count ASC, last_posted_at ASC, RANDOM()
@@ -886,9 +957,9 @@ export function getFreshestMemeForPosting(): ChannelMeme | null {
 /**
  * Marks a meme as posted and records the exact timestamp to enforce the 2-hour cooldown.
  */
-export function markMemePosted(id: number): void {
+export async function markMemePosted(id: number): Promise<void> {
   try {
-    db.prepare(`
+    await db.prepare(`
       UPDATE channel_memes
       SET used_count = used_count + 1, last_posted_at = ?
       WHERE id = ?
@@ -901,9 +972,9 @@ export function markMemePosted(id: number): void {
 /**
  * Gets the timestamp of the most recently posted meme across all channels.
  */
-export function getLatestMemePostedTimestamp(): number {
+export async function getLatestMemePostedTimestamp(): Promise<number> {
   try {
-    const row = db.prepare('SELECT MAX(last_posted_at) as latest FROM channel_memes').get() as { latest: number | null };
+    const row = await db.prepare('SELECT MAX(last_posted_at) as latest FROM channel_memes').get() as { latest: number | null };
     return row?.latest || 0;
   } catch {
     return 0;
@@ -913,11 +984,11 @@ export function getLatestMemePostedTimestamp(): number {
 /**
  * Retrieves statistics about stored channel memes.
  */
-export function getChannelMemesStats(): { total: number; latestPostedAt: number; totalUsed: number } {
+export async function getChannelMemesStats(): Promise<{ total: number; latestPostedAt: number; totalUsed: number }> {
   try {
-    const totalRow = db.prepare('SELECT COUNT(*) as count FROM channel_memes').get() as { count: number };
-    const latestRow = db.prepare('SELECT MAX(last_posted_at) as latest FROM channel_memes').get() as { latest: number | null };
-    const usedRow = db.prepare('SELECT SUM(used_count) as used FROM channel_memes').get() as { used: number | null };
+    const totalRow = await db.prepare('SELECT COUNT(*) as count FROM channel_memes').get() as { count: number };
+    const latestRow = await db.prepare('SELECT MAX(last_posted_at) as latest FROM channel_memes').get() as { latest: number | null };
+    const usedRow = await db.prepare('SELECT SUM(used_count) as used FROM channel_memes').get() as { used: number | null };
     return {
       total: totalRow?.count || 0,
       latestPostedAt: latestRow?.latest || 0,
@@ -931,9 +1002,9 @@ export function getChannelMemesStats(): { total: number; latestPostedAt: number;
 /**
  * Returns recent channel memes for listing and inspection.
  */
-export function getAllChannelMemes(limit = 30): ChannelMeme[] {
+export async function getAllChannelMemes(limit = 30): Promise<ChannelMeme[]> {
   try {
-    return db.prepare(`
+    return await db.prepare(`
       SELECT * FROM channel_memes
       ORDER BY id DESC
       LIMIT ?
@@ -959,16 +1030,16 @@ export interface ContactReminderRecord {
 /**
  * Records that a contact save reminder message was successfully dispatched to a contact.
  */
-export function recordContactReminderSent(
+export async function recordContactReminderSent(
   contactJid: string,
   phoneNumber: string,
   contactName: string,
   templateIndex: number,
   messageSent: string
-): void {
+): Promise<void> {
   const now = Date.now();
   try {
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO contact_save_reminders (
         contact_jid, phone_number, contact_name, template_index, message_sent, status, created_at, sent_at
       ) VALUES (?, ?, ?, ?, ?, 'sent', ?, ?)
@@ -988,15 +1059,15 @@ export function recordContactReminderSent(
 /**
  * Records that a contact save reminder failed for a given contact.
  */
-export function recordContactReminderFailed(
+export async function recordContactReminderFailed(
   contactJid: string,
   phoneNumber: string,
   contactName: string,
   errorReason: string
-): void {
+): Promise<void> {
   const now = Date.now();
   try {
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO contact_save_reminders (
         contact_jid, phone_number, contact_name, template_index, message_sent, status, error_reason, created_at
       ) VALUES (?, ?, ?, 0, '', 'failed', ?, ?)
@@ -1012,11 +1083,11 @@ export function recordContactReminderFailed(
 /**
  * Checks whether a contact has already been messaged with a contact save reminder.
  */
-export function isContactAlreadyReminded(jidOrPhone: string): boolean {
+export async function isContactAlreadyReminded(jidOrPhone: string): Promise<boolean> {
   if (!jidOrPhone) return false;
   const digits = jidOrPhone.replace(/\D/g, '');
   try {
-    const row = db.prepare(`
+    const row = await db.prepare(`
       SELECT 1 FROM contact_save_reminders
       WHERE (contact_jid = ? OR phone_number = ? OR contact_jid LIKE ?)
         AND status = 'sent'
@@ -1031,14 +1102,14 @@ export function isContactAlreadyReminded(jidOrPhone: string): boolean {
 /**
  * Retrieves aggregate statistics for contact save reminders.
  */
-export function getContactReminderStats(): {
+export async function getContactReminderStats(): Promise<{
   totalReminded: number;
   totalFailed: number;
   latestSentAt: number;
-} {
+}> {
   try {
-    const sentRow = db.prepare(`SELECT COUNT(*) as c, MAX(sent_at) as latest FROM contact_save_reminders WHERE status = 'sent'`).get() as { c: number; latest: number | null };
-    const failedRow = db.prepare(`SELECT COUNT(*) as c FROM contact_save_reminders WHERE status = 'failed'`).get() as { c: number };
+    const sentRow = await db.prepare(`SELECT COUNT(*) as c, MAX(sent_at) as latest FROM contact_save_reminders WHERE status = 'sent'`).get() as { c: number; latest: number | null };
+    const failedRow = await db.prepare(`SELECT COUNT(*) as c FROM contact_save_reminders WHERE status = 'failed'`).get() as { c: number };
     return {
       totalReminded: sentRow?.c || 0,
       totalFailed: failedRow?.c || 0,
@@ -1052,9 +1123,9 @@ export function getContactReminderStats(): {
 /**
  * Returns recent reminder records.
  */
-export function getAllContactReminders(limit = 100): ContactReminderRecord[] {
+export async function getAllContactReminders(limit = 100): Promise<ContactReminderRecord[]> {
   try {
-    return db.prepare(`
+    return await db.prepare(`
       SELECT * FROM contact_save_reminders
       ORDER BY id DESC
       LIMIT ?
@@ -1067,9 +1138,9 @@ export function getAllContactReminders(limit = 100): ContactReminderRecord[] {
 /**
  * Retrieves a persistent bot configuration setting from SQLite bot_settings table.
  */
-export function getBotSetting(key: string, defaultValue = ''): string {
+export async function getBotSetting(key: string, defaultValue = ''): Promise<string> {
   try {
-    const row = db.prepare('SELECT value FROM bot_settings WHERE key = ? LIMIT 1').get(key) as { value: string } | undefined;
+    const row = await db.prepare('SELECT value FROM bot_settings WHERE key = ? LIMIT 1').get(key) as { value: string } | undefined;
     return row?.value || defaultValue;
   } catch {
     return defaultValue;
@@ -1079,10 +1150,10 @@ export function getBotSetting(key: string, defaultValue = ''): string {
 /**
  * Persists a bot configuration setting to SQLite bot_settings table.
  */
-export function setBotSetting(key: string, value: string): void {
+export async function setBotSetting(key: string, value: string): Promise<void> {
   try {
     const now = Date.now();
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO bot_settings (key, value, updated_at)
       VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET
@@ -1113,7 +1184,7 @@ export interface ViewOnceRecord {
 /**
  * Saves a captured View-Once media message into the vault.
  */
-export function saveViewOnceMessage(data: {
+export async function saveViewOnceMessage(data: {
   message_id: string;
   chat_jid: string;
   chat_name?: string;
@@ -1125,7 +1196,7 @@ export function saveViewOnceMessage(data: {
   file_path: string;
   file_size?: number;
   timestamp: number;
-}): boolean {
+}): Promise<boolean> {
   try {
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO view_once_messages (
@@ -1133,7 +1204,7 @@ export function saveViewOnceMessage(data: {
         is_group, media_type, caption, file_path, file_size, timestamp
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(
+    await stmt.run(
       data.message_id,
       data.chat_jid,
       data.chat_name || null,
@@ -1156,11 +1227,11 @@ export function saveViewOnceMessage(data: {
 /**
  * Retrieves the latest captured View-Once messages, optionally filtered by sender or chat name.
  */
-export function getLatestViewOnceMessages(limit: number = 10, filterQuery?: string): ViewOnceRecord[] {
+export async function getLatestViewOnceMessages(limit: number = 10, filterQuery?: string): Promise<ViewOnceRecord[]> {
   try {
     if (filterQuery && filterQuery.trim()) {
       const q = `%${filterQuery.trim().toLowerCase()}%`;
-      return db
+      return await db
         .prepare(
           `
         SELECT * FROM view_once_messages 
@@ -1170,7 +1241,7 @@ export function getLatestViewOnceMessages(limit: number = 10, filterQuery?: stri
         )
         .all(q, q, q, q, limit) as unknown as ViewOnceRecord[];
     }
-    return db.prepare(`SELECT * FROM view_once_messages ORDER BY timestamp DESC LIMIT ?`).all(limit) as unknown as ViewOnceRecord[];
+    return await db.prepare(`SELECT * FROM view_once_messages ORDER BY timestamp DESC LIMIT ?`).all(limit) as unknown as ViewOnceRecord[];
   } catch (err: any) {
     console.error('[DB] Error getting view-once messages:', err.message);
     return [];
@@ -1180,12 +1251,12 @@ export function getLatestViewOnceMessages(limit: number = 10, filterQuery?: stri
 /**
  * Retrieves a single View-Once message by its DB id or message_id.
  */
-export function getViewOnceMessageById(idOrMsgId: number | string): ViewOnceRecord | null {
+export async function getViewOnceMessageById(idOrMsgId: number | string): Promise<ViewOnceRecord | null> {
   try {
     if (typeof idOrMsgId === 'number' || /^\d+$/.test(String(idOrMsgId))) {
-      return (db.prepare(`SELECT * FROM view_once_messages WHERE id = ?`).get(Number(idOrMsgId)) as unknown as ViewOnceRecord) || null;
+      return (await db.prepare(`SELECT * FROM view_once_messages WHERE id = ?`).get(Number(idOrMsgId)) as unknown as ViewOnceRecord) || null;
     }
-    return (db.prepare(`SELECT * FROM view_once_messages WHERE message_id = ?`).get(String(idOrMsgId)) as unknown as ViewOnceRecord) || null;
+    return (await db.prepare(`SELECT * FROM view_once_messages WHERE message_id = ?`).get(String(idOrMsgId)) as unknown as ViewOnceRecord) || null;
   } catch {
     return null;
   }
@@ -1194,9 +1265,9 @@ export function getViewOnceMessageById(idOrMsgId: number | string): ViewOnceReco
 /**
  * Increments the retrieved count of a View-Once message record.
  */
-export function markViewOnceRetrieved(id: number): void {
+export async function markViewOnceRetrieved(id: number): Promise<void> {
   try {
-    db.prepare(`UPDATE view_once_messages SET retrieved_count = retrieved_count + 1 WHERE id = ?`).run(id);
+    await db.prepare(`UPDATE view_once_messages SET retrieved_count = retrieved_count + 1 WHERE id = ?`).run(id);
   } catch {}
 }
 

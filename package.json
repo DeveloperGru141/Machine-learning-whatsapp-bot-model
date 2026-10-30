@@ -27,6 +27,8 @@
   },
   "dependencies": {
     "@gradio/client": "^2.7.1",
+    "@hapi/boom": "^9.1.4",
+    "@libsql/client": "^0.18.0",
     "@types/node": "^22.13.4",
     "@types/node-cron": "^3.0.11",
     "@types/qrcode-terminal": "^0.12.2",

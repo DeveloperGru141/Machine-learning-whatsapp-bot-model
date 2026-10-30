@@ -85,12 +85,12 @@ export class EngagementPlugin implements IPlugin {
   /**
    * Scans for contacts or groups eligible for a proactive check-in.
    */
-  public findEligibleTargets(options?: {
+  public async findEligibleTargets(options?: {
     forceType?: 'contact' | 'group';
     specificJid?: string;
     bypassCooldown?: boolean;
     bypassSilence?: boolean;
-  }): EligibleTarget[] {
+  }): Promise<EligibleTarget[]> {
     const isTest = process.env.NODE_ENV === 'test' || Boolean(process.env.LIVETEST_RUNNER);
     const now = Date.now();
     const targets: EligibleTarget[] = [];
@@ -109,7 +109,7 @@ export class EngagementPlugin implements IPlugin {
       try {
         const candidateRows = options?.specificJid
           ? [{ chat_jid: options.specificJid }]
-          : (db.prepare(`
+          : (await db.prepare(`
               SELECT DISTINCT chat_jid
               FROM chat_logs
               WHERE is_group = 0
@@ -123,7 +123,7 @@ export class EngagementPlugin implements IPlugin {
           if (chatJid.endsWith('@g.us')) continue;
 
           // Strict Anti-Ban: Contact must have sent at least one inbound message to the bot
-          const inboundCheck = db.prepare(`
+          const inboundCheck = await db.prepare(`
             SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid != 'bot' LIMIT 1
           `).get(chatJid);
 
@@ -132,7 +132,7 @@ export class EngagementPlugin implements IPlugin {
           }
 
           // Fetch the latest message and timestamp
-          const latest = db.prepare(`
+          const latest = await db.prepare(`
             SELECT sender_name, sender_jid, message_text, timestamp
             FROM chat_logs
             WHERE chat_jid = ? AND message_text IS NOT NULL AND message_text != ''
@@ -148,7 +148,7 @@ export class EngagementPlugin implements IPlugin {
           }
 
           // Check last proactive check-in cooldown
-          const lastCheckIn = db.prepare(`
+          const lastCheckIn = await db.prepare(`
             SELECT timestamp FROM proactive_checkins
             WHERE chat_jid = ?
             ORDER BY timestamp DESC
@@ -160,7 +160,7 @@ export class EngagementPlugin implements IPlugin {
           }
 
           // Retrieve last 5 messages for context
-          const historyRows = db.prepare(`
+          const historyRows = await db.prepare(`
             SELECT sender_name, sender_jid, message_text, timestamp
             FROM chat_logs
             WHERE chat_jid = ? AND message_text IS NOT NULL AND message_text != ''
@@ -194,7 +194,7 @@ export class EngagementPlugin implements IPlugin {
       try {
         const candidateGroups = options?.specificJid
           ? [{ chat_jid: options.specificJid }]
-          : (db.prepare(`
+          : (await db.prepare(`
               SELECT DISTINCT chat_jid
               FROM chat_logs
               WHERE is_group = 1 OR chat_jid LIKE '%@g.us'
@@ -205,14 +205,14 @@ export class EngagementPlugin implements IPlugin {
           if (!chatJid.endsWith('@g.us')) continue;
 
           // Must have at least 2 logged messages
-          const countRow = db.prepare(`
+          const countRow = await db.prepare(`
             SELECT COUNT(*) as count FROM chat_logs WHERE chat_jid = ?
           `).get(chatJid) as { count: number } | undefined;
 
           if (!countRow || countRow.count < 2) continue;
 
           // Fetch latest message
-          const latest = db.prepare(`
+          const latest = await db.prepare(`
             SELECT sender_name, sender_jid, message_text, timestamp
             FROM chat_logs
             WHERE chat_jid = ? AND message_text IS NOT NULL AND message_text != ''
@@ -228,7 +228,7 @@ export class EngagementPlugin implements IPlugin {
           }
 
           // Check last proactive check-in cooldown
-          const lastCheckIn = db.prepare(`
+          const lastCheckIn = await db.prepare(`
             SELECT timestamp FROM proactive_checkins
             WHERE chat_jid = ?
             ORDER BY timestamp DESC
@@ -240,7 +240,7 @@ export class EngagementPlugin implements IPlugin {
           }
 
           // Retrieve last 8 messages for context
-          const historyRows = db.prepare(`
+          const historyRows = await db.prepare(`
             SELECT sender_name, sender_jid, message_text, timestamp
             FROM chat_logs
             WHERE chat_jid = ? AND message_text IS NOT NULL AND message_text != ''
@@ -282,7 +282,7 @@ export class EngagementPlugin implements IPlugin {
 
     const isContact = target.targetType === 'contact';
     const isOwner = userProfileManager.isOwner(target.chatJid);
-    const style = styleAdapter.getStyleContext(target.chatJid, 'check in on contact');
+    const style = await styleAdapter.getStyleContext(target.chatJid, 'check in on contact');
     const exemplarsBlock =
       style.fewShotExemplars.length > 0
         ? `\n# Fine-Tuned Dialogue Exemplars (Strictly emulate this cadence):\n` +
@@ -392,7 +392,7 @@ Drop a natural 1-2 sentence ${isContact ? 'check-in / hello' : 'reminder / follo
     // 3. Record audit trail in SQLite proactive_checkins
     const snippet = target.recentHistory.slice(-2).map(m => m.text).join(' | ');
     try {
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO proactive_checkins (chat_jid, target_type, last_context_snippet, message_sent, timestamp)
         VALUES (?, ?, ?, ?, ?)
       `).run(target.chatJid, target.targetType, snippet.slice(0, 300), messageText, Date.now());
@@ -431,7 +431,7 @@ Drop a natural 1-2 sentence ${isContact ? 'check-in / hello' : 'reminder / follo
 
     this.isProcessing = true;
     try {
-      const eligibleTargets = this.findEligibleTargets();
+      const eligibleTargets = await this.findEligibleTargets();
       if (eligibleTargets.length === 0) {
         return { executed: false, summary: 'No eligible contacts or groups due for check-in.' };
       }
@@ -441,7 +441,7 @@ Drop a natural 1-2 sentence ${isContact ? 'check-in / hello' : 'reminder / follo
 
       const dispatchResult = await this.dispatchProactiveMessage(socket, chosen);
       if (dispatchResult.success) {
-        logAutonomousAction('proactive_checkin', chosen.chatJid, chosen.targetName, `Autonomous check-in sent: "${dispatchResult.messageSent}"`);
+        await logAutonomousAction('proactive_checkin', chosen.chatJid, chosen.targetName, `Autonomous check-in sent: "${dispatchResult.messageSent}"`);
         return {
           executed: true,
           summary: `Successfully sent proactive ${chosen.targetType} message to ${chosen.chatJid}: "${dispatchResult.messageSent}"`,
@@ -481,7 +481,7 @@ Drop a natural 1-2 sentence ${isContact ? 'check-in / hello' : 'reminder / follo
           return { success: false, message: 'Permission denied: only the bot owner can trigger cross-chat check-ins.' };
         }
         const forceType = args.target_type === 'any' || !args.target_type ? undefined : args.target_type;
-        const targets = this.findEligibleTargets({
+        const targets = await this.findEligibleTargets({
           forceType,
           specificJid: args.chat_jid,
           bypassSilence: true, // Manual triggers can bypass silence

@@ -93,7 +93,7 @@ export class ContactReminderService {
    * Retrieves all unique eligible contacts from both the contacts address book and chat_logs.
    * Filters out groups, broadcasts, owner numbers, bot's own number, and previously messaged contacts.
    */
-  public getEligibleContacts(onlyInteracted = true): EligibleContact[] {
+  public async getEligibleContacts(onlyInteracted = true): Promise<EligibleContact[]> {
     const botPhone = config.bot.pairingPhoneNumber?.replace(/\D/g, '') || '';
     const ownerPhones = config.bot.owners
       .map((owner) => owner.split('@')[0].split(':')[0].replace(/\D/g, ''))
@@ -104,7 +104,7 @@ export class ContactReminderService {
 
     // 1. Gather all contacts with chat history in chat_logs (Warm contacts)
     try {
-      const chatRows = db.prepare(`
+      const chatRows = await db.prepare(`
         SELECT chat_jid, sender_name,
                SUM(CASE WHEN sender_jid != 'bot' THEN 1 ELSE 0 END) as inbound_count
         FROM chat_logs
@@ -125,11 +125,11 @@ export class ContactReminderService {
         }
 
         const normalizedJid = `${phone}@s.whatsapp.net`;
-        if (isContactAlreadyReminded(normalizedJid) || isContactAlreadyReminded(phone)) {
+        if (await isContactAlreadyReminded(normalizedJid) || await isContactAlreadyReminded(phone)) {
           continue;
         }
 
-        const saved = contactService.getContact(phone);
+        const saved = await contactService.getContact(phone);
         const rawName = saved?.custom_name || saved?.display_name || row.sender_name || '';
         const firstName = contactService.extractFriendlyFirstName(rawName) || 'Friend';
 
@@ -148,7 +148,7 @@ export class ContactReminderService {
     // 2. If not restricted to interacted-only, gather all address book contacts from `contacts` table
     if (!onlyInteracted) {
       try {
-        const contactRows = db.prepare(`
+        const contactRows = await db.prepare(`
           SELECT phone_number, jid, display_name, custom_name
           FROM contacts
           WHERE jid NOT LIKE '%@g.us'
@@ -166,7 +166,7 @@ export class ContactReminderService {
           }
 
           const normalizedJid = `${phone}@s.whatsapp.net`;
-          if (isContactAlreadyReminded(normalizedJid) || isContactAlreadyReminded(phone)) {
+          if (await isContactAlreadyReminded(normalizedJid) || await isContactAlreadyReminded(phone)) {
             continue;
           }
 
@@ -209,15 +209,15 @@ export class ContactReminderService {
   /**
    * Previews the next contacts in line with their personalized rendered messages without sending.
    */
-  public preview(count = 5, onlyInteracted = true): Array<{
+  public async preview(count = 5, onlyInteracted = true): Promise<Array<{
     phoneNumber: string;
     displayName: string;
     firstName: string;
     isWarm: boolean;
     templateIndex: number;
     sampleMessage: string;
-  }> {
-    const eligible = this.getEligibleContacts(onlyInteracted).slice(0, count);
+  }>> {
+    const eligible = (await this.getEligibleContacts(onlyInteracted)).slice(0, count);
     return eligible.map((c, i) => {
       const templateIdx = i % REMINDER_TEMPLATES.length;
       const { message } = this.renderMessage(c, templateIdx);
@@ -235,9 +235,9 @@ export class ContactReminderService {
   /**
    * Returns current live status of the reminder runner.
    */
-  public getStatus(): CampaignStatus {
-    const stats = getContactReminderStats();
-    const eligible = this.getEligibleContacts(false);
+  public async getStatus(): Promise<CampaignStatus> {
+    const stats = await getContactReminderStats();
+    const eligible = await this.getEligibleContacts(false);
     const now = Date.now();
     const nextInSec = this.nextScheduledAt > now ? Math.round((this.nextScheduledAt - now) / 1000) : 0;
 
@@ -300,7 +300,7 @@ export class ContactReminderService {
     const onlyInteracted = true;
     const dryRun = Boolean(opts.dryRun);
 
-    const eligible = this.getEligibleContacts(onlyInteracted);
+    const eligible = await this.getEligibleContacts(onlyInteracted);
     if (eligible.length === 0) {
       return {
         success: true,
@@ -309,7 +309,7 @@ export class ContactReminderService {
     }
 
     if (dryRun) {
-      const previewList = this.preview(Math.min(batchSize, 5), onlyInteracted);
+      const previewList = await this.preview(Math.min(batchSize, 5), onlyInteracted);
       return {
         success: true,
         message: `[DRY RUN] Found ${eligible.length} eligible contacts. Safe pacing configured at ${delayMinSec}-${delayMaxSec}s between dispatches. Previewed ${previewList.length} recipients without sending.`,
@@ -377,7 +377,7 @@ export class ContactReminderService {
       }
 
       try {
-        const eligible = this.getEligibleContacts(onlyInteracted);
+        const eligible = await this.getEligibleContacts(onlyInteracted);
         if (eligible.length === 0) {
           console.log('[ContactReminderService] 🏁 No more eligible contacts remaining. Campaign complete!');
           this.isRunning = false;
@@ -398,7 +398,7 @@ export class ContactReminderService {
         const sent = await OutboundSender.replyText(sock, nextContact.jid, message, undefined, true);
 
         if (sent) {
-          recordContactReminderSent(nextContact.jid, nextContact.phoneNumber, nextContact.displayName, templateIndex, message);
+          await recordContactReminderSent(nextContact.jid, nextContact.phoneNumber, nextContact.displayName, templateIndex, message);
           this.currentBatchSent++;
           this.lastRecipientName = `${nextContact.displayName} (+${nextContact.phoneNumber})`;
           this.lastSentTimestamp = Date.now();
@@ -408,7 +408,7 @@ export class ContactReminderService {
           // contact eligible and let the next scheduled step check standing again.
           restrictionGuard.logSkip('contact reminder dispatch');
         } else {
-          recordContactReminderFailed(nextContact.jid, nextContact.phoneNumber, nextContact.displayName, 'Socket dispatch returned null');
+          await recordContactReminderFailed(nextContact.jid, nextContact.phoneNumber, nextContact.displayName, 'Socket dispatch returned null');
           console.warn(`[ContactReminderService] ⚠️ Failed sending to ${nextContact.displayName} (+${nextContact.phoneNumber})`);
         }
       } catch (err: any) {

@@ -221,7 +221,7 @@ class StickerEngine {
     // 1. Gather recent conversation context from chat_logs
     let contextText = '';
     try {
-      const recentRows = db
+      const recentRows = await db
         .prepare(`
           SELECT message_text FROM chat_logs 
           WHERE chat_jid = ? AND message_text IS NOT NULL AND message_text != ''

@@ -32,7 +32,7 @@ export class ChatLogger {
     WHERE filename = ?
   `);
 
-  public logMessage(input: LogMessageInput): number | null {
+  public async logMessage(input: LogMessageInput): Promise<number | null> {
     try {
       let sanitizedText: string | null = null;
       let hasSensitive = false;
@@ -43,7 +43,7 @@ export class ChatLogger {
       }
       const isNoise = (hasSensitive || chatCleaner.isNoise(sanitizedText, input.contentType)) ? 1 : 0;
 
-      const result = this.insertLogStmt.run(
+      const result = await this.insertLogStmt.run(
         input.chatJid,
         input.senderJid,
         input.senderName,
@@ -67,12 +67,12 @@ export class ChatLogger {
     }
   }
 
-  public logOutboundMessage(chatJid: string, text: string, messageId?: string | null): void {
+  public async logOutboundMessage(chatJid: string, text: string, messageId?: string | null): Promise<void> {
     try {
       const scrubResult = sensitiveDataFilter.scrubSensitiveText(text);
       const scrubbed = scrubResult.scrubbedText;
       const isNoise = scrubResult.isSensitive || chatCleaner.isNoise(scrubbed, 'text');
-      this.insertLogStmt.run(
+      await this.insertLogStmt.run(
         chatJid,
         'bot',
         config.bot.name,
@@ -89,9 +89,9 @@ export class ChatLogger {
     }
   }
 
-  public logOutboundMedia(chatJid: string, contentType: string, messageId?: string | null): void {
+  public async logOutboundMedia(chatJid: string, contentType: string, messageId?: string | null): Promise<void> {
     try {
-      this.insertLogStmt.run(
+      await this.insertLogStmt.run(
         chatJid,
         'bot',
         config.bot.name,
@@ -115,21 +115,21 @@ export class ChatLogger {
     return null;
   }
 
-  public setTrainingConsent(userJid: string, optedIn: boolean): void {
+  public async setTrainingConsent(userJid: string, optedIn: boolean): Promise<void> {
     if (!userJid) return;
-    const alias = db.prepare('SELECT contact_jid FROM contact_jid_aliases WHERE alias_jid = ? LIMIT 1')
+    const alias = await db.prepare('SELECT contact_jid FROM contact_jid_aliases WHERE alias_jid = ? LIMIT 1')
       .get(userJid) as { contact_jid: string } | undefined;
     const consentJid = alias?.contact_jid || userJid;
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO training_consents (user_jid, opted_in, updated_at)
       VALUES (?, ?, ?)
       ON CONFLICT(user_jid) DO UPDATE SET opted_in = excluded.opted_in, updated_at = excluded.updated_at
     `).run(consentJid, optedIn ? 1 : 0, Date.now());
   }
 
-  public claimUnrepliedAttempt(inboundLogId: number, chatJid: string, now = Date.now()): boolean {
+  public async claimUnrepliedAttempt(inboundLogId: number, chatJid: string, now = Date.now()): Promise<boolean> {
     try {
-      const result = db.prepare(`
+      const result = await db.prepare(`
         INSERT INTO dm_reply_attempts (
           inbound_log_id, chat_jid, status, attempts, last_attempt_at, next_attempt_at, last_error, completed_at
         ) VALUES (?, ?, 'in_progress', 1, ?, 0, NULL, NULL)
@@ -150,16 +150,16 @@ export class ChatLogger {
     }
   }
 
-  public finishUnrepliedAttempt(inboundLogId: number, sent: boolean, error?: string, now = Date.now()): void {
+  public async finishUnrepliedAttempt(inboundLogId: number, sent: boolean, error?: string, now = Date.now()): Promise<void> {
     try {
-      const row = db.prepare('SELECT attempts FROM dm_reply_attempts WHERE inbound_log_id = ?')
+      const row = await db.prepare('SELECT attempts FROM dm_reply_attempts WHERE inbound_log_id = ?')
         .get(inboundLogId) as { attempts: number } | undefined;
       const attempts = Math.max(1, Number(row?.attempts || 1));
       const retryDelay = Math.min(30 * 60_000, 60_000 * 2 ** Math.min(attempts - 1, 5));
       const safeError = error
         ? sensitiveDataFilter.scrubSensitiveText(error).scrubbedText.replace(/\s+/g, ' ').slice(0, 200)
         : 'No outbound response was dispatched';
-      db.prepare(`
+      await db.prepare(`
         UPDATE dm_reply_attempts
         SET status = ?, next_attempt_at = ?, last_error = ?, completed_at = ?
         WHERE inbound_log_id = ?
@@ -169,9 +169,9 @@ export class ChatLogger {
     }
   }
 
-  public logOutboundSticker(chatJid: string, filename: string, _vibe?: string): void {
+  public async logOutboundSticker(chatJid: string, filename: string, _vibe?: string): Promise<void> {
     try {
-      this.insertLogStmt.run(
+      await this.insertLogStmt.run(
         chatJid,
         'bot',
         config.bot.name,
@@ -188,11 +188,11 @@ export class ChatLogger {
     }
   }
 
-  public getLastMessage(chatJid: string, senderJid?: string): { message_id: string; sender_jid: string; message_text: string } | null {
+  public async getLastMessage(chatJid: string, senderJid?: string): Promise<{ message_id: string; sender_jid: string; message_text: string } | null> {
     try {
       if (senderJid) {
         return (
-          (db.prepare(`
+          (await db.prepare(`
             SELECT message_id, sender_jid, message_text FROM chat_logs
             WHERE chat_jid = ? AND sender_jid = ? AND message_id IS NOT NULL
             ORDER BY id DESC LIMIT 1
@@ -200,7 +200,7 @@ export class ChatLogger {
         );
       }
       return (
-        (db.prepare(`
+        (await db.prepare(`
           SELECT message_id, sender_jid, message_text FROM chat_logs
           WHERE chat_jid = ? AND sender_jid != 'bot' AND message_id IS NOT NULL
           ORDER BY id DESC LIMIT 1
@@ -211,9 +211,9 @@ export class ChatLogger {
     }
   }
 
-  private learnStickerPatternFromContext(chatJid: string, stickerFilename: string): void {
+  private async learnStickerPatternFromContext(chatJid: string, stickerFilename: string): Promise<void> {
     try {
-      const priorMessages = db.prepare(`
+      const priorMessages = await db.prepare(`
         SELECT message_text FROM chat_logs
         WHERE chat_jid = ? AND content_type = 'text' AND message_text IS NOT NULL
         ORDER BY id DESC LIMIT 2
@@ -221,15 +221,15 @@ export class ChatLogger {
 
       if (priorMessages.length > 0) {
         const contextSummary = priorMessages.map(m => m.message_text).reverse().join(' -> ');
-        this.updateStickerPatternStmt.run(contextSummary, stickerFilename);
+        await this.updateStickerPatternStmt.run(contextSummary, stickerFilename);
       }
     } catch {
       // Ignore background pattern update errors
     }
   }
 
-  public getRecentChatHistory(chatJid: string, limit: number = 15): Array<{ sender_name: string; message_text: string; content_type: string }> {
-    const rows = db.prepare(`
+  public async getRecentChatHistory(chatJid: string, limit: number = 15): Promise<Array<{ sender_name: string; message_text: string; content_type: string }>> {
+    const rows = await db.prepare(`
       SELECT sender_name, message_text, content_type
       FROM chat_logs
       WHERE chat_jid = ?
@@ -241,9 +241,9 @@ export class ChatLogger {
   /**
    * Updates the message_text of the most recent message of a given content_type in a chat (e.g. after transcribing audio).
    */
-  public updateLatestMessageText(chatJid: string, contentType: string, text: string): void {
+  public async updateLatestMessageText(chatJid: string, contentType: string, text: string): Promise<void> {
     try {
-      db.prepare(`
+      await db.prepare(`
         UPDATE chat_logs
         SET message_text = ?
         WHERE id = (
@@ -261,9 +261,9 @@ export class ChatLogger {
    * Checks if the bot has already replied to this chat after a given message timestamp.
    * Uses both timestamp and row ID ordering to stay immune to minor clock skew between WhatsApp servers and local time.
    */
-  public hasBotRepliedAfter(chatJid: string, timestamp: number): boolean {
+  public async hasBotRepliedAfter(chatJid: string, timestamp: number): Promise<boolean> {
     try {
-      const row = db.prepare(`
+      const row = await db.prepare(`
         SELECT id FROM chat_logs
         WHERE chat_jid = ?
           AND sender_jid = 'bot'
@@ -289,9 +289,9 @@ export class ChatLogger {
   /**
    * Checks if the most recent message in the chat was from a user (unreplied).
    */
-  public isLastMessageFromUser(chatJid: string): boolean {
+  public async isLastMessageFromUser(chatJid: string): Promise<boolean> {
     try {
-      const row = db.prepare(`
+      const row = await db.prepare(`
         SELECT sender_jid FROM chat_logs
         WHERE chat_jid = ?
           AND NOT (sender_jid = 'bot' AND COALESCE(message_text, '') LIKE 'network slow small%')

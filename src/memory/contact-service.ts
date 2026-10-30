@@ -25,23 +25,23 @@ export interface AutoSaveResult {
 
 export class ContactService {
   /** Persist Baileys phone-number and LID identifiers against one canonical contact. */
-  public syncWhatsAppContact(contact: {
+  public async syncWhatsAppContact(contact: {
     id?: string;
     lid?: string;
     phoneNumber?: string;
     name?: string | null;
     notify?: string | null;
-  }): AutoSaveResult {
+  }): Promise<AutoSaveResult> {
     const displayName = contact.name || contact.notify || undefined;
     const phone = this.extractPhoneNumber(contact.phoneNumber || '') || this.extractPhoneNumber(contact.id || '');
     const canonicalJid = phone ? `${phone}@s.whatsapp.net` : '';
     if (!canonicalJid) {
       const possibleAlias = contact.lid || contact.id;
-      const existing = possibleAlias ? this.getContact(possibleAlias) : null;
+      const existing = possibleAlias ? await this.getContact(possibleAlias) : null;
       return { isNew: false, needsIntroduction: false, contact: existing };
     }
 
-    const saved = this.autoSaveContact(canonicalJid, displayName);
+    const saved = await this.autoSaveContact(canonicalJid, displayName);
     const aliases = [contact.id, contact.lid, contact.phoneNumber]
       .filter((value): value is string => Boolean(value))
       .map((value) => this.normalizeJid(value))
@@ -53,12 +53,12 @@ export class ContactService {
         ON CONFLICT(alias_jid) DO UPDATE SET contact_jid = excluded.contact_jid, updated_at = excluded.updated_at
       `);
       for (const alias of new Set([...aliases, canonicalJid])) {
-        insertAlias.run(alias, canonicalJid, Date.now());
+        await insertAlias.run(alias, canonicalJid, Date.now());
       }
     } catch (err) {
       console.warn('[ContactService] Could not store WhatsApp contact aliases:', err);
     }
-    return { ...saved, contact: this.getContact(canonicalJid) || saved.contact };
+    return { ...saved, contact: (await this.getContact(canonicalJid)) || saved.contact };
   }
 
   /**
@@ -102,9 +102,9 @@ export class ContactService {
   /**
    * Automatically syncs all saved contacts to data/contacts.vcf on disk
    */
-  public syncVcfFile(): void {
+  public async syncVcfFile(): Promise<void> {
     try {
-      const { vcfContent, count } = this.exportVcf(5000);
+      const { vcfContent, count } = await this.exportVcf(5000);
       if (count > 0 && vcfContent) {
         const dataDir = path.dirname(config.paths.database);
         const vcfPath = path.join(dataDir, 'contacts.vcf');
@@ -118,12 +118,12 @@ export class ContactService {
   /**
    * Marks a contact as having received the bot's first-message self-introduction.
    */
-  public markIntroduced(jid: string): void {
+  public async markIntroduced(jid: string): Promise<void> {
     if (!jid) return;
     const normalizedJid = this.normalizeJid(jid);
     const phoneNumber = this.extractPhoneNumber(normalizedJid);
     try {
-      db.prepare(`
+      await db.prepare(`
         UPDATE contacts
         SET is_introduced = 1, updated_at = ?
         WHERE jid = ? OR phone_number = ?
@@ -176,7 +176,7 @@ export class ContactService {
    * Runs passively on all messages so the bot maintains an up-to-date address book,
    * and returns whether the contact is new and needs a first-message introduction.
    */
-  public autoSaveContact(jid: string, pushName?: string): AutoSaveResult {
+  public async autoSaveContact(jid: string, pushName?: string): Promise<AutoSaveResult> {
     if (!jid || jid.endsWith('@g.us') || jid.includes('status@broadcast')) {
       return { isNew: false, needsIntroduction: false, contact: null };
     }
@@ -197,27 +197,27 @@ export class ContactService {
     const cleanPushName = isGenericOrDigits ? `User +${phoneNumber}` : rawTrimmed;
 
     try {
-      const existing = db.prepare(`
+      const existing = await db.prepare(`
         SELECT * FROM contacts WHERE jid = ? OR phone_number = ? LIMIT 1
       `).get(normalizedJid, phoneNumber) as ContactRecord | undefined;
 
       // Check if the bot has ever sent an outbound reply to this chat in chat_logs
-      const priorBotReply = db.prepare(`
+      const priorBotReply = await db.prepare(`
         SELECT 1 FROM chat_logs WHERE chat_jid = ? AND sender_jid = 'bot' LIMIT 1
       `).get(normalizedJid);
       const hasBotRepliedBefore = Boolean(priorBotReply);
 
       if (!existing) {
         const initialIntroduced = hasBotRepliedBefore ? 1 : 0;
-        db.prepare(`
+        await db.prepare(`
           INSERT INTO contacts (
             phone_number, jid, display_name, custom_name, notes, tags, is_auto_saved, is_introduced, created_at, updated_at
           ) VALUES (?, ?, ?, NULL, NULL, '[]', 1, ?, ?, ?)
         `).run(phoneNumber, normalizedJid, cleanPushName, initialIntroduced, now, now);
         console.log(`[ContactService] 📇 Auto-saved new contact: "${cleanPushName}" (+${phoneNumber})`);
-        this.syncVcfFile();
+        await this.syncVcfFile();
 
-        const created = this.getContact(normalizedJid);
+        const created = await this.getContact(normalizedJid);
         return {
           isNew: true,
           needsIntroduction: initialIntroduced === 0,
@@ -231,7 +231,7 @@ export class ContactService {
           !isGenericOrDigits &&
           existing.display_name !== cleanPushName
         ) {
-          db.prepare(`
+          await db.prepare(`
             UPDATE contacts SET display_name = ?, updated_at = ? WHERE id = ?
           `).run(cleanPushName, now, existing.id);
           existing.display_name = cleanPushName;
@@ -239,12 +239,12 @@ export class ContactService {
         }
 
         if (hasBotRepliedBefore && !existing.is_introduced) {
-          db.prepare(`UPDATE contacts SET is_introduced = 1 WHERE id = ?`).run(existing.id);
+          await db.prepare(`UPDATE contacts SET is_introduced = 1 WHERE id = ?`).run(existing.id);
           existing.is_introduced = 1;
         }
 
         if (updated) {
-          this.syncVcfFile();
+          await this.syncVcfFile();
         }
 
         return {
@@ -262,12 +262,12 @@ export class ContactService {
   /**
    * Manually saves or updates a contact with a preferred name, notes, or tags.
    */
-  public saveContact(
+  public async saveContact(
     phoneOrJid: string,
     name: string,
     notes?: string,
     tags?: string[]
-  ): { success: boolean; contact?: ContactRecord; message: string } {
+  ): Promise<{ success: boolean; contact?: ContactRecord; message: string }> {
     const phoneNumber = this.extractPhoneNumber(phoneOrJid);
     if (!phoneNumber) {
       return { success: false, message: 'Invalid phone number or JID provided.' };
@@ -282,7 +282,7 @@ export class ContactService {
     const now = Date.now();
 
     try {
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO contacts (
           phone_number, jid, display_name, custom_name, notes, tags, is_auto_saved, is_introduced, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
@@ -293,8 +293,8 @@ export class ContactService {
           updated_at = excluded.updated_at
       `).run(phoneNumber, normalizedJid, cleanName, cleanName, cleanNotes, tagsJson, now, now);
 
-      this.syncVcfFile();
-      const saved = this.getContact(normalizedJid) || this.getContact(phoneNumber);
+      await this.syncVcfFile();
+      const saved = (await this.getContact(normalizedJid)) || (await this.getContact(phoneNumber));
       console.log(`[ContactService] Saved contact: "${cleanName}" (+${phoneNumber})`);
       return {
         success: true,
@@ -310,7 +310,7 @@ export class ContactService {
   /**
    * Searches for a contact by phone number, JID, or name.
    */
-  public getContact(query: string): ContactRecord | null {
+  public async getContact(query: string): Promise<ContactRecord | null> {
     if (!query) return null;
     const clean = query.trim();
     const digits = this.extractPhoneNumber(clean);
@@ -348,7 +348,7 @@ export class ContactService {
       // Resolve exact JIDs first, including LID aliases synchronized by Baileys.
       const normalizedJid = clean.includes('@') ? this.normalizeJid(clean) : '';
       if (normalizedJid) {
-        const aliasRow = db.prepare(`
+        const aliasRow = await db.prepare(`
           SELECT c.* FROM contacts c
           LEFT JOIN contact_jid_aliases a ON a.contact_jid = c.jid
           WHERE c.jid = ? OR a.alias_jid = ?
@@ -359,7 +359,7 @@ export class ContactService {
 
       // Phone numbers must match exactly; substring matching can return the wrong person.
       if (digits.length >= 7) {
-        const row = db.prepare(`
+        const row = await db.prepare(`
           SELECT c.* FROM contacts c
           LEFT JOIN contact_jid_aliases a ON a.contact_jid = c.jid
           WHERE c.jid = ? OR c.phone_number = ? OR a.alias_jid = ? OR a.alias_jid = ?
@@ -374,7 +374,7 @@ export class ContactService {
       }
 
       // Prefer exact names. Escape SQL LIKE metacharacters before allowing a partial match.
-      const exactName = db.prepare(`
+      const exactName = await db.prepare(`
         SELECT * FROM contacts
         WHERE (LOWER(custom_name) = LOWER(?) OR LOWER(display_name) = LOWER(?))
           AND display_name != 'Crypto Boss😊'
@@ -383,7 +383,7 @@ export class ContactService {
       if (exactName) return exactName;
 
       const escaped = clean.replace(/[\\%_]/g, '\\$&');
-      const nameMatch = db.prepare(`
+      const nameMatch = await db.prepare(`
         SELECT * FROM contacts 
         WHERE (custom_name LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')
           AND display_name != 'Crypto Boss😊'
@@ -401,18 +401,18 @@ export class ContactService {
   /**
    * Searches for multiple contacts matching a query string across names, notes, phone, and tags.
    */
-  public searchContacts(query: string, limit: number = 5): ContactRecord[] {
+  public async searchContacts(query: string, limit: number = 5): Promise<ContactRecord[]> {
     if (!query || query.trim().length === 0) return [];
     const clean = query.trim();
 
-    const single = this.getContact(clean);
+    const single = await this.getContact(clean);
     const results: ContactRecord[] = [];
     if (single && single.id === -1) {
       results.push(single);
     }
 
     try {
-      const rows = db.prepare(`
+      const rows = await db.prepare(`
         SELECT * FROM contacts 
         WHERE (custom_name LIKE ? OR display_name LIKE ? OR notes LIKE ? OR tags LIKE ? OR phone_number LIKE ?)
           AND display_name != 'Crypto Boss😊'
@@ -434,9 +434,9 @@ export class ContactService {
   /**
    * Returns all saved contacts up to limit.
    */
-  public getAllContacts(limit: number = 2000): ContactRecord[] {
+  public async getAllContacts(limit: number = 2000): Promise<ContactRecord[]> {
     try {
-      return db.prepare(`
+      return await db.prepare(`
         SELECT * FROM contacts
         ORDER BY COALESCE(custom_name, display_name) ASC
         LIMIT ?
@@ -475,8 +475,8 @@ export class ContactService {
   /**
    * Generates a combined .vcf file content with all contacts
    */
-  public exportVcf(limit: number = 2000): { vcfContent: string; count: number } {
-    const contacts = this.getAllContacts(limit);
+  public async exportVcf(limit: number = 2000): Promise<{ vcfContent: string; count: number }> {
+    const contacts = await this.getAllContacts(limit);
     if (contacts.length === 0) {
       return { vcfContent: '', count: 0 };
     }
@@ -496,11 +496,11 @@ export class ContactService {
    * Retrieves the newest eligible inbound message per direct chat when no valid bot reply follows it.
    * Returns oldest outstanding messages first so a long backlog is processed fairly.
    */
-  public getUnrepliedChats(
+  public async getUnrepliedChats(
     afterTimestamp: number = Date.now() - 30 * 24 * 60 * 60 * 1000,
     limit: number = 100,
     now: number = Date.now()
-  ): UnrepliedChat[] {
+  ): Promise<UnrepliedChat[]> {
     try {
       const sql = `
         WITH latest_inbound AS (
@@ -544,7 +544,7 @@ export class ContactService {
         ORDER BY l.timestamp ASC, l.id ASC
         LIMIT ?;
       `;
-      const rows = db.prepare(sql).all(afterTimestamp, now, now - 10 * 60_000, Math.min(Math.max(limit, 1), 250)) as Array<{
+      const rows = await db.prepare(sql).all(afterTimestamp, now, now - 10 * 60_000, Math.min(Math.max(limit, 1), 250)) as Array<{
         id: number;
         chat_jid: string;
         sender_jid: string;
@@ -587,7 +587,7 @@ export class ContactService {
   /**
    * Retrieves contacts who have sent at least one message to the bot but have 0 outgoing bot replies.
    */
-  public getUncontactedContacts(excludeJidPrefixes: string[] = []): ContactRecord[] {
+  public async getUncontactedContacts(excludeJidPrefixes: string[] = []): Promise<ContactRecord[]> {
     try {
       const sql = `
         SELECT c.* FROM contacts c
@@ -604,7 +604,7 @@ export class ContactService {
           )
         ORDER BY c.created_at ASC;
       `;
-      const allUncontacted = db.prepare(sql).all() as unknown as ContactRecord[];
+      const allUncontacted = await db.prepare(sql).all() as unknown as ContactRecord[];
       if (excludeJidPrefixes.length === 0) return allUncontacted;
 
       return allUncontacted.filter((c) => {

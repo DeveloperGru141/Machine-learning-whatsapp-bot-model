@@ -68,20 +68,20 @@ export class OutboundSender {
   /**
    * Verifies outbound safety with the Anti-Ban Engine before dispatching.
    */
-  private static checkSafety(
+  private static async checkSafety(
     chatJid: string,
     quoted?: WAMessage,
     isOwnerCommand?: boolean,
     isProactiveCheckIn?: boolean,
     isReply: boolean = true
-  ): boolean {
+  ): Promise<boolean> {
     if (restrictionGuard.blocksJid(chatJid)) {
       restrictionGuard.logSkip('outbound message');
       return false;
     }
 
     const isGroup = chatJid.endsWith('@g.us');
-    const check = antiBanEngine.canSendOutbound({
+    const check = await antiBanEngine.canSendOutbound({
       chatJid,
       isGroup,
       isReplyToInbound: isReply || Boolean(quoted),
@@ -208,7 +208,7 @@ export class OutboundSender {
 
     const safeQuoted = this.sanitizeQuoted(chatJid, quoted);
 
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return await antiBanEngine.scheduleDispatch(chatJid, async () => {
       let currentSock = sock || activeSocketGetter?.();
       try {
         const payload: any = { text: cleanText };
@@ -217,7 +217,7 @@ export class OutboundSender {
         }
         const result = await currentSock.sendMessage(chatJid, payload, { quoted: safeQuoted });
         this.recordDispatchedId(result?.key?.id);
-        chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText, result?.key?.id);
+        await chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText, result?.key?.id);
         this.trackDeliveryConfirmation(result, chatJid);
         return result;
       } catch (err: any) {
@@ -230,7 +230,7 @@ export class OutboundSender {
             }
             const result = await currentSock.sendMessage(chatJid, payload);
             this.recordDispatchedId(result?.key?.id);
-            chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText, result?.key?.id);
+            await chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText, result?.key?.id);
             this.trackDeliveryConfirmation(result, chatJid);
             return result;
           } catch (innerErr: any) {
@@ -253,7 +253,7 @@ export class OutboundSender {
             console.log(`[OutboundSender] 🔄 Retrying outbound to ${chatJid} via fresh reconnected socket...`);
             const retryResult = await freshSock.sendMessage(chatJid, { text: cleanText });
             this.recordDispatchedId(retryResult?.key?.id);
-            chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText, retryResult?.key?.id);
+            await chatLogger.logOutboundMessage(logChatJid || chatJid, cleanText, retryResult?.key?.id);
             this.trackDeliveryConfirmation(retryResult, chatJid);
             return retryResult;
           }
@@ -278,7 +278,7 @@ export class OutboundSender {
       ? fs.readFileSync(bufferOrPath)
       : bufferOrPath;
 
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return await antiBanEngine.scheduleDispatch(chatJid, async () => {
       let currentSock = sock || activeSocketGetter?.();
       if (!currentSock) {
         console.warn(`[OutboundSender] No active socket to send sticker to ${chatJid}`);
@@ -295,14 +295,14 @@ export class OutboundSender {
           safeQuoted ? { quoted: safeQuoted } : undefined
         );
         this.recordDispatchedId(res?.key?.id);
-        chatLogger.logOutboundMedia(chatJid, 'sticker', res?.key?.id);
+        await chatLogger.logOutboundMedia(chatJid, 'sticker', res?.key?.id);
         return res;
       } catch (err: any) {
         console.warn(`[OutboundSender] sendSticker with quoted failed (${err.message}), retrying directly with mentions...`);
         try {
           const res = await currentSock.sendMessage(chatJid, payload);
           this.recordDispatchedId(res?.key?.id);
-          chatLogger.logOutboundMedia(chatJid, 'sticker', res?.key?.id);
+          await chatLogger.logOutboundMedia(chatJid, 'sticker', res?.key?.id);
           return res;
         } catch (retryErr: any) {
           console.error(`[OutboundSender] Failed to send sticker directly to ${chatJid}:`, retryErr.message);
@@ -328,7 +328,7 @@ export class OutboundSender {
       : { url: bufferOrUrl };
     const cleanCaption = caption ? this.sanitizeOutboundText(caption) : undefined;
 
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return await antiBanEngine.scheduleDispatch(chatJid, async () => {
       try {
         const res = await sock.sendMessage(
           chatJid,
@@ -336,14 +336,14 @@ export class OutboundSender {
           { quoted: safeQuoted }
         );
         this.recordDispatchedId(res?.key?.id);
-        chatLogger.logOutboundMedia(chatJid, 'image', res?.key?.id);
+        await chatLogger.logOutboundMedia(chatJid, 'image', res?.key?.id);
         return res;
       } catch (err: any) {
         if (safeQuoted) {
           console.warn(`[OutboundSender] sendImage with quoted failed (${err.message}), retrying directly...`);
           const res = await sock.sendMessage(chatJid, { image: content, caption: cleanCaption });
           this.recordDispatchedId(res?.key?.id);
-          chatLogger.logOutboundMedia(chatJid, 'image', res?.key?.id);
+          await chatLogger.logOutboundMedia(chatJid, 'image', res?.key?.id);
           return res;
         }
         throw err;
@@ -378,7 +378,7 @@ export class OutboundSender {
       }
     }
 
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return await antiBanEngine.scheduleDispatch(chatJid, async () => {
       try {
         const res = await sock.sendMessage(
           chatJid,
@@ -390,7 +390,7 @@ export class OutboundSender {
           { quoted: safeQuoted }
         );
         this.recordDispatchedId(res?.key?.id);
-        chatLogger.logOutboundMedia(chatJid, 'audio', res?.key?.id);
+        await chatLogger.logOutboundMedia(chatJid, 'audio', res?.key?.id);
         return res;
       } catch (err: any) {
         if (safeQuoted) {
@@ -401,7 +401,7 @@ export class OutboundSender {
             ptt: isVoiceNote,
           });
           this.recordDispatchedId(res?.key?.id);
-          chatLogger.logOutboundMedia(chatJid, 'audio', res?.key?.id);
+          await chatLogger.logOutboundMedia(chatJid, 'audio', res?.key?.id);
           return res;
         }
         throw err;
@@ -425,7 +425,7 @@ export class OutboundSender {
       : { url: bufferOrUrl };
     const cleanCaption = caption ? this.sanitizeOutboundText(caption) : undefined;
 
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return await antiBanEngine.scheduleDispatch(chatJid, async () => {
       try {
         const res = await sock.sendMessage(
           chatJid,
@@ -437,7 +437,7 @@ export class OutboundSender {
           { quoted: safeQuoted }
         );
         this.recordDispatchedId(res?.key?.id);
-        chatLogger.logOutboundMedia(chatJid, 'video', res?.key?.id);
+        await chatLogger.logOutboundMedia(chatJid, 'video', res?.key?.id);
         return res;
       } catch (err: any) {
         if (safeQuoted) {
@@ -448,7 +448,7 @@ export class OutboundSender {
             mimetype: 'video/mp4',
           });
           this.recordDispatchedId(res?.key?.id);
-          chatLogger.logOutboundMedia(chatJid, 'video', res?.key?.id);
+          await chatLogger.logOutboundMedia(chatJid, 'video', res?.key?.id);
           return res;
         }
         throw err;
@@ -475,7 +475,7 @@ export class OutboundSender {
       `TEL;type=CELL;type=VOICE;waid=${cleanNumber}:+${cleanNumber}\n` +
       'END:VCARD';
 
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return await antiBanEngine.scheduleDispatch(chatJid, async () => {
       const res = await sock.sendMessage(
         chatJid,
         {
@@ -487,7 +487,7 @@ export class OutboundSender {
         { quoted: safeQuoted }
       );
       this.recordDispatchedId(res?.key?.id);
-      chatLogger.logOutboundMedia(chatJid, 'contact', res?.key?.id);
+      await chatLogger.logOutboundMedia(chatJid, 'contact', res?.key?.id);
       return res;
     });
   }
@@ -509,7 +509,7 @@ export class OutboundSender {
     }
 
     const currentSock = activeSocketGetter?.() || sock;
-    return antiBanEngine.scheduleDispatch(chatJid, async () => {
+    return await antiBanEngine.scheduleDispatch(chatJid, async () => {
       const res = await currentSock.sendMessage(
         chatJid,
         {
@@ -522,7 +522,7 @@ export class OutboundSender {
         safeQuoted ? { quoted: safeQuoted } : undefined
       );
       this.recordDispatchedId(res?.key?.id);
-      chatLogger.logOutboundMessage(chatJid, `[Poll] ${question} (Options: ${cleanOptions.join(', ')})`, res?.key?.id);
+      await chatLogger.logOutboundMessage(chatJid, `[Poll] ${question} (Options: ${cleanOptions.join(', ')})`, res?.key?.id);
       return res;
     });
   }

@@ -6,23 +6,23 @@ import { contactService } from '../memory/contact-service.js';
 import { userProfileManager } from '../memory/user-profiles.js';
 import { reinforcementEngine } from '../learning/reinforcement.js';
 
-export function buildSystemPrompt(
+export async function buildSystemPrompt(
   userJid: string,
   chatJid: string,
   isGroup: boolean,
   incomingText?: string,
   activeSenderName?: string
-): string {
-  const userFacts = isGroup ? [] : memoryService.getUserFacts(userJid);
-  const groupFacts = isGroup ? memoryService.getGroupFacts(chatJid) : [];
-  const style = styleAdapter.getStyleContext(chatJid, incomingText);
-  const languageInstruction = userProfileManager.getLanguageInstruction(userJid, incomingText);
+): Promise<string> {
+  const userFacts = isGroup ? [] : await memoryService.getUserFacts(userJid);
+  const groupFacts = isGroup ? await memoryService.getGroupFacts(chatJid) : [];
+  const style = await styleAdapter.getStyleContext(chatJid, incomingText);
+  const languageInstruction = await userProfileManager.getLanguageInstruction(userJid, incomingText);
 
   const nowStr = new Date().toUTCString();
   const currentYear = new Date().getUTCFullYear();
 
   // Resolve active speaker / DM partner identity
-  const activeContact = contactService.getContact(userJid);
+  const activeContact = await contactService.getContact(userJid);
   const isOwner = userProfileManager.isOwner(
     userJid,
     activeContact?.display_name || activeContact?.custom_name || undefined
@@ -36,7 +36,7 @@ export function buildSystemPrompt(
   // Saved contacts (ONLY for OWNER ADEMOLA)
   let savedContactsList = '';
   if (isOwner && !isGroup) {
-    const savedContacts = contactService.getAllContacts(3);
+    const savedContacts = await contactService.getAllContacts(3);
     if (savedContacts.length > 0) {
       savedContactsList = savedContacts
         .map((c) => `- ${c.custom_name || c.display_name} ${c.phone_number ? '(+' + c.phone_number + ')' : ''}`)
@@ -45,7 +45,7 @@ export function buildSystemPrompt(
   }
 
   // Known WhatsApp Groups
-  const knownGroups = !isGroup && isOwner ? getAllKnownGroups(3) : [];
+  const knownGroups = !isGroup && isOwner ? await getAllKnownGroups(3) : [];
   let knownGroupsList = '';
   if (knownGroups.length > 0) {
     knownGroupsList = knownGroups
@@ -53,7 +53,7 @@ export function buildSystemPrompt(
       .join('\n');
   }
 
-  const currentGroup = isGroup ? findKnownGroup(chatJid) : null;
+  const currentGroup = isGroup ? await findKnownGroup(chatJid) : null;
   const isBotGroupAdmin = Boolean(currentGroup?.is_admin);
 
 let prompt = `You are ${config.bot.name}, a sharp, witty WhatsApp user (Bot: 07058967815 / +2347058967815).
@@ -118,7 +118,7 @@ Daily 7:00 AM status on WhatsApp Status (status@broadcast) with animated motion 
   }
 
   // Inject direct user corrections (limit 1)
-  const activeCorrections = reinforcementEngine.getActiveCorrections(chatJid, 1);
+  const activeCorrections = await reinforcementEngine.getActiveCorrections(chatJid, 1);
   if (activeCorrections.length > 0) {
     prompt += `\n# Direct Corrections Learned In This Chat (STRICTLY OBEY):\n- ${activeCorrections[0]}\n`;
   }

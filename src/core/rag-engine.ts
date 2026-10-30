@@ -41,7 +41,7 @@ export class RagEngine {
     try {
       let facts: UserFact[] = [];
       if (userJid && !isGroupChat) {
-        facts = memoryService.getUserFacts(userJid);
+        facts = await memoryService.getUserFacts(userJid);
       }
       const seenFacts = new Set<string>();
       const isPersonalQuery = /\b(i|my|me|mine|study|studies|live|work|like|prefer|preference|favorite|course|school)\b/i.test(queryLower);
@@ -87,7 +87,7 @@ export class RagEngine {
     // 2. Search Group Facts & Rules
     if (chatJid && chatJid.endsWith('@g.us')) {
       try {
-        const groupFacts = memoryService.getGroupFacts(chatJid);
+        const groupFacts = await memoryService.getGroupFacts(chatJid);
         for (const gf of groupFacts) {
           const text = `${gf.topic}: ${gf.summary}`;
           const textLower = text.toLowerCase();
@@ -125,7 +125,7 @@ export class RagEngine {
           .trim();
 
         if (queryTerms.length >= 2) {
-          const matchedContacts = contactService.searchContacts(queryTerms, 3);
+          const matchedContacts = await contactService.searchContacts(queryTerms, 3);
           for (const c of matchedContacts) {
             const name = c.custom_name || c.display_name || 'Contact';
             const phoneStr = c.phone_number ? `+${c.phone_number}` : c.jid;
@@ -146,7 +146,7 @@ export class RagEngine {
 
     // 4. Semantic Search over Past Banter & Group Discussions
     try {
-      const vectorMatches = vectorStore.searchBanter(cleanQuery, chatJid, 2);
+      const vectorMatches = await vectorStore.searchBanter(cleanQuery, chatJid, 2);
       for (const vm of vectorMatches) {
         if (vm.score >= 0.35) {
           documents.push({
@@ -166,7 +166,7 @@ export class RagEngine {
       const words = queryLower.split(/\s+/).filter((w) => w.length > 3);
       if (words.length > 0) {
         const keyword = words[0];
-        const logMatches = memoryService.searchChatLogs(keyword, chatJid ? [chatJid] : []);
+        const logMatches = await memoryService.searchChatLogs(keyword, chatJid ? [chatJid] : []);
         for (const lm of logMatches.slice(0, 2)) {
           if (lm.message_text && !documents.some((d) => d.snippet.includes(lm.message_text))) {
             documents.push({

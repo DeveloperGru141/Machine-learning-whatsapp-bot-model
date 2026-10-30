@@ -71,11 +71,11 @@ export class ContextManager {
     senderName?: string
   ): Promise<ManagedContextResult> {
     // 1. Check if background summarization is needed (> 50 messages since last summary)
-    this.checkAndTriggerAutoSummary(chatJid);
+    await this.checkAndTriggerAutoSummary(chatJid);
 
     // 2. Build full system prompt + cross-chat user profile context
-    let systemPromptText = buildSystemPrompt(userJid, chatJid, isGroup, currentPrompt, senderName);
-    const profileSummary = userProfileManager.getProfileSummaryForPrompt(userJid);
+    let systemPromptText = await buildSystemPrompt(userJid, chatJid, isGroup, currentPrompt, senderName);
+    const profileSummary = await userProfileManager.getProfileSummaryForPrompt(userJid);
     if (profileSummary && !isGroup) {
       systemPromptText += `\n\n# User Profile Context (Cross-Chat Persistent Memory):\n${profileSummary}\n`;
     }
@@ -105,7 +105,7 @@ export class ContextManager {
     // 3. Summarized older history from conversation_summaries table
     let summaryMessage: { role: string; content: string } | null = null;
     try {
-      const summaryRow = db.prepare(`
+      const summaryRow = await db.prepare(`
         SELECT summary, to_timestamp FROM conversation_summaries
         WHERE chat_jid = ?
         ORDER BY to_timestamp DESC LIMIT 1
@@ -130,7 +130,7 @@ export class ContextManager {
 
     try {
       // Fetch up to 6 recent chat logs to maintain conversational context and continuity
-      const rawRows = db.prepare(`
+      const rawRows = await db.prepare(`
         SELECT sender_name, message_text, content_type, timestamp, sender_jid
         FROM chat_logs
         WHERE chat_jid = ?
@@ -202,8 +202,9 @@ export class ContextManager {
 
         // If it's a bot message, don't prefix with sender name, just output the message body
         // If it's a user message, resolve friendly name (e.g. Hardez instead of decorative unicode)
+        const senderContact = await contactService.getContact(row.sender_jid);
         const cleanSender =
-          contactService.getContact(row.sender_jid)?.custom_name ||
+          senderContact?.custom_name ||
           contactService.extractFriendlyFirstName(row.sender_name) ||
           row.sender_name ||
           'User';
@@ -262,9 +263,9 @@ export class ContextManager {
   /**
    * Checks if unsummarized messages exceed 50, and triggers `summarizeAndArchive` in background.
    */
-  private checkAndTriggerAutoSummary(chatJid: string): void {
+  private async checkAndTriggerAutoSummary(chatJid: string): Promise<void> {
     try {
-      const latestSummary = db.prepare(`
+      const latestSummary = await db.prepare(`
         SELECT to_timestamp FROM conversation_summaries
         WHERE chat_jid = ?
         ORDER BY to_timestamp DESC LIMIT 1
@@ -272,7 +273,7 @@ export class ContextManager {
 
       const lastTimestamp = latestSummary?.to_timestamp ?? 0;
 
-      const countRow = db.prepare(`
+      const countRow = await db.prepare(`
         SELECT COUNT(*) as count FROM chat_logs
         WHERE chat_jid = ? AND timestamp > ? AND COALESCE(is_noise, 0) = 0
           AND message_text IS NOT NULL AND TRIM(message_text) != ''
@@ -311,7 +312,7 @@ export class ContextManager {
 
     try {
       // 1. Determine boundary timestamp of last summary
-      const latestSummary = db.prepare(`
+      const latestSummary = await db.prepare(`
         SELECT to_timestamp, summary FROM conversation_summaries
         WHERE chat_jid = ?
         ORDER BY to_timestamp DESC LIMIT 1
@@ -320,7 +321,7 @@ export class ContextManager {
       const lastTimestamp = latestSummary?.to_timestamp ?? 0;
 
       // 2. Fetch all unsummarized messages in chronological order
-      const rows = db.prepare(`
+      const rows = await db.prepare(`
         SELECT id, sender_name, message_text, content_type, timestamp
         FROM chat_logs
         WHERE chat_jid = ? AND timestamp > ? AND COALESCE(is_noise, 0) = 0
@@ -405,7 +406,7 @@ export class ContextManager {
       }
 
       // 3. Store summary in conversation_summaries table
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO conversation_summaries (
           chat_jid, summary, messages_covered, from_timestamp, to_timestamp, created_at
         )

@@ -47,9 +47,9 @@ export function setupGroupWelcome(sock: WASocket): void {
             ) || false;
           } catch {}
 
-          upsertKnownGroup(groupJid, groupTitle, memberCount, isAdmin);
+          await upsertKnownGroup(groupJid, groupTitle, memberCount, isAdmin);
           await sock.sendMessage(groupJid, { text: BOT_GROUP_INTRO });
-          chatLogger.logOutboundMessage(groupJid, BOT_GROUP_INTRO);
+          await chatLogger.logOutboundMessage(groupJid, BOT_GROUP_INTRO);
         }
       }
 
@@ -65,9 +65,9 @@ export function setupGroupWelcome(sock: WASocket): void {
             const meta = await sock.groupMetadata(groupJid);
             groupTitle = meta.subject || groupTitle;
             memberCount = meta.participants?.length || 0;
-            upsertKnownGroup(groupJid, groupTitle, memberCount, true);
+            await upsertKnownGroup(groupJid, groupTitle, memberCount, true);
           } catch {
-            setGroupAdminStatus(groupJid, true);
+            await setGroupAdminStatus(groupJid, true);
           }
 
           const adminNotice =
@@ -87,7 +87,7 @@ export function setupGroupWelcome(sock: WASocket): void {
             'Tag me with *@Forgelabs* anytime you need an admin action handled sharp sharp! 🫡';
 
           await sock.sendMessage(groupJid, { text: adminNotice });
-          chatLogger.logOutboundMessage(groupJid, adminNotice);
+          await chatLogger.logOutboundMessage(groupJid, adminNotice);
         }
       }
 
@@ -96,7 +96,7 @@ export function setupGroupWelcome(sock: WASocket): void {
         const isBotDemoted = update.participants.some(isBotTargeted);
         if (isBotDemoted) {
           console.log(`[GroupWelcome] ℹ️ Bot DEMOTED from admin in group ${groupJid}.`);
-          setGroupAdminStatus(groupJid, false);
+          await setGroupAdminStatus(groupJid, false);
         }
       }
     } catch (err: any) {

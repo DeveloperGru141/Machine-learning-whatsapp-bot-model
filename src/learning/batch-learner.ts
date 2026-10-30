@@ -27,10 +27,10 @@ export class BatchLearner {
    * Does NOT make any LLM calls on single messages.
    * Triggers a single compressed learning call once 8 exchanges have accumulated.
    */
-  public recordExchange(chatJid: string, senderJid: string): void {
+  public async recordExchange(chatJid: string, senderJid: string): Promise<void> {
     try {
       const now = Date.now();
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO learning_checkpoints (chat_jid, last_analyzed_log_id, unprocessed_count, updated_at)
         VALUES (?, 0, 1, ?)
         ON CONFLICT(chat_jid) DO UPDATE SET
@@ -38,7 +38,7 @@ export class BatchLearner {
           updated_at = excluded.updated_at
       `).run(chatJid, now);
 
-      const row = db.prepare(`
+      const row = await db.prepare(`
         SELECT unprocessed_count FROM learning_checkpoints WHERE chat_jid = ?
       `).get(chatJid) as { unprocessed_count: number } | undefined;
 
@@ -66,7 +66,7 @@ export class BatchLearner {
     this.processingChats.add(chatJid);
 
     try {
-      const checkpoint = db.prepare(`
+      const checkpoint = await db.prepare(`
         SELECT last_analyzed_log_id, unprocessed_count FROM learning_checkpoints
         WHERE chat_jid = ?
       `).get(chatJid) as CheckpointRow | undefined;
@@ -74,7 +74,7 @@ export class BatchLearner {
       const lastId = checkpoint?.last_analyzed_log_id ?? 0;
 
       // Fetch the last 25 clean non-noise messages in chronological order since last analysis
-      const logs = db.prepare(`
+      const logs = await db.prepare(`
         SELECT id, sender_name, sender_jid, message_text, content_type, timestamp
         FROM chat_logs
         WHERE chat_jid = ? AND id > ? AND is_noise = 0
@@ -152,11 +152,11 @@ export class BatchLearner {
         `);
 
         for (const point of bulletPoints.slice(0, 3)) {
-          insertBehaviorStmt.run(chatJid, senderJid, point, now);
+          await insertBehaviorStmt.run(chatJid, senderJid, point, now);
           if (!isGroup) {
-            insertUserFactStmt.run(senderJid, point, now);
+            await insertUserFactStmt.run(senderJid, point, now);
           } else {
-            insertGroupFactStmt.run(chatJid, `Behavior: ${point.slice(0, 30)}`, point, now);
+            await insertGroupFactStmt.run(chatJid, `Behavior: ${point.slice(0, 30)}`, point, now);
           }
         }
 
@@ -167,10 +167,10 @@ export class BatchLearner {
       }
 
       // Periodically update the chat style profile (SQLite-only, zero LLM)
-      patternMiner.updateChatStyleProfile(chatJid);
+      await patternMiner.updateChatStyleProfile(chatJid);
 
       // Advance checkpoint and reset unprocessed count
-      db.prepare(`
+      await db.prepare(`
         UPDATE learning_checkpoints
         SET last_analyzed_log_id = ?, unprocessed_count = 0, updated_at = ?
         WHERE chat_jid = ?
@@ -188,9 +188,9 @@ export class BatchLearner {
   /**
    * Retrieves the latest learned behaviors for a chat to inject into the persona prompt.
    */
-  public getLearnedBehaviors(chatJid: string, limit = 5): string[] {
+  public async getLearnedBehaviors(chatJid: string, limit = 5): Promise<string[]> {
     try {
-      const rows = db.prepare(`
+      const rows = await db.prepare(`
         SELECT behavior_bullet FROM learned_behaviors
         WHERE chat_jid = ?
         ORDER BY id DESC LIMIT ?

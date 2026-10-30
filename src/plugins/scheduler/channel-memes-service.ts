@@ -121,18 +121,18 @@ export const SEED_CHANNEL_MEMES: Array<{
 /**
  * Pre-seeds initial meme posts from the Memes channel catalog.
  */
-export function seedChannelMemesIfEmpty(): void {
+export async function seedChannelMemesIfEmpty(): Promise<void> {
   try {
     // 1. Clean up legacy placeholder references in DB
     try {
-      db.prepare(`UPDATE channel_memes SET image_path = NULL WHERE image_path LIKE '%meme_default.jpg%'`).run();
+      await db.prepare(`UPDATE channel_memes SET image_path = NULL WHERE image_path LIKE '%meme_default.jpg%'`).run();
     } catch {}
 
-    const countRow = db.prepare('SELECT COUNT(*) as count FROM channel_memes').get() as { count: number };
+    const countRow = await db.prepare('SELECT COUNT(*) as count FROM channel_memes').get() as { count: number };
     if (!countRow || countRow.count === 0) {
       console.log(`[ChannelMemes] 😂 Seeding ${SEED_CHANNEL_MEMES.length} initial memes from ${WHATSAPP_MEME_CHANNEL_NAME}...`);
       for (const item of SEED_CHANNEL_MEMES) {
-        saveChannelMeme(item.caption, 'text', item.media_url, null, WHATSAPP_MEME_CHANNEL_INVITE_CODE);
+        await saveChannelMeme(item.caption, 'text', item.media_url, null, WHATSAPP_MEME_CHANNEL_INVITE_CODE);
       }
     }
   } catch (err: any) {
@@ -143,13 +143,13 @@ export function seedChannelMemesIfEmpty(): void {
 /**
  * Checks whether the group meme cooldown has elapsed.
  */
-export function getMemeCooldownStatus(): {
+export async function getMemeCooldownStatus(): Promise<{
   canPost: boolean;
   remainingMs: number;
   remainingMinutes: number;
   lastPostedAt: number;
-} {
-  const lastPostedAt = getLatestMemePostedTimestamp();
+}> {
+  const lastPostedAt = await getLatestMemePostedTimestamp();
   const elapsed = Date.now() - lastPostedAt;
   const remainingMs = Math.max(0, MEME_COOLDOWN_MS - elapsed);
   const remainingMinutes = Math.ceil(remainingMs / (60 * 1000));
@@ -164,14 +164,14 @@ export function getMemeCooldownStatus(): {
 }
 
 /** Returns status-only meme limits based on posts actually logged to WhatsApp Status. */
-export function getStatusMemePostingStatus(now = Date.now()): {
+export async function getStatusMemePostingStatus(now = Date.now()): Promise<{
   canPost: boolean;
   postedToday: number;
   dailyLimit: number;
   lastPostedAt: number;
   remainingCooldownMs: number;
   remainingMinutes: number;
-} {
+}> {
   const todayStart = getStartOfTodayWat();
   const statusMemeFilter = `
     chat_jid = 'status@broadcast'
@@ -180,13 +180,13 @@ export function getStatusMemePostingStatus(now = Date.now()): {
   `;
 
   try {
-    const todayRow = db.prepare(
+    const todayRow = await db.prepare(
       `SELECT COUNT(*) AS posted_today FROM chat_logs WHERE ${statusMemeFilter} AND timestamp >= ? AND timestamp <= ?`
     ).get(todayStart, now) as { posted_today: number } | undefined;
-    const latestRow = db.prepare(
+    const latestRow = await db.prepare(
       `SELECT MAX(timestamp) AS last_posted_at FROM chat_logs WHERE ${statusMemeFilter} AND timestamp <= ?`
     ).get(now) as { last_posted_at: number | null } | undefined;
-    const reservations = db.prepare(`
+    const reservations = await db.prepare(`
       SELECT COUNT(*) AS reserved_today, MAX(reserved_at) AS last_reserved_at
       FROM status_meme_reservations
       WHERE reserved_at >= ? AND reserved_at <= ? AND reserved_at >= ?
@@ -217,27 +217,23 @@ export function getStatusMemePostingStatus(now = Date.now()): {
 }
 
 /** Reserve a daily status slot before async media preparation or send operations. */
-export function reserveStatusMemePost(now = Date.now()): string | null {
+export async function reserveStatusMemePost(now = Date.now()): Promise<string | null> {
   const reservationId = `status-meme-${now}-${Math.random().toString(36).slice(2, 10)}`;
   try {
-    db.exec('BEGIN IMMEDIATE');
-    db.prepare('DELETE FROM status_meme_reservations WHERE reserved_at < ?').run(now - 30 * 60 * 1000);
-    if (!getStatusMemePostingStatus(now).canPost) {
-      db.exec('ROLLBACK');
-      return null;
-    }
-    db.prepare('INSERT INTO status_meme_reservations (reservation_id, reserved_at) VALUES (?, ?)').run(reservationId, now);
-    db.exec('COMMIT');
-    return reservationId;
+    return await db.transaction(async () => {
+      await db.prepare('DELETE FROM status_meme_reservations WHERE reserved_at < ?').run(now - 30 * 60 * 1000);
+      if (!(await getStatusMemePostingStatus(now)).canPost) return null;
+      await db.prepare('INSERT INTO status_meme_reservations (reservation_id, reserved_at) VALUES (?, ?)').run(reservationId, now);
+      return reservationId;
+    });
   } catch (err) {
-    try { db.exec('ROLLBACK'); } catch {}
     console.warn('[ChannelMemes] Could not reserve status meme slot:', err);
     return null;
   }
 }
 
-export function releaseStatusMemePost(reservationId: string): void {
-  try { db.prepare('DELETE FROM status_meme_reservations WHERE reservation_id = ?').run(reservationId); } catch {}
+export async function releaseStatusMemePost(reservationId: string): Promise<void> {
+  try { await db.prepare('DELETE FROM status_meme_reservations WHERE reservation_id = ?').run(reservationId); } catch {}
 }
 
 /**
@@ -246,7 +242,7 @@ export function releaseStatusMemePost(reservationId: string): void {
 export async function scrapeWhatsAppChannelMemes(
   socket: WASocket
 ): Promise<{ channelJid: string | null; newMemesSaved: number }> {
-  seedChannelMemesIfEmpty();
+  await seedChannelMemesIfEmpty();
   let newMemesSaved = 0;
   let channelJid: string | null = null;
 
@@ -272,7 +268,7 @@ export async function scrapeWhatsAppChannelMemes(
           let imageAttempts = 0;
           for (const msg of messages) {
             if (msg.id) {
-              const exists = db.prepare(
+              const exists = await db.prepare(
                 'SELECT 1 AS found FROM channel_memes WHERE channel_source = ? AND channel_message_id = ? LIMIT 1'
               ).get(WHATSAPP_MEME_CHANNEL_INVITE_CODE, msg.id) as { found: number } | undefined;
               if (exists) continue;
@@ -293,7 +289,7 @@ export async function scrapeWhatsAppChannelMemes(
 
             const caption = msg.text.trim() || (imagePath ? '😂 Meme from the Memes WhatsApp channel' : '');
             if (caption.length < 5) continue;
-            const saved = saveChannelMeme(
+            const saved = await saveChannelMeme(
               caption,
               imagePath ? 'image' : 'text',
               null,
@@ -335,12 +331,18 @@ export async function postChannelMemeWithCooldown(
   socket: WASocket,
   force = false,
   targetChat = 'status@broadcast'
-): Promise<{ success: boolean; message: string; meme?: ChannelMeme; cooldown?: any; statusPolicy?: ReturnType<typeof getStatusMemePostingStatus> }> {
-  seedChannelMemesIfEmpty();
+): Promise<{
+  success: boolean;
+  message: string;
+  meme?: ChannelMeme;
+  cooldown?: Awaited<ReturnType<typeof getMemeCooldownStatus>>;
+  statusPolicy?: Awaited<ReturnType<typeof getStatusMemePostingStatus>>;
+}> {
+  await seedChannelMemesIfEmpty();
 
   const isStatus = targetChat === 'status@broadcast';
-  const cooldown = getMemeCooldownStatus();
-  const statusPolicy = isStatus ? getStatusMemePostingStatus() : undefined;
+  const cooldown = await getMemeCooldownStatus();
+  const statusPolicy = isStatus ? await getStatusMemePostingStatus() : undefined;
   if (isStatus && statusPolicy && !statusPolicy.canPost) {
     const reason = statusPolicy.postedToday >= statusPolicy.dailyLimit
       ? `Daily status meme limit reached (${statusPolicy.postedToday}/${statusPolicy.dailyLimit}).`
@@ -361,7 +363,7 @@ export async function postChannelMemeWithCooldown(
     } catch {}
   }
 
-  const meme = getFreshestMemeForPosting();
+  const meme = await getFreshestMemeForPosting();
   if (!meme) {
     return { success: false, message: 'No memes found in the channel meme bank.', cooldown };
   }
@@ -373,11 +375,11 @@ export async function postChannelMemeWithCooldown(
     const imagePath = await getOrGenerateMemeMedia(meme.id, meme.caption, meme.image_path);
     const hasImage = Boolean(imagePath && fs.existsSync(imagePath));
     if (isStatus) {
-      statusReservation = reserveStatusMemePost();
+      statusReservation = await reserveStatusMemePost();
       if (!statusReservation) {
-        return { success: false, message: 'Status meme limit or spacing became active before sending.', cooldown, statusPolicy: getStatusMemePostingStatus() };
+        return { success: false, message: 'Status meme limit or spacing became active before sending.', cooldown, statusPolicy: await getStatusMemePostingStatus() };
       }
-      const statusJidList = getStatusRecipientJids(socket);
+      const statusJidList = await getStatusRecipientJids(socket);
       if (hasImage) {
         await safeSendStatus(
           socket,
@@ -393,8 +395,8 @@ export async function postChannelMemeWithCooldown(
           statusJidList
         );
       }
-      chatLogger.logOutboundMessage('status@broadcast', outboundText);
-      releaseStatusMemePost(statusReservation);
+      await chatLogger.logOutboundMessage('status@broadcast', outboundText);
+      await releaseStatusMemePost(statusReservation);
       statusReservation = null;
       console.log(`[ChannelMemes] 📸 Posted meme #${meme.id} (${hasImage ? 'IMAGE' : 'TEXT'}) to WhatsApp Status (broadcast to ${statusJidList.length} contacts).`);
     } else {
@@ -403,12 +405,12 @@ export async function postChannelMemeWithCooldown(
       } else {
         await socket.sendMessage(targetChat, { text: outboundText });
       }
-      chatLogger.logOutboundMessage(targetChat, outboundText);
+      await chatLogger.logOutboundMessage(targetChat, outboundText);
       console.log(`[ChannelMemes] 💬 Posted meme #${meme.id} (${hasImage ? 'IMAGE' : 'TEXT'}) to chat ${targetChat}.`);
     }
 
-    markMemePosted(meme.id);
-    logAutonomousAction('channel_meme_post', targetChat, 'WhatsApp Status/Group', `Posted meme #${meme.id} (2hr cooldown set)`);
+    await markMemePosted(meme.id);
+    await logAutonomousAction('channel_meme_post', targetChat, 'WhatsApp Status/Group', `Posted meme #${meme.id} (2hr cooldown set)`);
 
     return {
       success: true,
@@ -416,11 +418,11 @@ export async function postChannelMemeWithCooldown(
         ? `Posted meme #${meme.id} to WhatsApp Status; daily and spacing limits remain active.`
         : `Posted meme #${meme.id} to ${targetChat}; the two-hour group cooldown is active until ${new Date(Date.now() + MEME_COOLDOWN_MS).toLocaleTimeString()}.`,
       meme,
-      cooldown: getMemeCooldownStatus(),
-      statusPolicy: isStatus ? getStatusMemePostingStatus() : undefined,
+      cooldown: await getMemeCooldownStatus(),
+      statusPolicy: isStatus ? await getStatusMemePostingStatus() : undefined,
     };
   } catch (err: any) {
-    if (statusReservation) releaseStatusMemePost(statusReservation);
+    if (statusReservation) await releaseStatusMemePost(statusReservation);
     console.error(`[ChannelMemes] Failed to post meme:`, err.message);
     return { success: false, message: `Failed to post meme: ${err.message}`, cooldown };
   }

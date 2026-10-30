@@ -62,7 +62,7 @@ export const exportChatTool: BotTool = {
 
     try {
       // 1. Query the recent chat_logs for the current chatJid ordered chronologically by id
-      const rows = db
+      const rows = await db
         .prepare(`
           SELECT id, chat_jid, sender_jid, sender_name, is_group, content_type, message_text, sticker_filename, timestamp
           FROM (

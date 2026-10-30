@@ -167,14 +167,14 @@ export class PluginRegistry {
    * Passing 25+ tool definitions to LLMs causes 30s+ grammar evaluation latency.
    * Passing 0-5 tools reduces inference time to 400ms-900ms while ensuring tools are never missed.
    */
-  public getRelevantToolDefinitions(userMessage: string, isGroup?: boolean, chatJid?: string): any[] {
+  public async getRelevantToolDefinitions(userMessage: string, isGroup?: boolean, chatJid?: string): Promise<any[]> {
     const text = (userMessage || '').toLowerCase();
     const selected = new Set<string>();
 
     let recentChatContext = '';
     if (chatJid) {
       try {
-        const recentRows = db.prepare(`
+        const recentRows = await db.prepare(`
           SELECT message_text FROM chat_logs
           WHERE chat_jid = ?
           ORDER BY id DESC LIMIT 5

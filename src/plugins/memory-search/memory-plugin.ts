@@ -3,9 +3,9 @@ import { memoryService } from '../../memory/memory-service.js';
 import { db, findKnownGroup } from '../../memory/db.js';
 import { vectorStore } from '../../learning/vector-store.js';
 
-function getMemoryChatScope(senderJid: string, currentChatJid: string, isGroup: boolean, includeOtherChats: boolean): string[] {
+async function getMemoryChatScope(senderJid: string, currentChatJid: string, isGroup: boolean, includeOtherChats: boolean): Promise<string[]> {
   if (isGroup || !includeOtherChats) return [currentChatJid];
-  return memoryService.getChatsForParticipant(senderJid, currentChatJid);
+  return await memoryService.getChatsForParticipant(senderJid, currentChatJid);
 }
 
 export class MemoryPlugin implements IPlugin {
@@ -32,8 +32,8 @@ export class MemoryPlugin implements IPlugin {
         required: ['query'],
       },
       execute: async (args: { query: string; all_chats?: boolean }, ctx: ExecutionContext): Promise<ToolResult> => {
-        const chatJids = getMemoryChatScope(ctx.senderJid, ctx.chatJid, ctx.isGroup, Boolean(args.all_chats));
-        const matches = memoryService.searchChatLogs(args.query, chatJids);
+        const chatJids = await getMemoryChatScope(ctx.senderJid, ctx.chatJid, ctx.isGroup, Boolean(args.all_chats));
+        const matches = await memoryService.searchChatLogs(args.query, chatJids);
         if (matches.length === 0) {
           return {
             success: true,
@@ -80,9 +80,9 @@ export class MemoryPlugin implements IPlugin {
         }
 
         if (args.isForGroup && ctx.isGroup) {
-          memoryService.saveGroupFact(ctx.chatJid, args.fact.trim(), args.fact.trim());
+          await memoryService.saveGroupFact(ctx.chatJid, args.fact.trim(), args.fact.trim());
         } else {
-          memoryService.saveUserFact(ctx.senderJid, args.fact.trim(), args.category || 'general');
+          await memoryService.saveUserFact(ctx.senderJid, args.fact.trim(), args.category || 'general');
         }
 
         return {
@@ -107,11 +107,11 @@ export class MemoryPlugin implements IPlugin {
       execute: async (args: { limit?: number }, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
           const limit = Math.min(Math.max(Number(args.limit) || 20, 5), 50);
-          const chatJids = getMemoryChatScope(_ctx.senderJid, _ctx.chatJid, _ctx.isGroup, true);
+          const chatJids = await getMemoryChatScope(_ctx.senderJid, _ctx.chatJid, _ctx.isGroup, true);
           const chatPlaceholders = chatJids.map(() => '?').join(', ');
 
           // Only include chats where the requester has participated.
-          const logs = db.prepare(`
+          const logs = await db.prepare(`
             SELECT chat_jid, sender_name, sender_jid, message_text, is_group, timestamp
             FROM chat_logs
             WHERE chat_jid IN (${chatPlaceholders})
@@ -131,7 +131,7 @@ export class MemoryPlugin implements IPlugin {
             is_group: number;
             timestamp: number;
           }>;
-          const recentActions = db.prepare(`
+          const recentActions = await db.prepare(`
             SELECT id, action_type, target_chat, target_name, summary, timestamp
             FROM autonomous_actions
             WHERE target_chat IN (${chatPlaceholders})
@@ -156,7 +156,7 @@ export class MemoryPlugin implements IPlugin {
             const time = l.timestamp;
             const text = (l.message_text || '').replace(/\n+/g, ' ').slice(0, 80);
             if (l.is_group) {
-              const grp = findKnownGroup(l.chat_jid);
+              const grp = await findKnownGroup(l.chat_jid);
               const subject = grp?.subject || 'WhatsApp Group';
               const existing = groupsActive.get(l.chat_jid) || { count: 0, subject, lastText: text, lastTime: time };
               existing.count++;
@@ -224,7 +224,7 @@ export class MemoryPlugin implements IPlugin {
 
           if (args.sender && args.sender.trim()) {
             const cleanSender = args.sender.trim().toLowerCase();
-            rows = db.prepare(`
+            rows = await db.prepare(`
               SELECT sender_name, sender_jid, message_text, timestamp
               FROM chat_logs
               WHERE chat_jid = ? AND message_text IS NOT NULL
@@ -238,7 +238,7 @@ export class MemoryPlugin implements IPlugin {
               ORDER BY id DESC LIMIT ?
             `).all(ctx.chatJid, `%${cleanSender}%`, `%${cleanSender}%`, limit) as any;
           } else {
-            rows = db.prepare(`
+            rows = await db.prepare(`
               SELECT sender_name, sender_jid, message_text, timestamp
               FROM chat_logs
               WHERE chat_jid = ? AND message_text IS NOT NULL
@@ -290,8 +290,8 @@ export class MemoryPlugin implements IPlugin {
       },
       execute: async (_args: {}, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
-          const chatJids = getMemoryChatScope(_ctx.senderJid, _ctx.chatJid, _ctx.isGroup, true);
-          const recent = db.prepare(`
+          const chatJids = await getMemoryChatScope(_ctx.senderJid, _ctx.chatJid, _ctx.isGroup, true);
+          const recent = await db.prepare(`
             SELECT id, action_type, target_chat, target_name, summary, timestamp
             FROM autonomous_actions
             WHERE target_chat IN (${chatJids.map(() => '?').join(', ')})
@@ -352,10 +352,10 @@ export class MemoryPlugin implements IPlugin {
           const groupJids = ctx.isGroup
             ? [ctx.chatJid]
             : args.all_groups
-              ? memoryService.getChatsForParticipant(ctx.senderJid, ctx.chatJid).filter((jid) => jid.endsWith('@g.us'))
+              ? (await memoryService.getChatsForParticipant(ctx.senderJid, ctx.chatJid)).filter((jid) => jid.endsWith('@g.us'))
               : [];
           const targetChat: string | string[] = groupJids.length === 1 ? groupJids[0] : groupJids;
-          const results = vectorStore.searchBanter(args.query, targetChat, 4);
+          const results = await vectorStore.searchBanter(args.query, targetChat, 4);
 
           if (results.length === 0) {
             return {
