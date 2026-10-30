@@ -12,6 +12,7 @@ sessions_*/
 # Local Data & SQLite DB
 data/*.sqlite*
 data/*.pid
+data/channel_media/
 data/temp/
 data/approved_training.jsonl
 data/curated_seed.jsonl

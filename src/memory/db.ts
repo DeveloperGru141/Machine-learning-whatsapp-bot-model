@@ -754,7 +754,8 @@ export function getFreshestQuoteForNiche(niche: QuoteNiche): ChannelQuote | null
     let quote = db.prepare(`
       SELECT * FROM channel_quotes
       WHERE niche = ?
-      ORDER BY used_count ASC, last_used_at ASC, RANDOM()
+      ORDER BY CASE WHEN instr(image_path, 'newsletter_') > 0 THEN 0 ELSE 1 END,
+               used_count ASC, last_used_at ASC, RANDOM()
       LIMIT 1
     `).get(niche) as unknown as ChannelQuote | undefined;
 
@@ -870,7 +871,8 @@ export function getFreshestMemeForPosting(): ChannelMeme | null {
   try {
     const meme = db.prepare(`
       SELECT * FROM channel_memes
-      ORDER BY used_count ASC, last_posted_at ASC, RANDOM()
+      ORDER BY CASE WHEN media_type = 'image' AND instr(image_path, 'newsletter_') > 0 THEN 0 ELSE 1 END,
+               used_count ASC, last_posted_at ASC, RANDOM()
       LIMIT 1
     `).get() as unknown as ChannelMeme | undefined;
 

@@ -15,6 +15,12 @@ import { chatLogger } from '../../memory/chat-logger.js';
 import { getOrGenerateQuoteMedia } from './media-card-generator.js';
 import { getStartOfTodayWat } from './scheduler-db.js';
 import { OutboundSender } from '../../core/sender.js';
+import { analyzeImageBuffer } from '../../core/vision.js';
+import {
+  downloadNewsletterImage,
+  extractNewsletterMessages,
+  persistNewsletterImage,
+} from './newsletter-media.js';
 
 export const WHATSAPP_CHANNEL_INVITE_CODE = '0029Vb7S3VAFCCoXEIdW5n2k';
 export const WHATSAPP_CHANNEL_URL = 'https://whatsapp.com/channel/0029Vb7S3VAFCCoXEIdW5n2k';
@@ -297,20 +303,50 @@ export async function scrapeWhatsAppChannelQuotes(
         );
         const queryRes: any = await Promise.race([fetchPromise, timeoutPromise]);
         if (queryRes) {
-          // Parse BinaryNode children or message list
-          const messages = extractMessagesFromNewsletterNode(queryRes);
+          const messages = extractNewsletterMessages(queryRes, channelJid!);
+          let imageAttempts = 0;
+          let ocrAttempts = 0;
           for (const msg of messages) {
-            const parsed = parseQuoteFromText(msg.text);
-            if (parsed) {
-              const saved = saveChannelQuote(
-                parsed.quote,
-                parsed.author,
-                parsed.niche,
-                WHATSAPP_CHANNEL_INVITE_CODE,
+            const existing = msg.id
+              ? db.prepare(
+                  'SELECT image_path FROM channel_quotes WHERE channel_source = ? AND channel_message_id = ? LIMIT 1'
+                ).get(WHATSAPP_CHANNEL_INVITE_CODE, msg.id) as { image_path: string | null } | undefined
+              : undefined;
+            if (existing?.image_path && fs.existsSync(existing.image_path)) continue;
+
+            let parsed = parseQuoteFromText(msg.text);
+            let imageBuffer: Buffer | null = null;
+            let imagePath: string | null = null;
+            if (msg.hasImage && imageAttempts < 8) {
+              imageAttempts++;
+              imageBuffer = await downloadNewsletterImage(msg.message);
+              if (imageBuffer && (!parsed || msg.text.trim().length < 15) && ocrAttempts < 2) {
+                ocrAttempts++;
+                const transcription = await analyzeImageBuffer(
+                  imageBuffer,
+                  'Transcribe only the motivational quote and author visible in this image. Return only the visible words, with no explanation.'
+                );
+                parsed = parseQuoteFromText(transcription || '');
+              }
+            }
+
+            if (!parsed) continue;
+            if (imageBuffer) {
+              imagePath = await persistNewsletterImage(
+                imageBuffer,
+                channelJid!,
                 msg.id
               );
-              if (saved) newQuotesSaved++;
             }
+            const saved = saveChannelQuote(
+              parsed.quote,
+              parsed.author,
+              parsed.niche,
+              WHATSAPP_CHANNEL_INVITE_CODE,
+              msg.id,
+              imagePath
+            );
+            if (saved) newQuotesSaved++;
           }
         }
       } catch (fetchErr: any) {
@@ -328,35 +364,6 @@ export async function scrapeWhatsAppChannelQuotes(
 /**
  * Helper to recursively extract text contents from Baileys BinaryNodes.
  */
-function extractMessagesFromNewsletterNode(node: any): Array<{ id?: string; text: string }> {
-  const results: Array<{ id?: string; text: string }> = [];
-  if (!node) return results;
-
-  const inspect = (item: any) => {
-    if (!item) return;
-    if (typeof item === 'string' && item.length > 20) {
-      results.push({ text: item });
-      return;
-    }
-    if (item.tag === 'message' || item.tag === 'message_updates') {
-      const msgId = item.attrs?.id || item.attrs?.server_id;
-      if (item.content) {
-        if (Array.isArray(item.content)) {
-          for (const c of item.content) inspect(c);
-        } else if (typeof item.content === 'string') {
-          results.push({ id: msgId, text: item.content });
-        }
-      }
-    }
-    if (Array.isArray(item.content)) {
-      for (const child of item.content) inspect(child);
-    }
-  };
-
-  inspect(node);
-  return results;
-}
-
 /**
  * Formats a high-impact, authentic morning greeting and niche-tailored motivational quote for a group.
  */

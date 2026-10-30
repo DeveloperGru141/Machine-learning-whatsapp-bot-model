@@ -2,6 +2,9 @@ import sharp from 'sharp';
 import fs from 'fs';
 import path from 'path';
 import { db } from '../../memory/db.js';
+import { config } from '../../config/env.js';
+
+const CHANNEL_MEDIA_DIR = path.join(path.dirname(config.paths.database), 'channel_media');
 
 export function escapeXml(str: string): string {
   if (!str) return '';
@@ -284,7 +287,8 @@ export async function getOrGenerateMemeMedia(
   }
 
   const filename = `meme_${memeId}.jpg`;
-  const targetPath = path.resolve('assets/channel_media', filename);
+  fs.mkdirSync(CHANNEL_MEDIA_DIR, { recursive: true });
+  const targetPath = path.join(CHANNEL_MEDIA_DIR, filename);
   await renderMemeCard(caption, targetPath);
 
   // Update DB if this is a known numeric meme ID
@@ -318,7 +322,8 @@ export async function getOrGenerateQuoteMedia(
   }
 
   const filename = `quote_${quoteId}.jpg`;
-  const targetPath = path.resolve('assets/channel_media', filename);
+  fs.mkdirSync(CHANNEL_MEDIA_DIR, { recursive: true });
+  const targetPath = path.join(CHANNEL_MEDIA_DIR, filename);
   await renderQuoteCard(quote, author, niche, targetPath);
 
   if (typeof quoteId === 'number' || /^\d+$/.test(String(quoteId))) {

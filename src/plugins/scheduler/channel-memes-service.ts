@@ -13,6 +13,11 @@ import { chatLogger } from '../../memory/chat-logger.js';
 import { getStatusRecipientJids, safeSendStatus } from './scheduler-plugin.js';
 import { getStartOfTodayWat } from './scheduler-db.js';
 import { getOrGenerateMemeMedia } from './media-card-generator.js';
+import {
+  downloadNewsletterImage,
+  extractNewsletterMessages,
+  persistNewsletterImage,
+} from './newsletter-media.js';
 
 export const WHATSAPP_MEME_CHANNEL_INVITE_CODE = '0029Vb6oS4LJkK7AvtORyH46';
 export const WHATSAPP_MEME_CHANNEL_URL = 'https://whatsapp.com/channel/0029Vb6oS4LJkK7AvtORyH46';
@@ -263,19 +268,40 @@ export async function scrapeWhatsAppChannelMemes(
         );
         const queryRes: any = await Promise.race([fetchPromise, timeoutPromise]);
         if (queryRes) {
-          const messages = extractMessagesFromNode(queryRes);
+          const messages = extractNewsletterMessages(queryRes, channelJid!);
+          let imageAttempts = 0;
           for (const msg of messages) {
-            if (msg.text && msg.text.trim().length > 10) {
-              const saved = saveChannelMeme(
-                msg.text.trim(),
-                msg.mediaUrl ? 'image' : 'text',
-                msg.mediaUrl,
-                null,
-                WHATSAPP_MEME_CHANNEL_INVITE_CODE,
-                msg.id
-              );
-              if (saved) newMemesSaved++;
+            if (msg.id) {
+              const exists = db.prepare(
+                'SELECT 1 AS found FROM channel_memes WHERE channel_source = ? AND channel_message_id = ? LIMIT 1'
+              ).get(WHATSAPP_MEME_CHANNEL_INVITE_CODE, msg.id) as { found: number } | undefined;
+              if (exists) continue;
             }
+
+            let imagePath: string | null = null;
+            if (msg.hasImage && imageAttempts < 8) {
+              imageAttempts++;
+              const imageBuffer = await downloadNewsletterImage(msg.message);
+              if (imageBuffer) {
+                imagePath = await persistNewsletterImage(
+                  imageBuffer,
+                  channelJid!,
+                  msg.id
+                );
+              }
+            }
+
+            const caption = msg.text.trim() || (imagePath ? '😂 Meme from the Memes WhatsApp channel' : '');
+            if (caption.length < 5) continue;
+            const saved = saveChannelMeme(
+              caption,
+              imagePath ? 'image' : 'text',
+              null,
+              imagePath,
+              WHATSAPP_MEME_CHANNEL_INVITE_CODE,
+              msg.id
+            );
+            if (saved) newMemesSaved++;
           }
         }
       } catch (err: any) {
@@ -288,35 +314,6 @@ export async function scrapeWhatsAppChannelMemes(
 
   console.log(`[ChannelMemes] 📦 Meme scrape complete. New memes added: ${newMemesSaved}.`);
   return { channelJid, newMemesSaved };
-}
-
-function extractMessagesFromNode(node: any): Array<{ id?: string; text: string; mediaUrl?: string }> {
-  const results: Array<{ id?: string; text: string; mediaUrl?: string }> = [];
-  if (!node) return results;
-
-  const inspect = (item: any) => {
-    if (!item) return;
-    if (typeof item === 'string' && item.length > 15) {
-      results.push({ text: item });
-      return;
-    }
-    if (item.tag === 'message' || item.tag === 'message_updates') {
-      const msgId = item.attrs?.id || item.attrs?.server_id;
-      if (item.content) {
-        if (Array.isArray(item.content)) {
-          for (const c of item.content) inspect(c);
-        } else if (typeof item.content === 'string') {
-          results.push({ id: msgId, text: item.content });
-        }
-      }
-    }
-    if (Array.isArray(item.content)) {
-      for (const child of item.content) inspect(child);
-    }
-  };
-
-  inspect(node);
-  return results;
 }
 
 /**

@@ -379,45 +379,20 @@ export async function scrapeLiveTechNewsStatus(): Promise<string> {
     clearTimeout(timeout);
 
     if (res.ok) {
-      const articles = (await res.json()) as Array<{ title?: string; description?: string; tag_list?: string[] }>;
+      const articles = (await res.json()) as Array<{ title?: string }>;
       if (Array.isArray(articles) && articles.length > 0) {
-        const topThree = articles.slice(0, 3);
-        const rawDigest = topThree
-          .map((a, idx) => `${idx + 1}. ${a.title} (${(a.description || '').slice(0, 90)})`)
+        const headlines = articles.slice(0, 3)
+          .map((article) => `• *${String(article.title || 'Technology update').replace(/[\r\n]+/g, ' ').trim().slice(0, 125)}*`)
           .join('\n');
-
-        try {
-          const llmRes = await llmClient.chatCompletion({
-            messages: [
-              {
-                role: 'system',
-                content:
-                  'You are Forgelabs assistant posting a crisp morning Tech & AI update on your WhatsApp Status. ' +
-                  'Turn the 3 live headlines into 3 short, punchy bullet points (max 500 chars total). ' +
-                  'Start with 🚀 *MORNING TECH & AI PULSE* and use max 1 emoji at the end.',
-              },
-              { role: 'user', content: `Live web headlines:\n${rawDigest}` },
-            ],
-            max_tokens: 220,
-            temperature: 0.6,
-          });
-          const text = llmRes.choices[0]?.message?.content?.trim();
-          if (text && text.length > 30) {
-            return text;
-          }
-        } catch {}
-
-        const bullets = topThree.map((a) => `• *${a.title}*`).join('\n');
-        return `🚀 *MORNING TECH & AI PULSE*\n\n${bullets}\n\nKeep building bold today.`;
+        return `🚀 *MORNING TECH & AI PULSE*\n\n${headlines}\n\nKeep building bold today.`;
       }
     }
   } catch (err: any) {
     console.warn(`[StatusPoster] Live tech news scrape fallback (${err.message})`);
   }
 
-  return generateMorningContent('tech_news');
+  return '🚀 *MORNING TECH & AI PULSE*\n\nNo verified headlines are available right now.\n\nHave a focused day of building.';
 }
-
 /**
  * Collects verified contact JIDs so Baileys can broadcast WhatsApp Status updates safely without timing out.
  * Strictly caps to maximum 25 recipients to prevent Baileys USync query timeouts.
@@ -463,7 +438,9 @@ export async function safeSendStatus(
   extraOptions: any = {},
   statusJidList: string[] = []
 ): Promise<void> {
+  assertNoStatusReasoning(content);
   const safeContent = sanitizeStatusContent(content);
+  assertNoStatusReasoning(safeContent);
   if (!hasVisibleStatusContent(safeContent)) {
     throw new Error('Status content was empty after removing internal reasoning and tool markup.');
   }
@@ -484,6 +461,28 @@ export async function safeSendStatus(
       ...extraOptions,
       statusJidList: ['2348108574293@s.whatsapp.net'],
     } as any);
+  }
+}
+
+const STATUS_REASONING_PATTERNS = [
+  /\b(?:chain of thought|internal reasoning|private reasoning|my thought process|step[- ]by[- ]step reasoning)\b/i,
+  /(?:^|\n)\s*(?:analysis|reasoning|thought process|chain of thought)\s*[:\-]/im,
+  /\b(?:let me think through (?:this|that)|i need to reason through this|thinking step by step)\b/i,
+  /<\s*\/?\s*(?:think|analysis|reasoning)\b/i,
+];
+
+function assertNoStatusReasoning(value: any): void {
+  const containsReasoning = (entry: any): boolean => {
+    if (typeof entry === 'string') return STATUS_REASONING_PATTERNS.some((pattern) => pattern.test(entry));
+    if (!entry || typeof entry !== 'object' || Buffer.isBuffer(entry) || entry instanceof Uint8Array) return false;
+    if (Array.isArray(entry)) return entry.some(containsReasoning);
+    return Object.entries(entry).some(([key, child]) =>
+      /^(?:reasoning_content|chain_of_thought|thought_process|analysis)$/i.test(key) || containsReasoning(child)
+    );
+  };
+
+  if (containsReasoning(value)) {
+    throw new Error('Status send blocked because content contains internal reasoning markers.');
   }
 }
 
@@ -562,7 +561,7 @@ export async function postMorningStatusBundle(
           console.warn('[StatusPoster] Notice: status_motion_design.mp4 not found in candidate paths:', candidatePaths);
         }
       } else if (cat === 'bible_verse') {
-        const text = await generateMorningContent('bible_verses');
+        const text = FALLBACK_BIBLE_VERSES[Math.floor(Math.random() * FALLBACK_BIBLE_VERSES.length)];
         await safeSendStatus(
           socket,
           { text },
@@ -572,10 +571,11 @@ export async function postMorningStatusBundle(
         chatLogger.logOutboundMessage('status@broadcast', `[Status: Bible Verse] ${text}`);
         postedTypes.push('bible_verse');
       } else if (cat === 'motivational_quote') {
+        try { await scrapeWhatsAppChannelQuotes(socket); } catch {}
         const quote = getFreshestQuoteForNiche('general_growth');
         const text = quote
           ? `🌅 *MORNING MOTIVATION*\n\n> "${quote.quote_text}"\n— *${quote.author || 'Quotes📖'}*`
-          : await generateMorningContent('motivational_quotes');
+          : FALLBACK_MOTIVATIONAL[Math.floor(Math.random() * FALLBACK_MOTIVATIONAL.length)];
         let imagePath: string | null = null;
         if (quote) {
           try {
@@ -620,44 +620,55 @@ export async function postMorningStatusBundle(
             console.log('[StatusPoster] Skipping meme because another send reserved the remaining daily slot.');
           } else {
             try {
-          const meme = getFreshestMemeForPosting();
-          let imagePath: string | null = null;
-          if (meme) {
-            try {
-              imagePath = await getOrGenerateMemeMedia(meme.id, meme.caption, meme.image_path);
-            } catch {}
-          }
-          const hasImage = Boolean(imagePath && fs.existsSync(imagePath));
-          let postedCaption = meme?.caption || '';
-          if (hasImage && meme) {
-            await safeSendStatus(
-              socket,
-              { image: fs.readFileSync(imagePath!), caption: formatMemeBroadcast(meme) },
-              {},
-              statusJidList
-            );
-          } else {
-            const webMeme = await scrapeWebMeme();
-            postedCaption = meme?.caption || webMeme.caption;
-            if (webMeme.imageBuffer) {
-              await safeSendStatus(
-                socket,
-                { image: webMeme.imageBuffer, caption: webMeme.caption },
-                {},
-                statusJidList
-              );
-            } else {
-              await safeSendStatus(
-                socket,
-                { text: meme ? formatMemeBroadcast(meme) : webMeme.caption },
-                { backgroundColor: '#3a0ca3', font: 1 },
-                statusJidList
-              );
-            }
-          }
-          chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${postedCaption}`);
-          if (meme) markMemePosted(meme.id);
-          postedTypes.push('meme');
+                  try { await scrapeWhatsAppChannelMemes(socket); } catch {}
+                  const meme = getFreshestMemeForPosting();
+                  const sourceImagePath = meme?.media_type === 'image' && meme.image_path && fs.existsSync(meme.image_path)
+                    ? meme.image_path
+                    : null;
+                  let postedCaption = '';
+                  let usedMeme = false;
+                  if (meme && sourceImagePath) {
+                    postedCaption = meme.caption;
+                    usedMeme = true;
+                    await safeSendStatus(
+                      socket,
+                      { image: fs.readFileSync(sourceImagePath), caption: formatMemeBroadcast(meme) },
+                      {},
+                      statusJidList
+                    );
+                  } else {
+                    const webMeme = await scrapeWebMeme();
+                    if (webMeme.imageBuffer) {
+                      postedCaption = webMeme.caption;
+                      await safeSendStatus(
+                        socket,
+                        { image: webMeme.imageBuffer, caption: webMeme.caption },
+                        {},
+                        statusJidList
+                      );
+                    } else if (meme) {
+                      const cardPath = await getOrGenerateMemeMedia(meme.id, meme.caption, meme.image_path);
+                      postedCaption = meme.caption;
+                      usedMeme = true;
+                      await safeSendStatus(
+                        socket,
+                        { image: fs.readFileSync(cardPath), caption: formatMemeBroadcast(meme) },
+                        {},
+                        statusJidList
+                      );
+                    } else {
+                      postedCaption = webMeme.caption;
+                      await safeSendStatus(
+                        socket,
+                        { text: webMeme.caption },
+                        { backgroundColor: '#3a0ca3', font: 1 },
+                        statusJidList
+                      );
+                    }
+                  }
+                  chatLogger.logOutboundMessage('status@broadcast', `[Status: Meme] ${postedCaption}`);
+                  if (meme && usedMeme) markMemePosted(meme.id);
+                  postedTypes.push('meme');
             } finally {
               releaseStatusMemePost(reservation);
             }
@@ -1113,7 +1124,11 @@ export class SchedulerPlugin implements IPlugin {
             setBotSetting('last_owner_health_report_date', getTodayWatDate());
             try {
               const outboundText = await generateMorningContent('owner_health_report', task.custom_prompt || task.message);
-              await socket.sendMessage(task.chat_jid, { text: outboundText });
+              if (task.chat_jid === 'status@broadcast') {
+                await safeSendStatus(socket, { text: outboundText }, { backgroundColor: '#2b2d42', font: 1 }, getStatusRecipientJids(socket));
+              } else {
+                await socket.sendMessage(task.chat_jid, { text: outboundText });
+              }
               chatLogger.logOutboundMessage(task.chat_jid, outboundText);
               console.log(
                 `[Scheduler] 🔄 Daily owner health report #${task.id} sent and rescheduled for next 07:00 WAT (${new Date(nextFireAt).toLocaleString()}).`
@@ -1140,10 +1155,14 @@ export class SchedulerPlugin implements IPlugin {
             outboundText = `⏰ *REMINDER*\n\nHey ${targetGreeting}, you asked me to remind you:\n\n💬 "${task.message}"`;
           }
 
-          await socket.sendMessage(task.chat_jid, {
-            text: outboundText,
-            mentions: task.sender_jid ? [task.sender_jid] : [],
-          });
+          if (task.chat_jid === 'status@broadcast') {
+            await safeSendStatus(socket, { text: outboundText }, { backgroundColor: '#2b2d42', font: 1 }, getStatusRecipientJids(socket));
+          } else {
+            await socket.sendMessage(task.chat_jid, {
+              text: outboundText,
+              mentions: task.sender_jid ? [task.sender_jid] : [],
+            });
+          }
           chatLogger.logOutboundMessage(task.chat_jid, outboundText);
 
           // If recurring daily, advance fire_at by 24 hours

@@ -1,112 +1,101 @@
-# WhatsApp Voice Call Feature: Implementation Plan
+# WhatsApp Voice Calls: Clear Integration Plan
 
-## Goal
+## What the feature will do
 
-Let one person at a time have a real, two-way voice conversation with the bot in WhatsApp. The bot should listen, transcribe, answer using the existing agent and tool system, synthesize speech, and speak the answer during the same call.
+A person calls the bot in WhatsApp, speaks naturally, hears the bot answer during that same call, and can interrupt it. This is a live two-way call. It is different from the existing voice-note flow, where WhatsApp first delivers a complete audio file, the bot transcribes it, then sends a separate reply.
 
-This plan assumes a live call. Sending voice notes back and forth is a simpler fallback, but it is not a live-call implementation.
+## Why Baileys cannot carry this call
 
-## Feasibility finding
+The current bot uses Baileys for WhatsApp messages. Baileys can report call-state events and can reject calls, but the installed socket does not provide the supported accept-and-stream-audio interface required for a live call. The bot's current `messages.upsert` handler, `analyzeVoiceNote`, and `tts.ts` can process voice notes; they do not expose the real-time call media path. We should keep that transport for existing chats and add the call feature through the official WhatsApp Business Platform Calling API.
 
-The project currently uses `@whiskeysockets/baileys` `7.0.0-rc14`. The installed public socket surface includes the `call` event, `rejectCall`, and `createCallLink`; it does not expose a supported API to accept an individual call and exchange real-time audio frames. The official Baileys guide describes `call` as call-state updates, and the upstream socket API exposes rejection and link creation. This is enough to detect and decline a call, but not enough for a reliable conversational call.
+## The call, step by step
 
-Do not treat a call link as an audio bridge. Do not enable an experimental reverse-engineered VoIP engine on the production paired account. A separate test account and a time-boxed proof of concept would be required before considering any unofficial transport.
+```mermaid
+sequenceDiagram
+    participant P as Person in WhatsApp
+    participant M as Meta Calling API
+    participant H as Bot call webhook
+    participant G as WebRTC voice gateway
+    participant A as Existing bot agent
+    participant S as Speech services
 
-## Recommended delivery path
+    P->>M: Start voice call to the Business number
+    M->>H: Signed CONNECT webhook with call ID and SDP offer
+    H->>G: Create isolated call session and pass SDP offer
+    G-->>H: WebRTC SDP answer
+    H->>M: Pre-accept / accept call with SDP answer
+    M<->>G: Live encrypted audio over WebRTC
+    loop Each spoken turn
+        G->>S: Caller audio frames
+        S->>G: Transcript when caller finishes speaking
+        G->>A: handleVoiceTurn(transcript, caller + call context)
+        A-->>G: Short text reply
+        G->>S: Text reply for speech synthesis
+        S-->>G: Audio frames
+        G->>M: Bot audio over the active WebRTC call
+        M->>P: Caller hears bot reply
+    end
+    P->>M: Hang up
+    M->>H: TERMINATE webhook
+    H->>G: Close media and clear call session
+```
 
-Use a dedicated WhatsApp Business Platform sender with WhatsApp Calling enabled, through Meta Cloud API directly or a calling-capable provider. Connect its WebRTC/SIP media path to a small voice gateway, and connect that gateway to the existing bot agent over an internal authenticated interface. Keep the current Baileys session for messaging unless the provider and Meta confirm that the selected number and account setup support the required coexistence arrangement. Do not connect both systems to the same number by assumption.
+1. The person calls a WhatsApp Business number that has Calling enabled. For the first release, they call the bot; we do not make bot-initiated calls.
+2. Meta sends the bot a signed `calls` webhook containing the call ID and the caller's WebRTC SDP offer. The bot validates the signature and deduplicates the event.
+3. A dedicated WebRTC gateway creates an SDP answer. The bot sends that answer back through the Cloud API call action (`pre_accept`, then `accept`) and starts the audio session. The gateway is necessary: an HTTP webhook by itself cannot receive or transmit live audio.
+4. The gateway streams the caller's audio to speech recognition. Voice activity detection determines when a turn is complete.
+5. The call orchestrator sends the transcript into the existing agent as a new `handleVoiceTurn(transcript, callContext)` entry point. The call context contains only this caller's identity and the conversation allowed for that business number. A reviewed call-specific tool allowlist prevents voice commands from triggering broadcasts or unrelated chat actions.
+6. Text-to-speech creates the reply. The gateway streams the audio to the same WebRTC session. If the caller begins speaking, the gateway stops playback and starts the next turn.
+7. A terminate event closes the peer connection and stores only call metadata and a redacted result. Raw audio is not retained by default.
 
-The business calling route has account, number, consent, and country availability requirements. Meta’s calling announcement describes calls through the Business Platform; provider documentation describes inbound and outbound calling setup and call-permission flows. Confirm the Nigerian sender-number eligibility before choosing an outbound-call design. For an initial MVP, prefer user-initiated inbound calls; only add bot-initiated outbound calls after verifying current country eligibility and explicit call-permission requirements.
+Meta's calling API is the **signaling and call-control layer**: it tells the bot a call is arriving and accepts/rejects/ends it. The WebRTC gateway is the **media layer**: it handles SDP, secure audio packets, jitter, silence detection, and audio playback. The existing bot agent and speech services form the **conversation layer**. These three jobs should be separate modules so a media reconnect cannot freeze regular WhatsApp message handling.
 
-## Architecture
+## How it fits this codebase
 
-1. **WhatsApp call adapter**
-   - Receives call lifecycle events from the supported Cloud API/provider integration.
-   - Validates webhook signatures, event timestamps, call IDs, sender identity, consent, and current account eligibility.
-   - Deduplicates events by provider call ID and maps them to an internal call session.
+| New component | Responsibility | Existing bot code it connects to |
+| --- | --- | --- |
+| `WhatsAppCallWebhookController` | Receive and authenticate Meta call events; deduplicate call IDs | Existing HTTP server, if it can accept public webhooks; otherwise a small dedicated service |
+| `WhatsAppCallAdapter` | Cloud API accept, reject, and terminate actions | New Cloud API credentials and Business Platform phone-number ID |
+| `CallSessionStore` | Track call ID, caller key, timestamps, and state transitions | SQLite, with TTL cleanup and no audio/transcript by default |
+| `WebRtcVoiceGateway` | Create SDP answer, receive/send audio, detect turns and interruptions | New dedicated WebRTC service or a documented calling provider |
+| `VoiceTurnOrchestrator` | Convert each transcript to a constrained agent turn | `agentHarness.handleMessage`/context manager through a new voice-specific entry point |
+| Speech adapters | Streaming speech recognition and speech synthesis | `src/core/transcription.ts` and `src/core/tts.ts` are useful starting points, but currently operate on complete audio files rather than live frames |
 
-2. **Voice gateway**
-   - Terminates the provider’s WebRTC/SIP media session.
-   - Converts inbound audio into bounded audio frames and streams it to speech recognition.
-   - Sends synthesized speech frames back over the live media session.
-   - Handles jitter, packet loss, timeouts, silence, interruption/barge-in, and reconnects without blocking the WhatsApp message loop.
+The current Baileys socket stays responsible for the existing WhatsApp message session. Do not point Baileys and Cloud API at the same phone number unless Meta confirms that the exact account and coexistence setup supports it. The safer pilot is a dedicated Business Platform number; users can continue messaging the existing bot while voice is piloted on the new number.
 
-3. **Conversation orchestrator**
-   - Reuses the existing context manager and tool registry, with a per-call context keyed to the caller and call ID.
-   - Uses voice-appropriate turn-taking and short responses.
-   - Applies the same owner checks, chat-scoped memory rules, tool allowlist, rate limits, and outbound safety policy as text chats.
-   - Requires explicit user intent and permission for consequential tool actions; speaking during a call must not silently trigger a tool that sends messages or changes group state.
+## Build sequence
 
-4. **Speech services**
-   - Speech-to-text for caller audio and text-to-speech for bot output.
-   - Start with a provider-neutral interface so recognition or synthesis services can be swapped without changing call control.
-   - Preserve the caller’s preferred language and code-switching, but do not retain raw call audio by default.
+### 1. Confirm the account and number
 
-5. **Call state and operations**
-   - Persist only minimum call metadata: opaque caller key, call ID, start/end time, result, and redacted error category.
-   - Do not log phone numbers, raw transcripts, audio, credentials, or media payloads in normal logs.
-   - Enforce one active call initially, a short maximum duration, per-caller cooldowns, a global concurrency cap, and immediate stop/reject controls.
+- Create or select a WhatsApp Business Account and Cloud API app.
+- Choose whether the call pilot uses a new Business Platform number. Verify the number's country eligibility, business verification, account messaging limit, calling settings, permissions, and webhook subscription in WhatsApp Manager/Meta developer tools.
+- Start with customer-initiated inbound calls. Business-initiated calls require user permission and country eligibility; the bot should not try to call a person proactively until Meta confirms the Nigerian sender number supports it.
+- Configure a public HTTPS webhook and subscribe the app to the `calls` field.
 
-## Phases
+### 2. Prove call control without the bot
 
-### Phase 0 — Product and provider gate
+- Use a test sender and a test deployment.
+- Validate webhook signature, duplicate delivery, call timeouts, accept/reject/end transitions, and the Cloud API call endpoint.
+- Connect the test number to a real WebRTC stack or a documented calling provider. Confirm bidirectional audio before integrating the agent. Sending an SDP string with curl alone is not a media connection.
 
-- Confirm whether the requirement is live duplex audio or a voice-note conversation.
-- Confirm the intended WhatsApp sender type, number country, and whether a new dedicated Business Platform number is acceptable.
-- Select direct Cloud API or a provider with documented WhatsApp Calling support.
-- Verify inbound/outbound eligibility, required business verification, call permission rules, pricing, data residency, recording defaults, and number coexistence before implementation.
-- Define caller consent, a spoken disclosure that the caller is talking to an AI, retention limits, maximum call length, and emergency termination behavior.
+### 3. Connect one safe voice turn
 
-**Exit criterion:** a selected provider confirms the exact number/account can receive calls, and the team can obtain a test endpoint and call events.
+- Add a `handleVoiceTurn` method that reuses the current agent and caller-scoped memory without pretending a transcript is an ordinary text message from another chat.
+- Initially use one completed utterance → transcription → agent → synthesized reply. Keep the interaction turn-based with a clear timeout. This is easier to debug but may feel slower.
+- After that works, switch recognition and synthesis to streaming and add barge-in cancellation.
+- Keep calls one-at-a-time in the pilot, cap call duration, set per-caller cooldowns, and provide a kill switch.
 
-### Phase 1 — Isolated call-control proof of concept
+### 4. Pilot and measure
 
-- Build a separate test deployment and use a dedicated test sender.
-- Verify webhook signature validation, event ordering, duplicate handling, answer/reject/end state transitions, and health reporting.
-- Establish a media session and confirm full-duplex audio without involving production WhatsApp credentials.
-- If testing Baileys separately, limit the spike to call-event observation and supported rejection/link behavior; stop if successful media acceptance requires undocumented crypto or protocol changes.
+Test with a small group that has agreed to participate. Measure call setup failures, transcription accuracy, end-of-turn delay, interruption behavior, dropped calls, and per-minute cost. Store call IDs and redacted error categories for diagnostics; do not log SDP, access tokens, phone numbers, or audio payloads.
 
-**Exit criterion:** repeatable inbound test calls complete with bidirectional audio and no production session access.
+## What we can ship first
 
-### Phase 2 — Speech loop and agent integration
+The first working slice should be **inbound calls on a test Business Platform number, with a real WebRTC media gateway and one short spoken bot turn**. It can reuse the existing agent and current transcription/TTS providers, but those providers will need streaming adapters or a turn-based file bridge. We should not build a fake call by sending voice notes: that would not meet the live-call requirement.
 
-- Add a bounded streaming STT → agent → streaming TTS loop.
-- Add turn detection, interruption handling, per-turn deadlines, cancellation propagation, and graceful fallback to a WhatsApp message if the media session fails.
-- Restrict available tools to a reviewed call-specific allowlist; exclude broadcasts, contact campaigns, group admin actions, and arbitrary external messaging by default.
-- Add language selection and caller-scoped context without importing unrelated chat history.
+## Current constraints and references
 
-**Exit criterion:** the bot can answer a small set of supported questions conversationally, recover from STT/TTS errors, and terminate cleanly.
-
-### Phase 3 — Security, quality, and pilot
-
-- Test replayed and forged webhooks, duplicate events, unknown callers, consent revocation, media floods, provider disconnects, tool prompt injection, and account restrictions.
-- Measure call setup success, audio latency, transcription quality, interruption behavior, dropped-call rate, and per-minute cost.
-- Pilot with a small allowlist of consenting testers and conservative concurrency/duration limits.
-- Add an operator kill switch and dashboard before expanding access.
-
-**Exit criterion:** security review passes, target latency and reliability are met, and the pilot has no unauthorized tool actions or unbounded audio retention.
-
-## First implementation slices
-
-1. Add provider interfaces and typed call-session state without connecting production credentials.
-2. Add a webhook ingress with signature verification, idempotency, and sanitized event logging.
-3. Add a mock media transport and state-machine tests.
-4. Implement one provider-specific test adapter after Phase 0 selection.
-5. Add streaming STT/TTS behind provider interfaces, then integrate the constrained agent loop.
-6. Pilot and decide whether to expand or retain voice notes as the supported WhatsApp experience.
-
-## Main risks
-
-- The current Baileys v7 socket does not provide the live media accept/stream primitives required by the goal.
-- Unofficial call transport would rely on reverse-engineered behavior and could break on WhatsApp changes or put the paired account at risk.
-- Business calling eligibility depends on the sender country and account setup; do not assume outbound calls are available for a Nigerian sender.
-- Real-time STT/LLM/TTS adds latency, cost, and sensitive audio handling concerns.
-- Agent tools capable of messaging, moderation, or broadcasting need stricter call-specific permissions than ordinary chat turns.
-
-## References
-
-- [Baileys receiving updates](https://baileys.wiki/docs/socket/receiving-updates/) — the `call` event is a lifecycle/update event.
-- [Baileys upstream call event types](https://github.com/WhiskeySockets/Baileys/blob/master/src/Types/Events.ts) — typed call events.
-- [Baileys upstream socket API](https://github.com/WhiskeySockets/Baileys/blob/master/src/Socket/index.ts) — public call-related socket methods.
-- [Meta announcement of WhatsApp Business Platform calling](https://about.fb.com/news/2025/07/centralized-campaigns-ai-support-businesses-whatsapp/) — calling is being provided through the Business Platform.
-- [Twilio WhatsApp Business Calling guide](https://www.twilio.com/docs/voice/whatsapp-business-calling) — provider setup, consent, inbound/outbound flow, and country eligibility; re-check at provider selection because availability can change.
+- The current Baileys session is not the call transport; a supported Calling API number and WebRTC/SIP media endpoint are needed.
+- Meta's official WhatsApp Business Platform collection describes Cloud API and webhook setup: [Meta WhatsApp Business Platform Postman collection](https://www.postman.com/meta/whatsapp-business-platform/overview).
+- Meta's Calling API guide covers user-initiated call setup and call-control actions: [WhatsApp Cloud API Calling](https://developers.facebook.com/docs/whatsapp/cloud-api/calling/).
+- The exact phone-number eligibility and account requirements should be confirmed in the live Meta developer console before implementation because these settings and regional rules can change.
