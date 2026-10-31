@@ -444,7 +444,7 @@ export class ContactPlugin implements IPlugin {
             ''
           ).trim();
           let rawMessage = (args.message || args.text || args.content || '').trim();
-          const isOwner = userProfileManager.isOwner(ctx.senderJid, ctx.senderName);
+          const isOwner = await userProfileManager.isConfiguredOwnerAlias(ctx.senderJid);
 
           let targetJid = '';
           let targetName = args.name?.trim() || rawRecipient;
@@ -629,7 +629,10 @@ export class ContactPlugin implements IPlugin {
             console.warn(`[ContactPlugin] onWhatsApp check warning for ${lookupTarget}:`, waErr.message);
           }
 
-          const outboundCheck = await antiBanEngine.canSendOutbound({ chatJid: targetJid, isGroup: false }, true);
+          const checkOutbound = () => antiBanEngine.canSendOutbound({ chatJid: targetJid, isGroup: false }, true);
+          const outboundCheck = isOwner
+            ? await antiBanEngine.runOwnerAuthorizedOutbound(checkOutbound)
+            : await checkOutbound();
           if (!outboundCheck.allowed) {
             return {
               success: false,
@@ -645,7 +648,10 @@ export class ContactPlugin implements IPlugin {
             await antiBanEngine.simulateTypingPresence(ctx.sock, targetJid, finalDispatchMessage, false, 0, false);
           } catch {}
 
-          const sent = await OutboundSender.replyText(ctx.sock, targetJid, finalDispatchMessage);
+          const dispatchMessage = () => OutboundSender.replyText(ctx.sock, targetJid, finalDispatchMessage);
+          const sent = isOwner
+            ? await antiBanEngine.runOwnerAuthorizedOutbound(dispatchMessage)
+            : await dispatchMessage();
           if (!sent) {
             return {
               success: false,

@@ -4,25 +4,31 @@ async function main() {
   console.log('🚀 Starting Comprehensive Tool Harness, Schedule & DM Scanner Verification Suite...\n');
 
   // 1. Import plugins exactly as indexed
-  const { pluginRegistry } = require('../dist/plugins/registry.js');
-  const { audioDownloaderPlugin } = require('../dist/plugins/audio-downloader/audio-plugin.js');
-  const { memoryPlugin } = require('../dist/plugins/memory-search/memory-plugin.js');
-  const { datasetExporterPlugin } = require('../dist/learning/dataset-exporter.js');
-  const { webSearchPlugin } = require('../dist/plugins/web-search/search-plugin.js');
-  const { videoDownloaderPlugin } = require('../dist/plugins/video-downloader/video-plugin.js');
-  const { groupAdminPlugin } = require('../dist/plugins/group-admin/admin-plugin.js');
-  const { documentReaderPlugin } = require('../dist/plugins/document-reader/document-plugin.js');
-  const { schedulerPlugin } = require('../dist/plugins/scheduler/scheduler-plugin.js');
-  const { linkSummarizerPlugin } = require('../dist/plugins/link-summarizer/link-plugin.js');
-  const { conversationExportPlugin } = require('../dist/plugins/export/export-plugin.js');
-  const { contactPlugin } = require('../dist/plugins/contact/contact-plugin.js');
-  const { imageGenPlugin } = require('../dist/plugins/image-gen/image-plugin.js');
-  const { engagementPlugin } = require('../dist/plugins/engagement/engagement-plugin.js');
-  const { stickerPlugin } = require('../dist/plugins/stickers/sticker-plugin.js');
-  const { viewOncePlugin } = require('../dist/plugins/view-once/view-once-plugin.js');
-  const { reloadPluginsTool } = require('../dist/plugins/hot-reload.js');
-  const { whatsAppClient } = require('../dist/core/client.js');
-  const { antiBanEngine } = require('../dist/security/anti-ban.js');
+  const { pluginRegistry } = await import('../dist/plugins/registry.js');
+  const { audioDownloaderPlugin } = await import('../dist/plugins/audio-downloader/audio-plugin.js');
+  const { memoryPlugin } = await import('../dist/plugins/memory-search/memory-plugin.js');
+  const { datasetExporterPlugin } = await import('../dist/learning/dataset-exporter.js');
+  const { webSearchPlugin } = await import('../dist/plugins/web-search/search-plugin.js');
+  const { videoDownloaderPlugin } = await import('../dist/plugins/video-downloader/video-plugin.js');
+  const { groupAdminPlugin } = await import('../dist/plugins/group-admin/admin-plugin.js');
+  const { documentReaderPlugin } = await import('../dist/plugins/document-reader/document-plugin.js');
+  const { schedulerPlugin } = await import('../dist/plugins/scheduler/scheduler-plugin.js');
+  const { linkSummarizerPlugin } = await import('../dist/plugins/link-summarizer/link-plugin.js');
+  const { conversationExportPlugin } = await import('../dist/plugins/export/export-plugin.js');
+  const { contactPlugin } = await import('../dist/plugins/contact/contact-plugin.js');
+  const { imageGenPlugin } = await import('../dist/plugins/image-gen/image-plugin.js');
+  const { engagementPlugin } = await import('../dist/plugins/engagement/engagement-plugin.js');
+  const { stickerPlugin } = await import('../dist/plugins/stickers/sticker-plugin.js');
+  const { viewOncePlugin } = await import('../dist/plugins/view-once/view-once-plugin.js');
+  const { reloadPluginsTool } = await import('../dist/plugins/hot-reload.js');
+  const { whatsAppClient } = await import('../dist/core/client.js');
+  const { antiBanEngine } = await import('../dist/security/anti-ban.js');
+  const { restrictionGuard } = await import('../dist/security/restriction-guard.js');
+  const { db } = await import('../dist/memory/db.js');
+  const { userProfileManager } = await import('../dist/memory/user-profiles.js');
+  const { config, normalizePhoneNumber } = await import('../dist/config/env.js');
+
+  restrictionGuard.apply({ isActive: false });
 
   const plugins = [
     audioDownloaderPlugin,
@@ -79,7 +85,7 @@ async function main() {
         return { key: { id: 'mock_msg', remoteJid: jid } };
       },
       sendPresenceUpdate: async () => {},
-      onWhatsApp: async (jid) => [{ exists: true, jid }],
+      onWhatsApp: async (jid) => [{ exists: true, jid: jid.includes('@') ? jid : `${jid}@s.whatsapp.net` }],
       groupMetadata: async () => ({
         id: '12345@g.us',
         subject: 'Test Group',
@@ -135,6 +141,54 @@ async function main() {
   );
   assert(aliasRes.success, 'Alias send_message should resolve and succeed');
   console.log('✅ Alias send_message -> send_message_to_contact verified');
+
+  // Owner messages can arrive under a LID even though BOT_OWNERS stores the phone JID.
+  const configuredPhoneOwner = config.bot.owners.find((jid) => !jid.endsWith('@lid'));
+  assert(Boolean(configuredPhoneOwner), 'A phone owner must be configured for the LID alias check');
+  const ownerPhoneJid = `${normalizePhoneNumber(configuredPhoneOwner)}@s.whatsapp.net`;
+  const ownerLid = '102409552584830@lid';
+  await db.prepare(`
+    INSERT INTO contact_jid_aliases (alias_jid, contact_jid, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(alias_jid) DO UPDATE SET contact_jid = excluded.contact_jid, updated_at = excluded.updated_at
+  `).run(ownerLid, ownerPhoneJid, Date.now());
+  assert(await userProfileManager.isConfiguredOwnerAlias('102409552584830:1@lid'), 'Configured owner LID alias should resolve to its configured phone JID');
+
+  mockSent.length = 0;
+  const ownerLidSendRes = await pluginRegistry.executeTool(
+    'send_message_to_contact',
+    { recipient: '+2349131918009', message: 'Owner LID cold-DM authorization check' },
+    { ...mockContext, senderJid: '102409552584830:1@lid', chatJid: '102409552584830:1@lid', senderName: 'Untrusted display name' }
+  );
+  assert(ownerLidSendRes.success, 'Configured owner LID should message an arbitrary contact');
+  assert(mockSent.length > 0, 'Owner LID outbound message should reach the mock socket');
+  console.log('✅ Owner LID recognition and owner-authorized cold-DM dispatch verified');
+
+  const nonOwnerAlias = '19999999999@lid';
+  await db.prepare(`
+    INSERT INTO contact_jid_aliases (alias_jid, contact_jid, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(alias_jid) DO UPDATE SET contact_jid = excluded.contact_jid, updated_at = excluded.updated_at
+  `).run(nonOwnerAlias, '19999999999@s.whatsapp.net', Date.now());
+  assert(!(await userProfileManager.isConfiguredOwnerAlias(nonOwnerAlias)), 'An unconfigured LID alias must not gain owner permissions');
+  console.log('✅ Unconfigured LID remains unauthorized');
+
+  const warmTargetJid = '19999999998@s.whatsapp.net';
+  const warmTargetLid = '19999999998@lid';
+  await db.prepare(`
+    INSERT INTO contact_jid_aliases (alias_jid, contact_jid, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(alias_jid) DO UPDATE SET contact_jid = excluded.contact_jid, updated_at = excluded.updated_at
+  `).run(warmTargetLid, warmTargetJid, Date.now());
+  await db.prepare(`
+    INSERT INTO chat_logs (chat_jid, sender_jid, is_group, content_type, message_text, timestamp)
+    VALUES (?, ?, 0, 'text', 'recent inbound alias test', ?)
+  `).run(warmTargetLid, warmTargetLid, Date.now());
+  const warmAliasOutboundCheck = await antiBanEngine.canSendOutbound({ chatJid: warmTargetJid, isGroup: false }, true);
+  assert(warmAliasOutboundCheck.allowed, 'A recent inbound LID conversation should authorize its mapped phone-JID reply');
+  const coldOutboundCheck = await antiBanEngine.canSendOutbound({ chatJid: '19999999997@s.whatsapp.net', isGroup: false }, true);
+  assert(!coldOutboundCheck.allowed, 'A cold DM without owner authorization or recent inbound must remain blocked');
+  console.log('✅ Phone-JID/LID recency matching works while cold-DM blocking remains active');
 
   // 2e. List Contacts
   const listContactRes = await pluginRegistry.executeTool('list_contacts', {}, mockContext);

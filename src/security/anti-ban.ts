@@ -52,7 +52,17 @@ export class AntiBanEngine {
   private dispatchQueue: AntiBanDispatchItem[] = [];
   private isProcessingQueue = false;
   private readonly dispatchContext = new AsyncLocalStorage<boolean>();
+  private readonly ownerAuthorizedOutboundContext = new AsyncLocalStorage<boolean>();
   private readonly maxPendingDispatches = 100;
+
+  /**
+   * Temporarily authorize an outbound DM initiated by the owner-only contact tool.
+   * The caller must authenticate the owner before entering this scope. Async context
+   * also covers the patched socket send gate without relaxing general cold-DM rules.
+   */
+  public runOwnerAuthorizedOutbound<T>(operation: () => Promise<T>): Promise<T> {
+    return this.ownerAuthorizedOutboundContext.run(true, operation);
+  }
 
   // Rate limiting & cooldown tracking
   private lastDispatchTimes: Map<string, number> = new Map(); // chatJid -> timestamp
@@ -227,6 +237,12 @@ export class AntiBanEngine {
       };
     }
 
+    // This context is set only after the owner-only contact tool authenticates its
+    // caller. Keep the normal recent-inbound rule for every other DM send path.
+    if (this.ownerAuthorizedOutboundContext.getStore() === true) {
+      return { allowed: true };
+    }
+
     // 2. Direct Message (DM) Evaluation
     // Superuser / Bot Owners / Self-chat are always permitted
     const rawDigits = chatJid.split('@')[0].split(':')[0];
@@ -244,13 +260,33 @@ export class AntiBanEngine {
     }
 
     // A caller-supplied reply flag or owner-command flag must not authorize a cold DM.
-    // Verify an actual recent inbound message in the exact conversation before allowing any send.
+    // Verify recent inbound activity across known phone-JID/LID aliases.
     try {
+      const normalizedJid = chatJid.replace(/:\d+(?=@)/, '');
+      const conversationIds = new Set([chatJid, normalizedJid]);
+      try {
+        const seeds = [...conversationIds];
+        const placeholders = seeds.map(() => '?').join(', ');
+        const aliases = await db.prepare(`
+          SELECT alias_jid, contact_jid
+          FROM contact_jid_aliases
+          WHERE alias_jid IN (${placeholders}) OR contact_jid IN (${placeholders})
+        `).all(...seeds, ...seeds) as Array<{ alias_jid: string; contact_jid: string }>;
+        for (const alias of aliases) {
+          conversationIds.add(alias.alias_jid.replace(/:\d+(?=@)/, ''));
+          conversationIds.add(alias.contact_jid.replace(/:\d+(?=@)/, ''));
+        }
+      } catch {
+        // Exact-JID lookup remains available on legacy databases without aliases.
+      }
+
+      const ids = [...conversationIds];
+      const placeholders = ids.map(() => '?').join(', ');
       const inboundRecord = await db.prepare(
         `SELECT MAX(timestamp) AS last_inbound_at
          FROM chat_logs
-         WHERE chat_jid = ? AND is_group = 0 AND sender_jid != 'bot'`
-      ).get(chatJid) as { last_inbound_at: number | null } | undefined;
+         WHERE chat_jid IN (${placeholders}) AND is_group = 0 AND sender_jid != 'bot'`
+      ).get(...ids) as { last_inbound_at: number | null } | undefined;
       const lastInboundAt = Number(inboundRecord?.last_inbound_at || 0);
       if (lastInboundAt > 0 && Date.now() - lastInboundAt <= DM_INBOUND_RECENCY_MS) {
         return { allowed: true };

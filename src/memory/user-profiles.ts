@@ -92,6 +92,27 @@ export class UserProfileManager {
     return false;
   }
 
+  /**
+   * Resolve an inbound WhatsApp LID only through the alias table populated from
+   * WhatsApp contact synchronization, then compare its canonical JID to configured
+   * owners. Names and profile flags never grant owner access.
+   */
+  public async isConfiguredOwnerAlias(userJid: string): Promise<boolean> {
+    if (this.isOwner(userJid)) return true;
+    if (!userJid || !userJid.includes('@lid')) return false;
+
+    const normalizedLid = `${userJid.split('@')[0].split(':')[0]}@lid`;
+    try {
+      const alias = await db.prepare(
+        'SELECT contact_jid FROM contact_jid_aliases WHERE alias_jid = ? LIMIT 1'
+      ).get(normalizedLid) as { contact_jid?: string } | undefined;
+      return Boolean(alias?.contact_jid && this.isOwner(alias.contact_jid));
+    } catch {
+      // Older databases may not have alias data yet; fail closed.
+      return false;
+    }
+  }
+
   /** Persist owner profile metadata only for an identifier already configured as an owner. */
   public async markAsOwner(userJid: string): Promise<void> {
     if (!userJid) return;
