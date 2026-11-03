@@ -1,5 +1,6 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { ragEngine } from '../../core/rag-engine.js';
+import { requiresCurrentWebEvidence } from '../../agent/query-intent.js';
 
 export interface FootballMatch {
   name: string;
@@ -115,8 +116,9 @@ export async function queryGoogleNewsRss(
 export async function fetchLiveFootballScores(
   teamQuery?: string,
   leagueKey?: string
-): Promise<{ text: string; matches: FootballMatch[] }> {
+): Promise<{ text: string; matches: FootballMatch[]; sources: string[] }> {
   const matches: FootballMatch[] = [];
+  const sources = new Set<string>();
   const queryLower = (teamQuery || '').toLowerCase().trim();
 
   // Target leagues: if specified, query that league; otherwise query top major leagues in parallel
@@ -157,6 +159,7 @@ export async function fetchLiveFootballScores(
               signal: AbortSignal.timeout(5000),
             });
             if (!res.ok) return;
+            sources.add(url);
 
             const data = (await res.json()) as any;
             const events = data.events || [];
@@ -178,14 +181,11 @@ export async function fetchLiveFootballScores(
               const statusDetail = ev.status?.type?.detail || ev.status?.type?.shortDetail || 'Status Unknown';
 
               // If team filter provided, match either team name or event name
-              if (
-                queryLower &&
-                !matchName.toLowerCase().includes(queryLower) &&
-                !homeName.toLowerCase().includes(queryLower) &&
-                !awayName.toLowerCase().includes(queryLower)
-              ) {
-                continue;
-              }
+              const teamTerms = queryLower.split(/\b(?:vs\.?|versus|against|and)\b/i).map((term) => term.trim()).filter(Boolean);
+              const teamsMatch = teamTerms.length > 1
+                ? teamTerms.every((term) => homeName.toLowerCase().includes(term) || awayName.toLowerCase().includes(term))
+                : !queryLower || matchName.toLowerCase().includes(queryLower) || homeName.toLowerCase().includes(queryLower) || awayName.toLowerCase().includes(queryLower);
+              if (!teamsMatch) continue;
 
               // Deduplicate matches
               const exists = matches.some((m) => m.name === matchName && m.dateStr === dParam);
@@ -224,6 +224,7 @@ export async function fetchLiveFootballScores(
     return {
       text: `⚽ *Football Live Scores & Match Results:*\n\n${formatted}`,
       matches,
+      sources: [...sources],
     };
   }
 
@@ -236,12 +237,14 @@ export async function fetchLiveFootballScores(
     return {
       text: `⚽ *Football News & Match Scores (Google News RSS):*\n\n${rssText}`,
       matches: [],
+      sources: rssItems.map((item) => item.url).filter((url): url is string => Boolean(url)),
     };
   }
 
   return {
     text: `No active match results found for "${teamQuery || 'today'}". Please check back during match day or specify the team name clearly.`,
     matches: [],
+    sources: [],
   };
 }
 
@@ -271,11 +274,14 @@ export class WebSearchPlugin implements IPlugin {
       },
       execute: async (args: { team?: string; league?: string }, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
-          const { text, matches } = await fetchLiveFootballScores(args.team, args.league);
+          const { text, matches, sources } = await fetchLiveFootballScores(args.team, args.league);
           return {
             success: true,
             message: `${text}\n\n[Scores verified via live sports scoreboard. Summarize clearly and accurately for the user.]`,
             data: matches,
+            ...(sources.length > 0
+              ? { evidence: { kind: 'live' as const, fetchedAt: Date.now(), sources } }
+              : {}),
           };
         } catch (err: any) {
           return {
@@ -299,15 +305,19 @@ export class WebSearchPlugin implements IPlugin {
             type: 'string',
             description: 'Alternative search query parameter.',
           },
+          force_live: {
+            type: 'boolean',
+            description: 'Internal harness flag requiring external live lookup and disabling internal or static fallbacks.',
+          },
         },
       },
-      execute: async (args: { query?: string; q?: string }, ctx: ExecutionContext): Promise<ToolResult> => {
+      execute: async (args: { query?: string; q?: string; force_live?: boolean }, ctx: ExecutionContext): Promise<ToolResult> => {
         try {
           const rawQuery = (args.query || args.q || '').trim();
           console.log(`[WebSearch] Performing web lookup: "${rawQuery}"`);
 
           const lower = rawQuery.toLowerCase();
-          const requiresLiveLookup = /\b(?:today|tonight|right now|currently|current|latest|most recent|this season|season to date|so far this season|current season|as of now|this year|this week|this month|live score|live scores|up to date|how many\s+(?:goals?|points?|wins?|losses?|assists?|appearances?|matches|games|titles|records))\b/i.test(rawQuery);
+          const requiresLiveLookup = Boolean(args.force_live) || requiresCurrentWebEvidence(rawQuery);
 
           // 0. Autonomous Local RAG Interceptor: If this is an internal query matching local user facts, contacts, or group rules, return local data immediately
           if (!requiresLiveLookup) {
@@ -319,6 +329,7 @@ export class WebSearchPlugin implements IPlugin {
                   success: true,
                   message: `[Internal Verified Database Match - No Web Search Needed]:\n${ragCheck.formattedContext}\n\n[State the answer clearly and directly from this internal verified data without searching the web.]`,
                   data: ragCheck.documents,
+                  evidence: { kind: 'internal' },
                 };
               }
             } catch {}
@@ -332,13 +343,20 @@ export class WebSearchPlugin implements IPlugin {
             /\b(score|scores|result|played|game|match|win|lost|draw)\b/i.test(lower)
           ) {
             console.log(`[WebSearch] Football query detected in web_search: "${rawQuery}". Querying live sports scoreboard...`);
-            const teamMatch = rawQuery.replace(/^(who won|what is the score of|score of|current score of|football score|match score)\s+/i, '').trim();
-            const { text, matches } = await fetchLiveFootballScores(teamMatch);
+            const teamMatch = rawQuery
+              .replace(/\b(?:what|who|is|the|current|live|football|soccer|match|game|score|scores|result|results|won|of|for|today|yesterday|tonight|right now|this evening|last night|s)\b/gi, ' ')
+              .replace(/[^\p{L}\p{N}\s'.-]/gu, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            const { text, matches, sources } = await fetchLiveFootballScores(teamMatch);
             if (matches.length > 0 || text.includes('⚽')) {
               return {
                 success: true,
                 message: `${text}\n\n[Live match data retrieved. State the score directly and concisely.]`,
                 data: matches,
+                ...(sources.length > 0
+                  ? { evidence: { kind: 'live' as const, fetchedAt: Date.now(), sources } }
+                  : {}),
               };
             }
           }
@@ -354,6 +372,7 @@ export class WebSearchPlugin implements IPlugin {
                   success: true,
                   message: `Bitcoin (BTC) current live price is $${formattedPrice} USD.`,
                   data: { symbol: 'BTC', priceUsd: formattedPrice },
+                  evidence: { kind: 'live', fetchedAt: Date.now(), sources: ['https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT'] },
                 };
               }
             } catch {}
@@ -367,6 +386,7 @@ export class WebSearchPlugin implements IPlugin {
                   success: true,
                   message: `Ethereum (ETH) current live price is $${formattedPrice} USD.`,
                   data: { symbol: 'ETH', priceUsd: formattedPrice },
+                  evidence: { kind: 'live', fetchedAt: Date.now(), sources: ['https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT'] },
                 };
               }
             } catch {}
@@ -380,6 +400,7 @@ export class WebSearchPlugin implements IPlugin {
                   success: true,
                   message: `Solana (SOL) current live price is $${formattedPrice} USD.`,
                   data: { symbol: 'SOL', priceUsd: formattedPrice },
+                  evidence: { kind: 'live', fetchedAt: Date.now(), sources: ['https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT'] },
                 };
               }
             } catch {}
@@ -455,6 +476,9 @@ export class WebSearchPlugin implements IPlugin {
                   success: true,
                   message: `Live Web Search Results for "${rawQuery}":\n${formatted}\n\n[Search complete. Use only these current results for changing facts and include a source link when useful.]`,
                   data: snippets.map((snippet, index) => ({ ...searchResults[index], snippet })),
+                  ...(searchResults.length > 0
+                    ? { evidence: { kind: 'live' as const, fetchedAt: Date.now(), sources: searchResults.map((result) => result.url) } }
+                    : {}),
                 };
               }
             }
@@ -474,6 +498,9 @@ export class WebSearchPlugin implements IPlugin {
                 success: true,
                 message: `Live News Results for "${rawQuery}":\n\n${formattedNews}\n\n[Search complete. Answer concisely based on these live facts.]`,
                 data: newsItems,
+                ...(newsItems.some((item) => item.url)
+                  ? { evidence: { kind: 'live' as const, fetchedAt: Date.now(), sources: newsItems.map((item) => item.url).filter((url): url is string => Boolean(url)) } }
+                  : {}),
               };
             }
           } catch {}

@@ -16,7 +16,10 @@ export async function buildSystemPrompt(
   const userFacts = isGroup ? [] : await memoryService.getUserFacts(userJid);
   const groupFacts = isGroup ? await memoryService.getGroupFacts(chatJid) : [];
   const style = await styleAdapter.getStyleContext(chatJid, incomingText);
-  const languageInstruction = await userProfileManager.getLanguageInstruction(userJid, incomingText);
+  const languageSample = incomingText && activeSenderName && incomingText.startsWith(`${activeSenderName}:`)
+    ? incomingText.slice(activeSenderName.length + 1).trimStart()
+    : incomingText;
+  const languageInstruction = await userProfileManager.getLanguageInstruction(userJid, languageSample);
 
   const nowStr = new Date().toUTCString();
   const currentYear = new Date().getUTCFullYear();

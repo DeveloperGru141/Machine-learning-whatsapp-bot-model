@@ -1470,7 +1470,6 @@ export class WhatsAppClient {
 
     // Persistent User Profile Tracking across all chats
     await userProfileManager.upsertProfile(normalized.senderJid, normalized.senderName);
-    await userProfileManager.observeMessageLanguage(normalized.senderJid, normalized.text || '');
 
     // Automatic Contact Saving: passively record and index all contacts
     const contactSaveStatus = await contactService.autoSaveContact(normalized.senderJid, normalized.senderName);
@@ -1810,10 +1809,12 @@ export class WhatsAppClient {
     if (!promptText) return;
 
     const voiceLanguageSample = promptText.match(/message\]: "([\s\S]*?)"\n\[Voice Note Summary\]/)?.[1];
-    await userProfileManager.observeMessageLanguage(
-      normalized.senderJid,
-      voiceLanguageSample || normalized.text || cleanedText || ''
-    );
+    if (!normalized.isGroup) {
+      await userProfileManager.observeMessageLanguage(
+        normalized.senderJid,
+        voiceLanguageSample || normalized.text || cleanedText || ''
+      );
+    }
 
     console.log(
       `[Incoming Trigger] From: ${normalized.senderName} (${normalized.chatJid}): "${promptText.slice(0, 80)}..."`

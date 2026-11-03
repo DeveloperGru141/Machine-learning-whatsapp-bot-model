@@ -96,20 +96,54 @@ export class MemoryService {
     return [...chats];
   }
 
-  public async searchChatLogs(query: string, chatJids: string[]): Promise<Array<{ sender_name: string; message_text: string }>> {
+  public async searchChatLogs(
+    query: string,
+    chatJids: string[]
+  ): Promise<Array<{ sender_name: string; message_text: string; timestamp: number; matchScore: number }>> {
     try {
       if (chatJids.length === 0) return [];
-      const sanitized = `%${query.trim()}%`;
-      return await db.prepare(`
-        SELECT sender_name, message_text FROM chat_logs
-        WHERE message_text LIKE ? AND chat_jid IN (${chatJids.map(() => '?').join(', ')})
+      const stopWords = new Set([
+        'the', 'and', 'for', 'that', 'this', 'with', 'from', 'what', 'when', 'where', 'which', 'who', 'why', 'how',
+        'did', 'does', 'do', 'was', 'were', 'are', 'is', 'have', 'has', 'had', 'can', 'could', 'would', 'should',
+        'you', 'your', 'yours', 'we', 'our', 'ours', 'they', 'them', 'their', 'about', 'into', 'then', 'than',
+        'earlier', 'before', 'last', 'time', 'talk', 'talked', 'discuss', 'discussed', 'agree', 'agreed', 'remember',
+        'tell', 'told', 'said', 'say', 'conversation', 'chat', 'please', 'me', 'my', 'i', 'a', 'an', 'on', 'to', 'of',
+      ]);
+      const queryTerms = [...new Set((query.toLocaleLowerCase().match(/[\p{L}\p{N}]{2,}/gu) || [])
+        .filter((term) => !stopWords.has(term)))].slice(0, 8);
+      const chatPlaceholders = chatJids.map(() => '?').join(', ');
+      const termClauses = queryTerms.map(() => 'LOWER(message_text) LIKE ?');
+      const termParams = queryTerms.map((term) => `%${term}%`);
+      const matchCondition = termClauses.length ? `AND (${termClauses.join(' OR ')})` : '';
+      const relevanceOrder = queryTerms.length
+        ? `(${queryTerms.map(() => 'CASE WHEN LOWER(message_text) LIKE ? THEN 1 ELSE 0 END').join(' + ')}) DESC,`
+        : '';
+      const candidates = await db.prepare(`
+        SELECT sender_name, message_text, timestamp FROM chat_logs
+        WHERE chat_jid IN (${chatPlaceholders})
+          ${matchCondition}
           AND COALESCE(is_noise, 0) = 0
           AND LOWER(message_text) NOT LIKE '%<think%'
           AND LOWER(message_text) NOT LIKE '%<analysis%'
           AND LOWER(message_text) NOT LIKE '%<reasoning%'
           AND LOWER(message_text) NOT LIKE '%<tool_call%'
-        ORDER BY id DESC LIMIT 8
-      `).all(sanitized, ...chatJids) as unknown as Array<{ sender_name: string; message_text: string }>;
+        ORDER BY ${relevanceOrder} id DESC LIMIT 250
+      `).all(...chatJids, ...termParams, ...(queryTerms.length ? termParams : [])) as unknown as Array<{
+        sender_name: string;
+        message_text: string;
+        timestamp: number;
+      }>;
+
+      const lowerQuery = query.toLocaleLowerCase().trim();
+      return candidates
+        .map((row) => {
+          const body = (row.message_text || '').toLocaleLowerCase();
+          const matchScore = (queryTerms.length === 0 ? 0.5 : queryTerms.reduce((score, term) => score + (body.includes(term) ? 1 : 0), 0)) +
+            (lowerQuery.length >= 5 && body.includes(lowerQuery) ? 1.5 : 0);
+          return { ...row, matchScore };
+        })
+        .sort((a, b) => b.matchScore - a.matchScore || b.timestamp - a.timestamp)
+        .slice(0, 8);
     } catch {
       return [];
     }

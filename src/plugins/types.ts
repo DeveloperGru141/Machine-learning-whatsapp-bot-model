@@ -20,6 +20,11 @@ export interface ToolResult {
   success: boolean;
   message?: string;
   data?: any;
+  evidence?: {
+    kind: 'live' | 'internal' | 'static';
+    fetchedAt?: number;
+    sources?: string[];
+  };
 }
 
 export interface BotTool {
