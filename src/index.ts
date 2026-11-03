@@ -185,7 +185,6 @@ function startHealthServer() {
         status: 'ok',
         bot: config.bot.name,
         creator: config.bot.creator,
-        pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2347058967815'}`,
         whatsappRegistered,
         whatsappConnected: whatsappRegistered && whatsAppClient.isSocketOpen() && report.isConnected,
         qr: whatsAppClient.getLatestQr(),
@@ -205,6 +204,7 @@ function startHealthServer() {
     // 2. WhatsApp Pairing & QR Endpoints (Never blocked by rate-limiting)
     if (req.url && (req.url.startsWith('/qr') || req.url.startsWith('/pair'))) {
       const registered = whatsAppClient.isRegistered();
+      const pairingCodeEnabled = Boolean(config.bot.pairingPhoneNumber);
 
       // On-demand refresh endpoint: /pair?refresh=1 or /qr?refresh=1
       if (req.url.includes('refresh=1') || req.url.includes('new=1')) {
@@ -215,7 +215,7 @@ function startHealthServer() {
           JSON.stringify({
             status: whatsAppClient.isRegistered() ? 'already_connected' : 'pairing_code_refreshed',
             whatsappRegistered: whatsAppClient.isRegistered(),
-            pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2347058967815'}`,
+            pairingCodeEnabled,
             pairingCode: freshCode,
             qr: freshQr,
           })
@@ -227,7 +227,7 @@ function startHealthServer() {
       let pairingCode = whatsAppClient.getLatestPairingCode();
 
       // Auto-generate fresh valid code on page load if none or expired
-      if (!registered && !pairingCode) {
+      if (!registered && pairingCodeEnabled && !pairingCode) {
         pairingCode = await whatsAppClient.requestFreshPairingCode(false);
         qr = whatsAppClient.getLatestQr();
       }
@@ -238,7 +238,7 @@ function startHealthServer() {
           JSON.stringify({
             status: registered ? 'already_connected' : 'awaiting_qr_scan',
             whatsappRegistered: registered,
-            pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2347058967815'}`,
+            pairingCodeEnabled,
             pairingCode,
             qr,
           })
@@ -270,7 +270,7 @@ function startHealthServer() {
 <body>
   <div class="card">
     <h1>${config.bot.name}</h1>
-    <p>Link WhatsApp (+${config.bot.pairingPhoneNumber || '2347058967815'}) via QR Scan or Pairing Code</p>
+    <p>${pairingCodeEnabled ? 'Link WhatsApp by scanning a QR code or using a pairing code' : 'Link WhatsApp by scanning the QR code'}</p>
     <div id="qr-container" class="qr-box">
       ${
         registered
@@ -280,18 +280,18 @@ function startHealthServer() {
           : '<div style="color:#111b21;padding:110px 20px;font-weight:600;">Generating fresh QR code...</div>'
       }
     </div>
-    <div id="code-container" class="code-box" style="${registered ? 'display:none;' : ''}">
+    <div id="code-container" class="code-box" style="${registered || !pairingCodeEnabled ? 'display:none;' : ''}">
       <span>CODE: <b id="pair-code-text">${pairingCode || 'Loading...'}</b></span>
       <button id="copy-btn" class="btn" onclick="copyPairCode()">📋 Copy</button>
     </div>
-    <div id="action-bar" style="margin-top:12px;${registered ? 'display:none;' : ''}">
+    <div id="action-bar" style="margin-top:12px;${registered || !pairingCodeEnabled ? 'display:none;' : ''}">
       <button id="refresh-btn" class="btn" onclick="requestNewCode()">🔄 Request Fresh Pairing Code</button>
     </div>
-    <div><span id="status-badge" class="badge">${registered ? '🟢 Connected & Active' : '⏳ Waiting for Link (Auto-refreshes live)'}</span></div>
+    <div><span id="status-badge" class="badge">${registered ? '🟢 Connected & Active' : pairingCodeEnabled ? '⏳ Waiting for Link (Auto-refreshes live)' : '⏳ Scan the QR code to link WhatsApp'}</span></div>
     <div class="steps">
-      1. Open <b>WhatsApp</b> on your phone (<b>07058967815</b>)<br/>
+      1. Open <b>WhatsApp</b> on your phone<br/>
       2. Tap <b>Settings (or ⋮) &rarr; Linked Devices &rarr; Link a Device</b><br/>
-      3. Scan the QR code above OR tap <b>"Link with phone number instead"</b> and enter the code shown above.
+      ${pairingCodeEnabled ? '3. Scan the QR code above or tap <b>"Link with phone number instead"</b> and enter the code shown above.' : '3. Scan the QR code above to link WhatsApp.'}
     </div>
   </div>
   <script>

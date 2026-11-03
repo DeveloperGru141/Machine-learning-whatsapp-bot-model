@@ -1,7 +1,7 @@
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
-  fetchLatestBaileysVersion,
+  fetchLatestWaWebVersion,
   Browsers,
   type WAMessage,
   type WASocket,
@@ -12,7 +12,6 @@ import { WHATSAPP_MEME_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-
 import { stickerEngine } from '../plugins/stickers/sticker-engine.js';
 import { getOrGenerateMemeMedia, getOrGenerateQuoteMedia } from '../plugins/scheduler/media-card-generator.js';
 import pino from 'pino';
-import qrcode from 'qrcode-terminal';
 import { Boom } from '@hapi/boom';
 import fs from 'fs';
 import path from 'path';
@@ -48,7 +47,7 @@ import { antiBanEngine } from '../security/anti-ban.js';
 
 /**
  * Normalizes a phone number for Baileys pairing code generation.
- * Delegates to the central normalizePhoneNumber helper (e.g. 07058967815 -> 2347058967815).
+ * Delegates to the central normalizePhoneNumber helper.
  */
 export function formatPhoneNumberForPairing(num: string): string {
   return normalizePhoneNumber(num);
@@ -742,7 +741,7 @@ export class WhatsAppClient {
             const rawCreds = JSON.parse(content);
             const isFullyPaired = Boolean(rawCreds?.registered === true || (rawCreds?.me?.id && rawCreds?.me?.lid && !rawCreds?.pairingEphemeralKeyPair));
             const existingPhone = (rawCreds?.me?.id || '').split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
-            const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '07058967815');
+            const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '');
 
             if (!isFullyPaired) {
               // Incomplete pairing attempt left a partial creds.me without account/registered; wipe so Baileys sends RegistrationNode
@@ -800,8 +799,18 @@ export class WhatsAppClient {
           this.autoBackupSessionToRender();
         }
       };
-      const { version, isLatest } = await fetchLatestBaileysVersion();
-      console.log(`[WhatsAppClient] Starting Baileys v${version.join('.')} (Latest: ${isLatest})`);
+      // fetchLatestBaileysVersion() can return a stale bundled protocol revision while
+      // reporting it as latest. WhatsApp rejects new device registrations on stale
+      // revisions, often surfacing on the phone as "Couldn't link device".
+      const waWebVersion = await fetchLatestWaWebVersion();
+      if (!waWebVersion.isLatest || waWebVersion.error) {
+        const reason = waWebVersion.error instanceof Error ? waWebVersion.error.message : 'unknown fetch error';
+        console.error(`[WhatsAppClient] Could not fetch the current WhatsApp Web protocol version (${reason}); retrying in 30s.`);
+        this.scheduleReconnect(30_000);
+        return;
+      }
+      const { version } = waWebVersion;
+      console.log(`[WhatsAppClient] Starting Baileys with live WhatsApp Web protocol v${version.join('.')}`);
 
       const msgRetryCounterMap = new Map<string, any>();
       const msgRetryCounterCache = {
@@ -924,39 +933,27 @@ export class WhatsAppClient {
 
         if (qr) {
           this.latestQr = qr;
-          console.log('\n📱 SCAN THE QR CODE BELOW (OR OPEN /qr ON THE SERVER) TO CONNECT WHATSAPP:');
-          qrcode.generate(qr, { small: true });
+          console.log('[WhatsAppClient] Pairing QR refreshed and available on the local /pair page.');
         }
 
-        // Request deterministic pairing code (ADEM1234) ONCE right when the initial QR noise handshake is ready
-        if (qr && !this.isRegistered() && !this.pairingRequested) {
+        // Request one fresh pairing code when the initial QR/noise handshake is ready.
+        if (qr && !this.isRegistered() && !this.pairingRequested && config.bot.pairingPhoneNumber) {
           this.pairingRequested = true;
-          const phoneNumber = config.bot.pairingPhoneNumber || '07058967815';
+          const phoneNumber = config.bot.pairingPhoneNumber || '';
           const cleanNumber = formatPhoneNumberForPairing(phoneNumber);
           if (cleanNumber && this.sock) {
             setTimeout(async () => {
               if (!this.sock || this.isRegistered()) return;
               try {
-                console.log(`[WhatsAppClient] Requesting clean pairing code for +${cleanNumber}...`);
-                let code: string;
-                try {
-                  code = await this.sock.requestPairingCode(cleanNumber, 'ADEM1234');
-                } catch {
-                  code = await this.sock.requestPairingCode(cleanNumber);
-                }
+                console.log('[WhatsAppClient] Requesting a fresh WhatsApp pairing code...');
+                // Let Baileys generate a fresh one-time code for each pairing attempt.
+                // Reusing a fixed custom code can leave the phone and socket out of sync.
+                const code = await this.sock.requestPairingCode(cleanNumber);
                 this.latestPairingCode = code;
                 this.latestPairingCodeAt = Date.now();
-                console.log('\n======================================================');
-                console.log(`📱 YOUR WHATSAPP PAIRING CODE: ${code} (ADEM-1234)`);
-                console.log('------------------------------------------------------');
-                console.log(`Phone Number: +${cleanNumber} (${phoneNumber})`);
-                console.log('1. Open WhatsApp on your phone');
-                console.log('2. Go to Settings > Linked Devices > Link a Device');
-                console.log('3. Tap "Link with phone number instead"');
-                console.log(`4. Enter code: ${code}`);
-                console.log('======================================================\n');
+                console.log('[WhatsAppClient] Pairing code generated; use the current code shown on the local /pair page.');
               } catch (err: any) {
-                console.error(`[WhatsAppClient] Error requesting pairing code:`, err.message);
+                console.error('[WhatsAppClient] Error requesting pairing code:', err instanceof Error ? err.message : 'unknown error');
                 this.pairingRequested = false;
               }
             }, 800);
@@ -1010,7 +1007,7 @@ export class WhatsAppClient {
                 return;
               }
               console.error(
-                '🚨 [WhatsAppClient] Session credentials permanently rejected by WhatsApp (401 Unauthorized after 3 retries). Clearing invalid credentials and generating clean pairing code ADEM1234...'
+              '🚨 [WhatsAppClient] Session credentials permanently rejected by WhatsApp (401 Unauthorized after 3 retries). Clearing invalid credentials and starting a fresh pairing session...'
               );
             }
             this.sessionBundleInvalidated = true;
@@ -1027,9 +1024,9 @@ export class WhatsAppClient {
             return;
           }
 
-          // If unlinked pairing attempt closed for ANY reason (428, 408, 401), wipe partial creds so next loop starts a clean RegistrationNode with ADEM1234
+          // If an unlinked pairing attempt closes, wipe partial credentials before retrying.
           if (!isRegistered) {
-            console.log('[WhatsAppClient] Unlinked pairing socket closed. Resetting partial credentials to keep pairing code ADEM1234 active...');
+            console.log('[WhatsAppClient] Unlinked pairing socket closed. Resetting partial credentials before retrying...');
             try {
               if (fs.existsSync(config.paths.sessions)) {
                 fs.rmSync(config.paths.sessions, { recursive: true, force: true });
@@ -2271,7 +2268,7 @@ export class WhatsAppClient {
         Math.min(250, Math.max(20, batchLimit * 10)),
         now
       );
-      const ownPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '07058967815');
+      const ownPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '');
       const ownSockDigits = (this.sock?.user?.id || '').split(':')[0].split('@')[0];
       // Filter strictly for safety
       const genuineChats = candidates.filter((chat) => {
