@@ -14,9 +14,17 @@ const CURRENT_QUANTITY =
 const CURRENT_ROLE_OR_VALUE =
   /\b(?:who is|who's|what is)\s+(?:the\s+)?(?:current\s+)?(?:president|prime minister|ceo|head coach|manager|leader|governor|mayor|richest person)\s+(?:of|in)\b|\b(?:price|exchange rate|stock price|market cap|weather|temperature)\s+(?:of|in|for)\b|\bwhere does\s+[\w'-]+\s+play\b|\bwhat (?:team|club) does\s+[\w'-]+\s+play for\b/i;
 
+const EXPLICIT_WEB_LOOKUP =
+  /\b(?:search(?:\s+for)?|look\s+up|google|browse)\s+(?:the\s+)?(?:web|internet|online)\b|\b(?:search(?:\s+for)?|look\s+up|google)\s+.{2,}/i;
+
 export function requiresCurrentWebEvidence(text: string): boolean {
   const normalized = (text || '').trim();
-  return CURRENT_MARKERS.test(normalized) || CURRENT_QUANTITY.test(normalized) || CURRENT_ROLE_OR_VALUE.test(normalized);
+  return (
+    CURRENT_MARKERS.test(normalized) ||
+    CURRENT_QUANTITY.test(normalized) ||
+    CURRENT_ROLE_OR_VALUE.test(normalized) ||
+    EXPLICIT_WEB_LOOKUP.test(normalized)
+  );
 }
 
 const CURRENT_FOLLOW_UP =

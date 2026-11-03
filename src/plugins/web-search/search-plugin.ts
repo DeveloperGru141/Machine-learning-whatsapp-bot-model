@@ -32,6 +32,28 @@ const ESPN_LEAGUES: Record<string, { code: string; name: string }> = {
   confederation: { code: 'uefa.europa.conf', name: 'UEFA Conference League' },
 };
 
+function extractFootballFilters(query: string): { team?: string; league?: string } {
+  const leaguePatterns: Array<[RegExp, string]> = [
+    [/\b(?:champions league|ucl)\b/i, 'champions'],
+    [/\b(?:premier league|epl)\b/i, 'epl'],
+    [/\b(?:la liga|laliga)\b/i, 'laliga'],
+    [/\b(?:serie a)\b/i, 'seriea'],
+    [/\b(?:bundesliga)\b/i, 'bundesliga'],
+    [/\b(?:ligue 1|ligue one)\b/i, 'ligue1'],
+    [/\b(?:primeira liga|portuguese league)\b/i, 'primeira'],
+    [/\b(?:europa league|uel)\b/i, 'europa'],
+  ];
+  const league = leaguePatterns.find(([pattern]) => pattern.test(query))?.[1];
+  const team = query
+    .replace(/\b(?:champions\s+league|ucl|premier\s+league|epl|la\s+liga|laliga|serie\s+a|bundesliga|ligue\s*1|ligue\s+one|primeira\s+liga|portuguese\s+league|europa\s+league|uel)\b/gi, ' ')
+    .replace(/\b(?:what|who|is|are|the|check|show|find|get|give|tell|me|about|current|live|latest|football|soccer|match|matches|game|games|score|scores|result|results|data|information|details|status|happening|playing|played|won|of|for|on|in|at|today|yesterday|tonight|right\s+now|this\s+evening|last\s+night|please|now)\b/gi, ' ')
+    .replace(/[^\p{L}\p{N}\s'.-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return { ...(team ? { team } : {}), ...(league ? { league } : {}) };
+}
+
 /**
  * Format a Date object into YYYYMMDD string for ESPN API
  */
@@ -136,6 +158,8 @@ export async function fetchLiveFootballScores(
         ESPN_LEAGUES.laliga,
         ESPN_LEAGUES.seriea,
         ESPN_LEAGUES.bundesliga,
+        ESPN_LEAGUES.ligue1,
+        ESPN_LEAGUES.primeira,
         ESPN_LEAGUES.europa
       );
     }
@@ -242,9 +266,11 @@ export async function fetchLiveFootballScores(
   }
 
   return {
-    text: `No active match results found for "${teamQuery || 'today'}". Please check back during match day or specify the team name clearly.`,
+    text: sources.size > 0
+      ? `No active match results were listed by the live scoreboards for "${teamQuery || 'today'}".`
+      : `Could not retrieve live match results for "${teamQuery || 'today'}" from the available scoreboards.`,
     matches: [],
-    sources: [],
+    sources: [...sources],
   };
 }
 
@@ -257,7 +283,7 @@ export class WebSearchPlugin implements IPlugin {
     {
       name: 'get_live_football_scores',
       description:
-        'Retrieves live, real-time football (soccer) match scores, latest results (e.g. Champions League, Premier League, La Liga, Serie A, Porto, Arsenal, Madrid), match status, and game details. Use this whenever the user asks about football scores, match results, who won, or how a game ended.',
+        'Retrieves live football (soccer) scores, fixtures, and latest results. Use for general requests to check live football or match data even when no team is named, as well as named teams or leagues, score questions, results, and match status.',
       parameters: {
         type: 'object',
         properties: {
@@ -274,7 +300,11 @@ export class WebSearchPlugin implements IPlugin {
       },
       execute: async (args: { team?: string; league?: string }, _ctx: ExecutionContext): Promise<ToolResult> => {
         try {
-          const { text, matches, sources } = await fetchLiveFootballScores(args.team, args.league);
+          const parsed = extractFootballFilters(args.team || '');
+          const { text, matches, sources } = await fetchLiveFootballScores(
+            parsed.team,
+            args.league || parsed.league
+          );
           return {
             success: true,
             message: `${text}\n\n[Scores verified via live sports scoreboard. Summarize clearly and accurately for the user.]`,
@@ -343,13 +373,9 @@ export class WebSearchPlugin implements IPlugin {
             /\b(score|scores|result|played|game|match|win|lost|draw)\b/i.test(lower)
           ) {
             console.log(`[WebSearch] Football query detected in web_search: "${rawQuery}". Querying live sports scoreboard...`);
-            const teamMatch = rawQuery
-              .replace(/\b(?:what|who|is|the|current|live|football|soccer|match|game|score|scores|result|results|won|of|for|today|yesterday|tonight|right now|this evening|last night|s)\b/gi, ' ')
-              .replace(/[^\p{L}\p{N}\s'.-]/gu, ' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            const { text, matches, sources } = await fetchLiveFootballScores(teamMatch);
-            if (matches.length > 0 || text.includes('⚽')) {
+            const { team, league } = extractFootballFilters(rawQuery);
+            const { text, matches, sources } = await fetchLiveFootballScores(team, league);
+            if (matches.length > 0 || text.includes('⚽') || sources.length > 0) {
               return {
                 success: true,
                 message: `${text}\n\n[Live match data retrieved. State the score directly and concisely.]`,
