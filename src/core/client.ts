@@ -67,6 +67,7 @@ export class WhatsAppClient {
   private isScanningUnreplied = false;
   private activeInboundDmChats: Map<string, number> = new Map();
   private pairingRequested = false;
+  private pairingRefreshInFlight: Promise<string | null> | null = null;
   private latestPairingCode: string | null = null;
   private latestPairingCodeAt = 0;
   private latestQr: string | null = null;
@@ -254,6 +255,24 @@ export class WhatsAppClient {
       return this.latestPairingCode;
     }
 
+    // Pairing pages poll while a code is being generated. Coalesce those requests so
+    // concurrent polls cannot repeatedly tear down and replace the same socket.
+    if (this.pairingRefreshInFlight) {
+      return this.pairingRefreshInFlight;
+    }
+
+    const refreshPromise = this.generateFreshPairingCode();
+    this.pairingRefreshInFlight = refreshPromise;
+    try {
+      return await refreshPromise;
+    } finally {
+      if (this.pairingRefreshInFlight === refreshPromise) {
+        this.pairingRefreshInFlight = null;
+      }
+    }
+  }
+
+  private async generateFreshPairingCode(): Promise<string | null> {
     // Clean session wipe & fresh socket start
     console.log('[WhatsAppClient] 🔄 Generating clean pairing session and fresh pairing code...');
     this.sessionBundleInvalidated = true;
@@ -401,7 +420,7 @@ export class WhatsAppClient {
    */
   private async fetchLatestSessionBundle(): Promise<string | undefined> {
     const apiKey = process.env.RENDER_API_KEY;
-    const serviceId = process.env.RENDER_SERVICE_ID;
+    const serviceId = process.env.RENDER_SERVICE_ID || 'srv-dbipgmetlv9c73bcah0g';
     if (apiKey && serviceId) {
       try {
         const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars?limit=100`, {
@@ -530,7 +549,7 @@ export class WhatsAppClient {
         this.lastBackupAt = Date.now();
         return;
       }
-      const serviceId = process.env.RENDER_SERVICE_ID || 'srv-db9jvcmq1p3s738hpa40';
+      const serviceId = process.env.RENDER_SERVICE_ID || 'srv-dbipgmetlv9c73bcah0g';
       const envVarsUrl = `https://api.render.com/v1/services/${serviceId}/env-vars`;
       const headers = {
         'Authorization': `Bearer ${apiKey}`,

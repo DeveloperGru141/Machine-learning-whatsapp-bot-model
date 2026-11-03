@@ -165,11 +165,12 @@ function startHealthServer() {
 
       // Public health probe (for Render uptime checks and load balancer probes)
       if (!auth.isAuthenticated) {
+        const whatsappRegistered = whatsAppClient.isRegistered();
         const publicPayload = JSON.stringify({
           status: 'ok',
           bot: config.bot.name,
-          whatsappConnected: whatsAppClient.isSocketOpen() || report.isConnected,
-          whatsappRegistered: whatsAppClient.isRegistered(),
+          whatsappConnected: whatsappRegistered && whatsAppClient.isSocketOpen() && report.isConnected,
+          whatsappRegistered,
           uptimeSeconds: report.uptime,
           timestamp: new Date().toISOString(),
         });
@@ -179,13 +180,14 @@ function startHealthServer() {
       }
 
       // Full diagnostic probe for authenticated admin
+      const whatsappRegistered = whatsAppClient.isRegistered();
       const payload = JSON.stringify({
         status: 'ok',
         bot: config.bot.name,
         creator: config.bot.creator,
         pairingPhoneNumber: `+${config.bot.pairingPhoneNumber || '2347058967815'}`,
-        whatsappRegistered: whatsAppClient.isRegistered(),
-        whatsappConnected: whatsAppClient.isSocketOpen() || report.isConnected,
+        whatsappRegistered,
+        whatsappConnected: whatsappRegistered && whatsAppClient.isSocketOpen() && report.isConnected,
         qr: whatsAppClient.getLatestQr(),
         pairingCode: whatsAppClient.getLatestPairingCode(),
         activeModel: llmClient.getModel(),
@@ -324,7 +326,10 @@ function startHealthServer() {
       }
     }
 
+    let pairingPollInFlight = false;
     setInterval(async () => {
+      if (pairingPollInFlight) return;
+      pairingPollInFlight = true;
       try {
         const res = await fetch('/qr?json=1');
         const data = await res.json();
@@ -341,14 +346,21 @@ function startHealthServer() {
           if (actionBar) actionBar.style.display = 'none';
           return;
         }
-        if (data.pairingCode && codeText && (!codeText.textContent || codeText.textContent === 'Loading...')) {
+        if (codeText && data.pairingCode && codeText.textContent !== data.pairingCode) {
           codeText.textContent = data.pairingCode;
+          badge.textContent = '⏳ Fresh pairing code ready — enter it now';
+        } else if (codeText && !data.pairingCode && !data.whatsappRegistered) {
+          codeText.textContent = 'Refreshing...';
         }
         if (data.qr && data.qr !== lastQr) {
           lastQr = data.qr;
           container.innerHTML = '<img id="qr-img" src="https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=10&data=' + encodeURIComponent(data.qr) + '" alt="WhatsApp QR Code" />';
         }
-      } catch (e) {}
+      } catch (e) {
+        badge.textContent = '⚠️ Pairing status refresh failed — retrying';
+      } finally {
+        pairingPollInFlight = false;
+      }
     }, 2500);
   </script>
 </body>
