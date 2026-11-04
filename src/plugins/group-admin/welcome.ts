@@ -23,7 +23,7 @@ export function setupGroupWelcome(sock: WASocket): void {
       const botLidNormalized = botLid ? botLid.split(':')[0] + '@lid' : '';
 
       const isBotTargeted = (participant: (typeof update.participants)[number]) => {
-        const p = participant.id;
+        const p = typeof participant === 'string' ? participant : (participant as { id: string }).id;
         return p === botNumber ||
           (botId && p === botId) ||
           (botLid && p === botLid) ||

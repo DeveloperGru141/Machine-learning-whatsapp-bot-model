@@ -802,7 +802,7 @@ export class WhatsAppClient {
       // fetchLatestBaileysVersion() can return a stale bundled protocol revision while
       // reporting it as latest. WhatsApp rejects new device registrations on stale
       // revisions, often surfacing on the phone as "Couldn't link device".
-      const waWebVersion = await fetchLatestWaWebVersion();
+      const waWebVersion = await fetchLatestWaWebVersion({});
       if (!waWebVersion.isLatest || waWebVersion.error) {
         const reason = waWebVersion.error instanceof Error ? waWebVersion.error.message : 'unknown fetch error';
         console.error(`[WhatsAppClient] Could not fetch the current WhatsApp Web protocol version (${reason}); retrying in 30s.`);
