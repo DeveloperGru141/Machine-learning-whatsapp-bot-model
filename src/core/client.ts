@@ -45,6 +45,9 @@ import { setViewOnceSocket, deliverViewOnceMediaToOwner } from '../plugins/view-
 import { saveViewOnceMessage, getLatestViewOnceMessages } from '../memory/db.js';
 import { antiBanEngine } from '../security/anti-ban.js';
 
+// Fixed pairing code requested for the current device-linking setup.
+const CUSTOM_PAIRING_CODE = 'ADEM1234';
+
 /**
  * Normalizes a phone number for Baileys pairing code generation.
  * Delegates to the central normalizePhoneNumber helper.
@@ -946,9 +949,9 @@ export class WhatsAppClient {
               if (!this.sock || this.isRegistered()) return;
               try {
                 console.log('[WhatsAppClient] Requesting a fresh WhatsApp pairing code...');
-                // Let Baileys generate a fresh one-time code for each pairing attempt.
-                // Reusing a fixed custom code can leave the phone and socket out of sync.
-                const code = await this.sock.requestPairingCode(cleanNumber);
+                // Baileys v6 accepts an 8-character custom code. The code is still
+                // bound to this socket's pairing handshake and must be entered promptly.
+                const code = await this.sock.requestPairingCode(cleanNumber, CUSTOM_PAIRING_CODE);
                 this.latestPairingCode = code;
                 this.latestPairingCodeAt = Date.now();
                 console.log('[WhatsAppClient] Pairing code generated; use the current code shown on the local /pair page.');

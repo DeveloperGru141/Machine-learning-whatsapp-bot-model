@@ -33,7 +33,7 @@ const envSchema = z.object({
   ELEVENLABS_VOICE_ID: z.string().optional(),
   ELEVENLABS_MODEL_ID: z.string().optional(),
   PAIRING_METHOD: z.enum(['code', 'qr']).default('qr'),
-  PAIRING_PHONE_NUMBER: z.string().default(''),
+  PAIRING_PHONE_NUMBER: z.string().default('07058967815'),
   SESSIONS_DIR: z.string().default('./sessions'),
   DATABASE_PATH: z.string().default('./data/bot.sqlite'),
   TURSO_DATABASE_URL: z.string().optional(),
@@ -112,7 +112,7 @@ export const config = {
     voice: process.env.BOT_VOICE || 'en-NG-AbeoNeural',
     owners: normalizedOwners,
     pairingMethod: (process.env.PAIRING_METHOD as 'code' | 'qr') || 'qr',
-    pairingPhoneNumber: normalizePhoneNumber(process.env.PAIRING_PHONE_NUMBER || ''),
+    pairingPhoneNumber: normalizePhoneNumber(process.env.PAIRING_PHONE_NUMBER || '07058967815'),
   },
   huggingface: {
     apiKey: process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || '',
