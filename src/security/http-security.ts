@@ -24,7 +24,7 @@ export class HttpSecurityManager {
     }
 
     // Deterministic fallback derived from bot owner phone and pairing phone
-    const baseSecret = `forgelabs_${config.bot.owners.join('_')}_${config.bot.pairingPhoneNumber || '2347058967815'}`;
+    const baseSecret = `forgelabs_${config.bot.owners.join('_')}_${config.bot.pairingPhoneNumber || '2349014896714'}`;
     return crypto.createHash('sha256').update(baseSecret).digest('hex').slice(0, 32);
   }
 

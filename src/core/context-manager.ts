@@ -206,7 +206,7 @@ export class ContextManager {
           row.sender_name === 'Forgelabs Assistant' ||
           row.sender_jid === 'bot' ||
           (row.sender_jid &&
-            (row.sender_jid.startsWith('2347058967815') ||
+            (row.sender_jid.startsWith('2349014896714') ||
               row.sender_jid.startsWith('2349014896714') ||
               row.sender_jid.startsWith('271614570692796') ||
               (config.bot.pairingPhoneNumber && row.sender_jid.startsWith(config.bot.pairingPhoneNumber))));
