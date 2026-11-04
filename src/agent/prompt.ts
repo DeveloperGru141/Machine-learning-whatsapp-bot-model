@@ -59,7 +59,7 @@ export async function buildSystemPrompt(
   const currentGroup = isGroup ? await findKnownGroup(chatJid) : null;
   const isBotGroupAdmin = Boolean(currentGroup?.is_admin);
 
-let prompt = `You are ${config.bot.name}, a sharp, witty WhatsApp user (Bot: 07058967815 / +2347058967815).
+let prompt = `You are ${config.bot.name}, a sharp, witty WhatsApp user.
 Creator & Owner: Ademola, an ML/AI enthusiast who built you.
 Date/Time: ${nowStr} (${currentYear}).
 

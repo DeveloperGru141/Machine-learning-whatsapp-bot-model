@@ -140,14 +140,15 @@ export async function shouldRespondToMessage(
   // Check 3: Was the bot called by name or phone number in text?
   const textLower = (rawText || '').toLowerCase().trim();
   const botConfigName = (config.bot.name || 'forgelabs').toLowerCase();
-  const pairingDigits = (config.bot.pairingPhoneNumber || '07058967815').replace(/[^0-9]/g, '');
+  const pairingDigits = (config.bot.pairingPhoneNumber || '').replace(/[^0-9]/g, '');
   const cleanPhoneDigits = cleanPhoneId || '2347058967815';
   const cleanLidDigits = cleanLidId || '83954564632610';
 
-  const textTriggerRegex = new RegExp(
-    `(^|\\s|@)(${botConfigName}|forgelabs|assistant|bot|${cleanPhoneDigits}|${pairingDigits}|${cleanLidDigits})\\b`,
-    'i'
-  );
+  const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const namedTriggers = [botConfigName, 'forgelabs', 'assistant', 'bot', cleanPhoneDigits, pairingDigits, cleanLidDigits]
+    .filter(Boolean)
+    .map(escapeRegex);
+  const textTriggerRegex = new RegExp(`(^|\\s|@)(${namedTriggers.join('|')})\\b`, 'i');
   const isNameCalled = textTriggerRegex.test(textLower);
 
   if (isMentioned || isQuoted || isNameCalled) {
@@ -160,9 +161,13 @@ export async function shouldRespondToMessage(
       const num = jid.split('@')[0];
       cleaned = cleaned.replace(new RegExp(`@${num}`, 'g'), '').trim();
     }
+    const mentionTriggers = [botConfigName, 'forgelabs', 'bot', cleanPhoneDigits, pairingDigits, cleanLidDigits]
+      .filter(Boolean)
+      .map(escapeRegex)
+      .join('|');
     cleaned = cleaned
       .replace(new RegExp(`^@?(${botConfigName}|forgelabs|bot)[:,-]?\\s*`, 'i'), '')
-      .replace(new RegExp(`@(${botConfigName}|forgelabs|bot|${cleanPhoneDigits}|${pairingDigits}|${cleanLidDigits})`, 'gi'), '')
+      .replace(new RegExp(`@(${mentionTriggers})`, 'gi'), '')
       .trim();
 
     return { shouldRespond: true, cleanedText: cleaned || rawText.trim() };
