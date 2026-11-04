@@ -1,5 +1,6 @@
 process.env.TZ = process.env.BOT_TIMEZONE || 'Africa/Lagos';
 import dns from 'dns';
+import { createRequire } from 'module';
 try {
   dns.setDefaultResultOrder('ipv4first');
   dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4', '1.0.0.1']);
@@ -31,6 +32,41 @@ import { healthMonitor } from './core/health-monitor.js';
 import { llmClient } from './agent/llm-client.js';
 import { antiBanEngine } from './security/anti-ban.js';
 import { httpSecurityManager } from './security/http-security.js';
+
+const require = createRequire(import.meta.url);
+const QRCode = require('qrcode-terminal/vendor/QRCode') as {
+  new (typeNumber: number, errorCorrectionLevel: number): {
+    addData(value: string): void;
+    make(): void;
+    getModuleCount(): number;
+    modules: boolean[][];
+  };
+};
+const QRErrorCorrectLevel = require('qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel') as { M: number };
+
+/**
+ * Creates the pairing QR as SVG in-process. The QR payload stays on this
+ * service and is never sent to an external image-rendering service.
+ */
+function renderPairingQrSvg(payload: string): string {
+  const qr = new QRCode(-1, QRErrorCorrectLevel.M);
+  qr.addData(payload);
+  qr.make();
+
+  const quietZone = 4;
+  const moduleCount = qr.getModuleCount();
+  const size = moduleCount + quietZone * 2;
+  let path = '';
+  for (let row = 0; row < moduleCount; row++) {
+    for (let column = 0; column < moduleCount; column++) {
+      if (qr.modules[row][column]) {
+        path += `M${column + quietZone} ${row + quietZone}h1v1h-1z`;
+      }
+    }
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" role="img" aria-label="WhatsApp pairing QR code" shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#fff"/><path fill="#000" d="${path}"/></svg>`;
+}
 
 
 // In-memory capture of live server logs (last 500 lines) for Render /logs endpoint
@@ -232,6 +268,23 @@ function startHealthServer() {
         qr = whatsAppClient.getLatestQr();
       }
 
+      // Render the QR locally so the one-time WhatsApp linking credential is
+      // never sent to a third-party QR image service.
+      if (req.url.startsWith('/pair/qr.svg')) {
+        if (!qr || registered) {
+          res.writeHead(404, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'image/svg+xml; charset=utf-8',
+          'Cache-Control': 'no-store, max-age=0',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        res.end(renderPairingQrSvg(qr));
+        return;
+      }
+
       if (req.url.includes('json=1')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(
@@ -276,7 +329,7 @@ function startHealthServer() {
         registered
           ? '<div style="color:#00a884;padding:90px 20px;font-weight:700;font-size:18px;">✅ WhatsApp Connected & Active!</div>'
           : qr
-          ? `<img id="qr-img" src="https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=10&data=${encodeURIComponent(qr)}" alt="WhatsApp QR Code" />`
+          ? '<img id="qr-img" src="/pair/qr.svg" alt="WhatsApp QR Code" />'
           : '<div style="color:#111b21;padding:110px 20px;font-weight:600;">Generating fresh QR code...</div>'
       }
     </div>
@@ -318,7 +371,7 @@ function startHealthServer() {
         }
         if (data.qr) {
           lastQr = data.qr;
-          document.getElementById('qr-container').innerHTML = '<img id="qr-img" src="https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=10&data=' + encodeURIComponent(data.qr) + '" alt="WhatsApp QR Code" />';
+          document.getElementById('qr-container').innerHTML = '<img id="qr-img" src="/pair/qr.svg?t=' + Date.now() + '" alt="WhatsApp QR Code" />';
         }
       } catch (err) {} finally {
         refreshBtn.disabled = false;
@@ -354,7 +407,7 @@ function startHealthServer() {
         }
         if (data.qr && data.qr !== lastQr) {
           lastQr = data.qr;
-          container.innerHTML = '<img id="qr-img" src="https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=10&data=' + encodeURIComponent(data.qr) + '" alt="WhatsApp QR Code" />';
+          container.innerHTML = '<img id="qr-img" src="/pair/qr.svg?t=' + Date.now() + '" alt="WhatsApp QR Code" />';
         }
       } catch (e) {
         badge.textContent = '⚠️ Pairing status refresh failed — retrying';
