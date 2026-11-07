@@ -116,6 +116,7 @@ export class WhatsAppClient {
 
   private loggedOutRetryCount = 0;
   private sessionBundleInvalidated = false;
+  private authenticatedSocketOpen = false;
 
   /**
    * Waits for WhatsApp server ACK (status >= 2) or device delivery receipt (status >= 3)
@@ -300,6 +301,7 @@ export class WhatsAppClient {
     // Clean session wipe & fresh socket start
     console.log('[WhatsAppClient] 🔄 Generating clean pairing session and fresh pairing code...');
     this.sessionBundleInvalidated = true;
+    this.authenticatedSocketOpen = false;
     try {
       if (this.sock) {
         this.sock.ev.removeAllListeners('connection.update');
@@ -489,7 +491,7 @@ export class WhatsAppClient {
   }
 
   public async autoBackupSessionToRender(): Promise<void> {
-    if (this.sessionBundleInvalidated) return;
+    if (this.sessionBundleInvalidated || !this.authenticatedSocketOpen) return;
     if (this.backupInFlight) {
       this.backupQueued = true;
       return;
@@ -714,6 +716,7 @@ export class WhatsAppClient {
       console.log('[WhatsAppClient] Connection attempt already in progress, skipping duplicate invocation.');
       return;
     }
+    this.authenticatedSocketOpen = false;
     this.cancelReconnect();
     this.isConnecting = true;
 
@@ -895,7 +898,13 @@ export class WhatsAppClient {
         await saveCreds();
         if (this.isRegistered()) {
           this.sessionBundleInvalidated = false;
-          this.autoBackupSessionToRender();
+          // Baileys can mark creds as registered before the 515 restart and
+          // authenticated socket-open event. Backing up here can persist an
+          // incomplete creds-only bundle that WhatsApp will reject on deploy.
+          // The connection 'open' handler below backs up the complete session.
+          if (this.authenticatedSocketOpen) {
+            this.autoBackupSessionToRender();
+          }
         }
       });
 
@@ -993,6 +1002,7 @@ export class WhatsAppClient {
         }
 
         if (connection === 'close') {
+          this.authenticatedSocketOpen = false;
           this.stopKeepAlive();
           healthMonitor.setConnectionStatus(false);
           const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
@@ -1112,6 +1122,7 @@ export class WhatsAppClient {
           this.pairingRequested = false;
           this.latestPairingCode = null;
           this.latestQr = null;
+          this.authenticatedSocketOpen = this.isRegistered();
           healthMonitor.setConnectionStatus(true);
           if (this.isRegistered()) {
             this.sessionBundleInvalidated = false;
