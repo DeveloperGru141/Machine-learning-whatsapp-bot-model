@@ -45,9 +45,10 @@ import { setViewOnceSocket, deliverViewOnceMediaToOwner } from '../plugins/view-
 import { saveViewOnceMessage, getLatestViewOnceMessages } from '../memory/db.js';
 import { antiBanEngine } from '../security/anti-ban.js';
 
-// Let Baileys generate a random valid Crockford Base32 pairing code each time.
-// Custom codes must use only the Crockford charset (123456789ABCDEFGHJKLMNPQRSTVWXYZ)
-// and be exactly 8 characters. Passing undefined lets Baileys auto-generate one.
+// Hardcoded pairing code for easy entry. Must be exactly 8 characters from the
+// Crockford Base32 charset: 123456789ABCDEFGHJKLMNPQRSTVWXYZ
+// (excludes I, L, O, U and 0 to avoid ambiguity).
+const CUSTOM_PAIRING_CODE = 'FRGE1234';
 
 /**
  * Normalizes a phone number for Baileys pairing code generation.
@@ -85,6 +86,7 @@ export class WhatsAppClient {
     Array<(info: { status: 'SENT_TO_SERVER' | 'DELIVERED_TO_DEVICE' | 'READ'; statusCode: number; updatedAt: number }) => void>
   > = new Map();
   private lastStickerReplyTime: Map<string, number> = new Map();
+  private pairingPhoneOverride: string | null = null;
 
   public recordDeliveryStatus(msgId: string, recipientJid: string, statusNum: number): void {
     if (!msgId || statusNum < 2) return;
@@ -233,6 +235,11 @@ export class WhatsAppClient {
     return this.latestQr;
   }
 
+  /** Returns the phone number currently being used for pairing (override or config default). */
+  public getPairingPhone(): string {
+    return this.pairingPhoneOverride || config.bot.pairingPhoneNumber || '';
+  }
+
   public isRegistered(): boolean {
     const creds = this.sock?.authState?.creds;
     return Boolean(creds?.registered === true || (creds?.me?.id && !creds?.pairingEphemeralKeyPair));
@@ -242,10 +249,16 @@ export class WhatsAppClient {
    * Returns the current valid pairing code for the active socket, or performs a clean
    * session reset if forceReset is true (or if code is expired / none generated yet).
    * Never calls requestPairingCode twice on the same authState to avoid corrupting noise keys.
+   * @param phoneOverride - optional phone number to pair with instead of config default
    */
-  public async requestFreshPairingCode(forceReset: boolean = false): Promise<string | null> {
+  public async requestFreshPairingCode(forceReset: boolean = false, phoneOverride?: string): Promise<string | null> {
     if (this.isRegistered()) {
       return null;
+    }
+
+    // If a phone override is provided, store it for the connection handler to use
+    if (phoneOverride) {
+      this.pairingPhoneOverride = phoneOverride;
     }
 
     const isCodeExpired =
@@ -960,18 +973,17 @@ export class WhatsAppClient {
         }
 
         // Request one fresh pairing code when the initial QR/noise handshake is ready.
-        if (qr && !this.isRegistered() && !this.pairingRequested && config.bot.pairingPhoneNumber) {
-          this.pairingRequested = true;
-          const phoneNumber = config.bot.pairingPhoneNumber || '';
+        if (qr && !this.isRegistered() && !this.pairingRequested) {
+          // Use the phone override if provided, otherwise fall back to config
+          const phoneNumber = this.pairingPhoneOverride || config.bot.pairingPhoneNumber || '';
           const cleanNumber = formatPhoneNumberForPairing(phoneNumber);
           if (cleanNumber && this.sock) {
+            this.pairingRequested = true;
             setTimeout(async () => {
               if (!this.sock || this.isRegistered()) return;
               try {
-                console.log('[WhatsAppClient] Requesting a fresh WhatsApp pairing code...');
-                // Baileys v7 accepts an optional 8-character Crockford Base32 custom code.
-                // Omitting it lets Baileys generate a valid random code automatically.
-                const code = await this.sock.requestPairingCode(cleanNumber);
+                console.log(`[WhatsAppClient] Requesting a fresh WhatsApp pairing code for ${cleanNumber}...`);
+                const code = await this.sock.requestPairingCode(cleanNumber, CUSTOM_PAIRING_CODE);
                 this.latestPairingCode = code;
                 this.latestPairingCodeAt = Date.now();
                 console.log('[WhatsAppClient] Pairing code generated; use the current code shown on the local /pair page.');

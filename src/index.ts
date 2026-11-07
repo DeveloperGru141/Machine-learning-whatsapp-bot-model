@@ -240,11 +240,14 @@ function startHealthServer() {
     // 2. WhatsApp Pairing & QR Endpoints (Never blocked by rate-limiting)
     if (req.url && (req.url.startsWith('/qr') || req.url.startsWith('/pair'))) {
       const registered = whatsAppClient.isRegistered();
-      const pairingCodeEnabled = Boolean(config.bot.pairingPhoneNumber);
+      const pairingCodeEnabled = true; // Always allow pairing via phone input on the page
 
       // On-demand refresh endpoint: /pair?refresh=1 or /qr?refresh=1
+      // Accepts optional phone= parameter to pair with a different number
       if (req.url.includes('refresh=1') || req.url.includes('new=1')) {
-        const freshCode = await whatsAppClient.requestFreshPairingCode(true);
+        const urlParams = new URL(req.url, `http://${req.headers.host || 'localhost'}`).searchParams;
+        const phoneOverride = urlParams.get('phone') || undefined;
+        const freshCode = await whatsAppClient.requestFreshPairingCode(true, phoneOverride);
         const freshQr = whatsAppClient.getLatestQr();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(
@@ -324,6 +327,10 @@ function startHealthServer() {
   <div class="card">
     <h1>${config.bot.name}</h1>
     <p>${pairingCodeEnabled ? 'Link WhatsApp by scanning a QR code or using a pairing code' : 'Link WhatsApp by scanning the QR code'}</p>
+    <div style="margin-bottom:14px;">
+      <label style="font-size:13px;color:#8696a0;">Phone number to pair (with country code, e.g. 2348012345678):</label>
+      <input id="phone-input" type="text" value="${whatsAppClient.getPairingPhone()}" placeholder="e.g. 2348012345678" style="width:100%;box-sizing:border-box;margin-top:6px;padding:10px 14px;background:#1f2c34;border:1px solid #333;border-radius:8px;color:#e9edef;font-size:16px;letter-spacing:1px;" />
+    </div>
     <div id="qr-container" class="qr-box">
       ${
         registered
@@ -342,9 +349,11 @@ function startHealthServer() {
     </div>
     <div><span id="status-badge" class="badge">${registered ? '🟢 Connected & Active' : pairingCodeEnabled ? '⏳ Waiting for Link (Auto-refreshes live)' : '⏳ Scan the QR code to link WhatsApp'}</span></div>
     <div class="steps">
-      1. Open <b>WhatsApp</b> on your phone<br/>
-      2. Tap <b>Settings (or ⋮) &rarr; Linked Devices &rarr; Link a Device</b><br/>
-      ${pairingCodeEnabled ? '3. Scan the QR code above or tap <b>"Link with phone number instead"</b> and enter the code shown above.' : '3. Scan the QR code above to link WhatsApp.'}
+      1. Enter the phone number above (with country code, no +)<br/>
+      2. Click <b>"Request Fresh Pairing Code"</b><br/>
+      3. Open <b>WhatsApp</b> on that phone<br/>
+      4. Tap <b>Settings (or ⋮) &rarr; Linked Devices &rarr; Link a Device</b><br/>
+      5. Scan the QR code above or tap <b>"Link with phone number instead"</b> and enter the code <b>FRGE1234</b>.
     </div>
   </div>
   <script>
@@ -361,10 +370,13 @@ function startHealthServer() {
 
     async function requestNewCode() {
       const refreshBtn = document.getElementById('refresh-btn');
+      const phoneInput = document.getElementById('phone-input');
       refreshBtn.disabled = true;
       refreshBtn.textContent = '⏳ Requesting code...';
       try {
-        const res = await fetch('/pair?refresh=1');
+        const phone = phoneInput ? phoneInput.value.trim().replace(/[^0-9]/g, '') : '';
+        const url = '/pair?refresh=1' + (phone ? '&phone=' + encodeURIComponent(phone) : '');
+        const res = await fetch(url);
         const data = await res.json();
         if (data.pairingCode) {
           document.getElementById('pair-code-text').textContent = data.pairingCode;
