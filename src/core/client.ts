@@ -6,7 +6,7 @@ import makeWASocket, {
   type WAMessage,
   type WASocket,
 } from '@whiskeysockets/baileys';
-import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied, saveChannelQuote, saveChannelMeme, setBotSetting } from '../memory/db.js';
+import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied, saveChannelQuote, saveChannelMeme, setBotSetting, saveSessionBundleToDb, getSessionBundleFromDb } from '../memory/db.js';
 import { parseQuoteFromText, WHATSAPP_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-quotes-service.js';
 import { WHATSAPP_MEME_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-memes-service.js';
 import { stickerEngine } from '../plugins/stickers/sticker-engine.js';
@@ -234,7 +234,7 @@ export class WhatsAppClient {
 
   public isRegistered(): boolean {
     const creds = this.sock?.authState?.creds;
-    return Boolean(creds?.registered === true || (creds?.me?.id && creds?.me?.lid && !creds?.pairingEphemeralKeyPair));
+    return Boolean(creds?.registered === true || (creds?.me?.id && !creds?.pairingEphemeralKeyPair));
   }
 
   /**
@@ -355,16 +355,22 @@ export class WhatsAppClient {
     const runCycleIfActive = async () => {
       if (!this.isSocketOpen() || this.isScanningUnreplied) return;
       try {
-        await this.replyUnrepliedMessages(1);
+        await this.replyUnrepliedMessages(2);
       } catch (err: any) {
         console.warn('[WhatsAppClient] Unreplied catch-up cycle warning:', err.message);
       }
     };
 
-    // Periodic scanner runs every 2.5 minutes passively for messages that arrived during this session
+    // Warm-up initial run 20 seconds after connect to quickly catch up on pending unreplied messages
+    const warmupTimer = setTimeout(() => {
+      void runCycleIfActive();
+    }, 20_000);
+    warmupTimer.unref?.();
+
+    // Periodic scanner runs every 60 seconds passively for messages that need a reply
     this.unrepliedScanInterval = setInterval(() => {
-      runCycleIfActive();
-    }, 150_000);
+      void runCycleIfActive();
+    }, 60_000);
     if (this.unrepliedScanInterval.unref) this.unrepliedScanInterval.unref();
   }
 
@@ -422,7 +428,8 @@ export class WhatsAppClient {
    */
   private async fetchLatestSessionBundle(): Promise<string | undefined> {
     const apiKey = process.env.RENDER_API_KEY;
-    const serviceId = process.env.RENDER_SERVICE_ID || 'srv-dbnges6417fc73dmuec0';
+    const rawServiceId = process.env.RENDER_SERVICE_ID || '';
+    const serviceId = (rawServiceId && rawServiceId !== 'srv-dbipgmetlv9c73bcah0g') ? rawServiceId : 'srv-dbnges6417fc73dmuec0';
     if (apiKey && serviceId) {
       try {
         const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars?limit=100`, {
@@ -449,6 +456,13 @@ export class WhatsAppClient {
         console.warn('[WhatsAppClient] Render API bundle fetch failed; falling back to process.env snapshot:', err?.message || err);
       }
     }
+
+    const dbBundle = await getSessionBundleFromDb();
+    if (dbBundle && dbBundle.length > 100) {
+      console.log(`[WhatsAppClient] 🗄️ Fetched session bundle from database (${dbBundle.length}b).`);
+      return dbBundle;
+    }
+
     return this.assembleSessionBundle(process.env);
   }
 
@@ -482,7 +496,7 @@ export class WhatsAppClient {
       } catch {
         return;
       }
-      const isFullyPaired = Boolean(rawCreds?.registered === true || (rawCreds?.me?.id && rawCreds?.me?.lid && !rawCreds?.pairingEphemeralKeyPair));
+      const isFullyPaired = Boolean(rawCreds?.registered === true || (rawCreds?.me?.id && !rawCreds?.pairingEphemeralKeyPair));
       if (!isFullyPaired) return;
 
       const zlib = await import('zlib');
@@ -541,6 +555,9 @@ export class WhatsAppClient {
         return;
       }
 
+      // Persist bundle to database store
+      await saveSessionBundleToDb(bundle);
+
       const crypto = await import('crypto');
       const hash = crypto.createHash('sha1').update(bundle).digest('hex');
       if (hash === this.lastBackupHash) return;
@@ -551,7 +568,8 @@ export class WhatsAppClient {
         this.lastBackupAt = Date.now();
         return;
       }
-      const serviceId = process.env.RENDER_SERVICE_ID || 'srv-dbnges6417fc73dmuec0';
+      const rawServiceId = process.env.RENDER_SERVICE_ID || '';
+      const serviceId = (rawServiceId && rawServiceId !== 'srv-dbipgmetlv9c73bcah0g') ? rawServiceId : 'srv-dbnges6417fc73dmuec0';
       const envVarsUrl = `https://api.render.com/v1/services/${serviceId}/env-vars`;
       const headers = {
         'Authorization': `Bearer ${apiKey}`,
@@ -628,7 +646,7 @@ export class WhatsAppClient {
 
       if (saved) {
         this.lastBackupHash = hash;
-        console.log(`[WhatsAppClient] 💾 Persisted authenticated session (${Object.keys(filesMap).length} files kept, ${dropped} pruned, ${bundle.length}b base64) to Render!`);
+        console.log(`[WhatsAppClient] 💾 Persisted authenticated session (${Object.keys(filesMap).length} files kept, ${dropped} pruned, ${bundle.length}b base64) to Render & DB!`);
       }
     } catch (err: any) {
       console.warn('[WhatsAppClient] Auto backup to Render failed:', err.message);
@@ -644,7 +662,8 @@ export class WhatsAppClient {
   }
 
   public isSocketOpen(): boolean {
-    return Boolean(this.sock && (this.sock as any).ws?.isOpen);
+    const ws = (this.sock as any)?.ws;
+    return Boolean(this.sock && (ws?.isOpen || ws?.readyState === 1));
   }
 
   private cancelReconnect(): void {
@@ -700,7 +719,7 @@ export class WhatsAppClient {
           } catch {}
           const isUsable = Boolean(
             parsedCreds?.registered === true ||
-              (parsedCreds?.me?.id && parsedCreds?.me?.lid && !parsedCreds?.pairingEphemeralKeyPair)
+              (parsedCreds?.me?.id && !parsedCreds?.pairingEphemeralKeyPair)
           );
 
           if (filesMap['creds.json'] && isUsable) {
@@ -742,7 +761,7 @@ export class WhatsAppClient {
             this.pairingRequested = false;
           } else {
             const rawCreds = JSON.parse(content);
-            const isFullyPaired = Boolean(rawCreds?.registered === true || (rawCreds?.me?.id && rawCreds?.me?.lid && !rawCreds?.pairingEphemeralKeyPair));
+            const isFullyPaired = Boolean(rawCreds?.registered === true || (rawCreds?.me?.id && !rawCreds?.pairingEphemeralKeyPair));
             const existingPhone = (rawCreds?.me?.id || '').split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
             const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '');
 

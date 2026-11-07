@@ -259,8 +259,12 @@ export class AntiBanEngine {
       return { allowed: true };
     }
 
-    // A caller-supplied reply flag or owner-command flag must not authorize a cold DM.
-    // Verify recent inbound activity across known phone-JID/LID aliases.
+    // Direct reply to an incoming user message is always permitted
+    if (params.isReplyToInbound) {
+      return { allowed: true };
+    }
+
+    // For non-reply proactive DMs, verify recent inbound activity across known phone-JID/LID aliases
     try {
       const normalizedJid = chatJid.replace(/:\d+(?=@)/, '');
       const conversationIds = new Set([chatJid, normalizedJid]);

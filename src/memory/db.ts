@@ -418,6 +418,13 @@ export async function initDatabase() {
       updated_at INTEGER NOT NULL
     );
 
+    -- WhatsApp Auth Session Store: persistent backup of multi-file auth keys & bundle
+    CREATE TABLE IF NOT EXISTS whatsapp_session_store (
+      id TEXT PRIMARY KEY,
+      bundle TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
     -- Anti-ViewOnce Media Vault (captured view-once images/videos/audio)
     CREATE TABLE IF NOT EXISTS view_once_messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1270,6 +1277,34 @@ export async function markViewOnceRetrieved(id: number): Promise<void> {
     await db.prepare(`UPDATE view_once_messages SET retrieved_count = retrieved_count + 1 WHERE id = ?`).run(id);
   } catch {}
 }
+
+/**
+ * Persists the WhatsApp multi-file auth session bundle to the database.
+ */
+export async function saveSessionBundleToDb(bundle: string): Promise<void> {
+  try {
+    await db.prepare(`
+      INSERT INTO whatsapp_session_store (id, bundle, updated_at)
+      VALUES ('session_bundle', ?, ?)
+      ON CONFLICT(id) DO UPDATE SET bundle = excluded.bundle, updated_at = excluded.updated_at
+    `).run(bundle, Date.now());
+  } catch (err: any) {
+    console.warn('[DB] Failed to save session bundle to whatsapp_session_store:', err?.message || err);
+  }
+}
+
+/**
+ * Retrieves the WhatsApp session bundle from the database.
+ */
+export async function getSessionBundleFromDb(): Promise<string | undefined> {
+  try {
+    const row = await db.prepare(`SELECT bundle FROM whatsapp_session_store WHERE id = 'session_bundle'`).get() as { bundle?: string } | undefined;
+    return row?.bundle;
+  } catch {
+    return undefined;
+  }
+}
+
 
 
 

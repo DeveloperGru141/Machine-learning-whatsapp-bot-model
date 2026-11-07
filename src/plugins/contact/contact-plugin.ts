@@ -648,7 +648,7 @@ export class ContactPlugin implements IPlugin {
             await antiBanEngine.simulateTypingPresence(ctx.sock, targetJid, finalDispatchMessage, false, 0, false);
           } catch {}
 
-          const dispatchMessage = () => OutboundSender.replyText(ctx.sock, targetJid, finalDispatchMessage);
+          const dispatchMessage = () => OutboundSender.replyText(ctx.sock, targetJid, finalDispatchMessage, undefined, false, false, undefined, false);
           const sent = isOwner
             ? await antiBanEngine.runOwnerAuthorizedOutbound(dispatchMessage)
             : await dispatchMessage();
