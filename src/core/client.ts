@@ -422,7 +422,7 @@ export class WhatsAppClient {
    */
   private async fetchLatestSessionBundle(): Promise<string | undefined> {
     const apiKey = process.env.RENDER_API_KEY;
-    const serviceId = process.env.RENDER_SERVICE_ID || 'srv-dbipgmetlv9c73bcah0g';
+    const serviceId = process.env.RENDER_SERVICE_ID || 'srv-dbnges6417fc73dmuec0';
     if (apiKey && serviceId) {
       try {
         const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars?limit=100`, {
@@ -551,7 +551,7 @@ export class WhatsAppClient {
         this.lastBackupAt = Date.now();
         return;
       }
-      const serviceId = process.env.RENDER_SERVICE_ID || 'srv-dbipgmetlv9c73bcah0g';
+      const serviceId = process.env.RENDER_SERVICE_ID || 'srv-dbnges6417fc73dmuec0';
       const envVarsUrl = `https://api.render.com/v1/services/${serviceId}/env-vars`;
       const headers = {
         'Authorization': `Bearer ${apiKey}`,
