@@ -1412,11 +1412,11 @@ export class WhatsAppClient {
 
     // 2. Distinguish "Message Yourself" (user testing on their own WhatsApp phone) vs user texting a 3rd party
     const cleanRemote = (msg.key?.remoteJid || '').split('@')[0].split(':')[0];
-    const botOwnDigits = (this.sock?.user?.id || '').split('@')[0].split(':')[0] || '2349014896714';
+    const botOwnDigits = (this.sock?.user?.id || '').split('@')[0].split(':')[0] || config.bot.pairingPhoneNumber || '2347058967815';
     const isMessageToSelf =
       Boolean(msg.key?.fromMe) &&
       !msg.key?.remoteJid?.endsWith('@g.us') &&
-      (cleanRemote === botOwnDigits || cleanRemote === '2349014896714' || cleanRemote === config.bot.pairingPhoneNumber);
+      (cleanRemote === botOwnDigits || cleanRemote === '2347058967815' || cleanRemote === '2349014896714' || cleanRemote === config.bot.pairingPhoneNumber);
 
     // If fromMe and NOT Message Yourself, the owner is manually texting someone else: do not intervene!
     if (msg.key?.fromMe && !isMessageToSelf) {
@@ -2284,7 +2284,7 @@ export class WhatsAppClient {
         if (
           chatDigits === ownPhone ||
           chatDigits === ownSockDigits ||
-          chatDigits === '2349014896714' ||
+          chatDigits === '2347058967815' ||
           chatDigits === '2349014896714' ||
           chatDigits === '230652813291679' ||
           chat.chatJid.includes('230652813291679')

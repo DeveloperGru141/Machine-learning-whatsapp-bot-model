@@ -69,7 +69,7 @@ assert('getMemeCooldownStatus returns valid status object', typeof cooldown.canP
 // 6. Test Task Routing Separation in checkDueTasks
 // Ensure channel_meme_2hr_post and morning_status_post don't collide
 const mockSocket = {
-  user: { id: '2349014896714:1@s.whatsapp.net' },
+  user: { id: '2347058967815:1@s.whatsapp.net' },
   sendMessage: async (jid, content) => {
     return { key: { id: 'test_msg_id' } };
   },

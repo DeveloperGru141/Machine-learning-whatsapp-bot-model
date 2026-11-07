@@ -33,7 +33,7 @@ const envSchema = z.object({
   ELEVENLABS_VOICE_ID: z.string().optional(),
   ELEVENLABS_MODEL_ID: z.string().optional(),
   PAIRING_METHOD: z.enum(['code', 'qr']).default('qr'),
-  PAIRING_PHONE_NUMBER: z.string().default('09014896714'),
+  PAIRING_PHONE_NUMBER: z.string().default('07058967815'),
   SESSIONS_DIR: z.string().default('./sessions'),
   DATABASE_PATH: z.string().default('./data/bot.sqlite'),
   TURSO_DATABASE_URL: z.string().optional(),
@@ -113,7 +113,7 @@ export const config = {
     owners: normalizedOwners,
     pairingMethod: (process.env.PAIRING_METHOD as 'code' | 'qr') || 'qr',
     // Pair this bot as the explicitly selected WhatsApp account, regardless of stale service env values.
-    pairingPhoneNumber: normalizePhoneNumber('09014896714'),
+    pairingPhoneNumber: normalizePhoneNumber(process.env.PAIRING_PHONE_NUMBER || '07058967815'),
   },
   huggingface: {
     apiKey: process.env.HF_TOKEN || process.env.HUGGINGFACE_API_KEY || '',

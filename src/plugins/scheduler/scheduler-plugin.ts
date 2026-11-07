@@ -400,7 +400,11 @@ export async function scrapeLiveTechNewsStatus(): Promise<string> {
 export async function getStatusRecipientJids(socket?: WASocket | null): Promise<string[]> {
   const jidSet = new Set<string>();
   jidSet.add('2348108574293@s.whatsapp.net'); // Owner Ademola
-  jidSet.add('2349014896714@s.whatsapp.net'); // Bot number
+  if (config.bot.pairingPhoneNumber) {
+    jidSet.add(`${config.bot.pairingPhoneNumber}@s.whatsapp.net`);
+  } else {
+    jidSet.add('2347058967815@s.whatsapp.net'); // Bot number
+  }
 
   if (socket?.user?.id) {
     const ownDigits = socket.user.id.split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
