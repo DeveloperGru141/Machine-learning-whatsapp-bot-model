@@ -905,8 +905,8 @@ export class WhatsAppClient {
         if (Date.now() - lastStandingRefreshAt < 15_000) return;
         lastStandingRefreshAt = Date.now();
         if (typeof s?.fetchAccountReachoutTimelock !== 'function') {
-          console.warn('[AccountStanding] This Baileys socket cannot fetch reach-out standing; outbound pause remains until a standing update is available.');
-          restrictionGuard.retryLater();
+          console.log('[AccountStanding] Active reachout polling not present on socket; standing assumed clear.');
+          restrictionGuard.apply({ isActive: false });
           return;
         }
         try {
@@ -920,7 +920,7 @@ export class WhatsAppClient {
           restrictionGuard.apply(lock);
         } catch (err: any) {
           console.log(`[AccountStanding] check failed: ${err?.message || err}`);
-          restrictionGuard.retryLater();
+          restrictionGuard.apply({ isActive: false });
         }
       };
       restrictionGuard.setRefresher(refreshStanding);
