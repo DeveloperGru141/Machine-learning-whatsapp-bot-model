@@ -265,8 +265,12 @@ function startHealthServer() {
       let qr = whatsAppClient.getLatestQr();
       let pairingCode = whatsAppClient.getLatestPairingCode();
 
-      // Auto-generate fresh valid code on page load if none or expired
-      if (!registered && pairingCodeEnabled && !pairingCode) {
+      // Create a code on a real page load if needed. Status polling must never
+      // tear down the current socket just because the 150-second code expired;
+      // the user can explicitly request a new code when ready.
+      const isStatusPoll = req.url.includes('json=1');
+      const isQrAsset = req.url.startsWith('/pair/qr.svg');
+      if (!registered && pairingCodeEnabled && !pairingCode && !isStatusPoll && !isQrAsset) {
         pairingCode = await whatsAppClient.requestFreshPairingCode(false);
         qr = whatsAppClient.getLatestQr();
       }
@@ -296,6 +300,7 @@ function startHealthServer() {
             whatsappRegistered: registered,
             pairingCodeEnabled,
             pairingCode,
+            pairingCodeExpired: !registered && !pairingCode,
             qr,
           })
         );
@@ -341,16 +346,16 @@ function startHealthServer() {
       }
     </div>
     <div id="code-container" class="code-box" style="${registered || !pairingCodeEnabled ? 'display:none;' : ''}">
-      <span>CODE: <b id="pair-code-text">${pairingCode || 'Loading...'}</b></span>
+      <span>CODE: <b id="pair-code-text">${pairingCode || 'No active code'}</b></span>
       <button id="copy-btn" class="btn" onclick="copyPairCode()">📋 Copy</button>
     </div>
     <div id="action-bar" style="margin-top:12px;${registered || !pairingCodeEnabled ? 'display:none;' : ''}">
       <button id="refresh-btn" class="btn" onclick="requestNewCode()">🔄 Request Fresh Pairing Code</button>
     </div>
-    <div><span id="status-badge" class="badge">${registered ? '🟢 Connected & Active' : pairingCodeEnabled ? '⏳ Waiting for Link (Auto-refreshes live)' : '⏳ Scan the QR code to link WhatsApp'}</span></div>
+    <div><span id="status-badge" class="badge">${registered ? '🟢 Connected & Active' : pairingCodeEnabled ? '⏳ Use the current code; request a new one if it expires' : '⏳ Scan the QR code to link WhatsApp'}</span></div>
     <div class="steps">
       1. Enter the phone number above (with country code, no +)<br/>
-      2. Click <b>"Request Fresh Pairing Code"</b><br/>
+      2. Use the current code; if it expires, click <b>"Request Fresh Pairing Code"</b><br/>
       3. Open <b>WhatsApp</b> on that phone<br/>
       4. Tap <b>Settings (or ⋮) &rarr; Linked Devices &rarr; Link a Device</b><br/>
       5. Scan the QR code above or tap <b>"Link with phone number instead"</b> and enter the code <b>FRGE1234</b>.
@@ -415,7 +420,8 @@ function startHealthServer() {
           codeText.textContent = data.pairingCode;
           badge.textContent = '⏳ Fresh pairing code ready — enter it now';
         } else if (codeText && !data.pairingCode && !data.whatsappRegistered) {
-          codeText.textContent = 'Refreshing...';
+          codeText.textContent = 'Expired — request a fresh code';
+          badge.textContent = '⚠️ Code expired — request a fresh code when ready';
         }
         if (data.qr && data.qr !== lastQr) {
           lastQr = data.qr;
@@ -426,7 +432,7 @@ function startHealthServer() {
       } finally {
         pairingPollInFlight = false;
       }
-    }, 2500);
+    }, 5000);
   </script>
 </body>
 </html>`;
