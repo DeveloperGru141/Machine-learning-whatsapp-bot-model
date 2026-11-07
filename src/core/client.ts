@@ -242,7 +242,20 @@ export class WhatsAppClient {
 
   public isRegistered(): boolean {
     const creds = this.sock?.authState?.creds;
-    return Boolean(creds?.registered === true || (creds?.me?.id && !creds?.pairingEphemeralKeyPair));
+    if (creds?.registered === true || (creds?.me?.id && !creds?.pairingEphemeralKeyPair)) {
+      return true;
+    }
+
+    // During a reconnect this.sock may be null or may not have loaded auth yet.
+    // Keep treating an on-disk registered session as linked so the pairing page
+    // cannot replace it with a fresh, unlinked session while the socket recovers.
+    try {
+      const credsFile = path.join(config.paths.sessions, 'creds.json');
+      const stored = JSON.parse(fs.readFileSync(credsFile, 'utf8'));
+      return Boolean(stored?.registered === true || (stored?.me?.id && !stored?.pairingEphemeralKeyPair));
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -898,6 +911,7 @@ export class WhatsAppClient {
       this.sock.ev.on('creds.update', async () => {
         await saveCreds();
         if (this.isRegistered()) {
+          this.sessionBundleInvalidated = false;
           this.autoBackupSessionToRender();
         }
       });
@@ -1116,7 +1130,10 @@ export class WhatsAppClient {
           this.latestPairingCode = null;
           this.latestQr = null;
           healthMonitor.setConnectionStatus(true);
-          if (this.isRegistered()) { this.autoBackupSessionToRender(); }
+          if (this.isRegistered()) {
+            this.sessionBundleInvalidated = false;
+            this.autoBackupSessionToRender();
+          }
           this.startKeepAlive();
           this.startUnrepliedScanner();
 
