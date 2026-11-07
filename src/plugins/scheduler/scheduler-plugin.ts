@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { config } from '../../config/env.js';
 import { restrictionGuard } from '../../security/restriction-guard.js';
 import path from 'path';
 import { dirname } from 'node:path';
