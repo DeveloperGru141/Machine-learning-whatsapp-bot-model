@@ -773,7 +773,10 @@ export class WhatsAppClient {
         }
       }
 
-      // Detect if PAIRING_PHONE_NUMBER changed vs existing session creds.json, or if previous pairing was incomplete
+      // Remove incomplete pairing state, but preserve any fully registered account.
+      // PAIRING_PHONE_NUMBER is only a default for starting a pairing flow; the
+      // pairing page can explicitly link a different number. Clearing a valid
+      // session here when those numbers differ breaks Baileys' normal 515 restart.
       if (fs.existsSync(credsFile)) {
         try {
           const content = fs.readFileSync(credsFile, 'utf8').trim();
@@ -784,27 +787,12 @@ export class WhatsAppClient {
           } else {
             const rawCreds = JSON.parse(content);
             const isFullyPaired = Boolean(rawCreds?.registered === true || (rawCreds?.me?.id && !rawCreds?.pairingEphemeralKeyPair));
-            const existingPhone = (rawCreds?.me?.id || '').split(':')[0].split('@')[0].replace(/[^0-9]/g, '');
-            const targetPhone = formatPhoneNumberForPairing(config.bot.pairingPhoneNumber || '');
 
             if (!isFullyPaired) {
               // Incomplete pairing attempt left a partial creds.me without account/registered; wipe so Baileys sends RegistrationNode
               fs.rmSync(config.paths.sessions, { recursive: true, force: true });
               fs.mkdirSync(config.paths.sessions, { recursive: true });
               this.pairingRequested = false;
-            } else if (existingPhone && targetPhone && existingPhone !== targetPhone) {
-              console.log(
-                `[WhatsAppClient] 🔄 Default bot number changed (+${existingPhone} -> +${targetPhone}). Archiving previous session and preparing fresh pairing for +${targetPhone}...`
-              );
-              const backupDir = path.resolve(`./sessions_prev_${existingPhone}`);
-              try {
-                if (fs.existsSync(backupDir)) fs.rmSync(backupDir, { recursive: true, force: true });
-                fs.cpSync(config.paths.sessions, backupDir, { recursive: true });
-              } catch {}
-              fs.rmSync(config.paths.sessions, { recursive: true, force: true });
-              fs.mkdirSync(config.paths.sessions, { recursive: true });
-              this.pairingRequested = false;
-              this.latestPairingCode = null;
             }
           }
         } catch {
