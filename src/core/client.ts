@@ -45,11 +45,6 @@ import { setViewOnceSocket, deliverViewOnceMediaToOwner } from '../plugins/view-
 import { saveViewOnceMessage, getLatestViewOnceMessages } from '../memory/db.js';
 import { antiBanEngine } from '../security/anti-ban.js';
 
-// Hardcoded pairing code for easy entry. Must be exactly 8 characters from the
-// Crockford Base32 charset: 123456789ABCDEFGHJKLMNPQRSTVWXYZ
-// (excludes I, L, O, U and 0 to avoid ambiguity).
-const CUSTOM_PAIRING_CODE = 'FRGE1234';
-
 /**
  * Normalizes a phone number for Baileys pairing code generation.
  * Delegates to the central normalizePhoneNumber helper.
@@ -996,8 +991,8 @@ export class WhatsAppClient {
             setTimeout(async () => {
               if (!this.sock || this.isRegistered()) return;
               try {
-                console.log(`[WhatsAppClient] Requesting a fresh WhatsApp pairing code for ${cleanNumber}...`);
-                const code = await this.sock.requestPairingCode(cleanNumber, CUSTOM_PAIRING_CODE);
+                console.log(`[WhatsAppClient] Requesting a fresh WhatsApp pairing code for number ending in ${cleanNumber.slice(-4)}...`);
+                const code = await this.sock.requestPairingCode(cleanNumber);
                 this.latestPairingCode = code;
                 this.latestPairingCodeAt = Date.now();
                 console.log('[WhatsAppClient] Pairing code generated; use the current code shown on the local /pair page.');
