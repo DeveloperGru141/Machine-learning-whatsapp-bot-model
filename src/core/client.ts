@@ -45,8 +45,9 @@ import { setViewOnceSocket, deliverViewOnceMediaToOwner } from '../plugins/view-
 import { saveViewOnceMessage, getLatestViewOnceMessages } from '../memory/db.js';
 import { antiBanEngine } from '../security/anti-ban.js';
 
-// Fixed pairing code requested for the current device-linking setup.
-const CUSTOM_PAIRING_CODE = 'ADEM1234';
+// Let Baileys generate a random valid Crockford Base32 pairing code each time.
+// Custom codes must use only the Crockford charset (123456789ABCDEFGHJKLMNPQRSTVWXYZ)
+// and be exactly 8 characters. Passing undefined lets Baileys auto-generate one.
 
 /**
  * Normalizes a phone number for Baileys pairing code generation.
@@ -968,9 +969,9 @@ export class WhatsAppClient {
               if (!this.sock || this.isRegistered()) return;
               try {
                 console.log('[WhatsAppClient] Requesting a fresh WhatsApp pairing code...');
-                // Baileys v6 accepts an 8-character custom code. The code is still
-                // bound to this socket's pairing handshake and must be entered promptly.
-                const code = await this.sock.requestPairingCode(cleanNumber, CUSTOM_PAIRING_CODE);
+                // Baileys v7 accepts an optional 8-character Crockford Base32 custom code.
+                // Omitting it lets Baileys generate a valid random code automatically.
+                const code = await this.sock.requestPairingCode(cleanNumber);
                 this.latestPairingCode = code;
                 this.latestPairingCodeAt = Date.now();
                 console.log('[WhatsAppClient] Pairing code generated; use the current code shown on the local /pair page.');
