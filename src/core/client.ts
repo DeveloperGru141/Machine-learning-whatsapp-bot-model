@@ -1030,6 +1030,15 @@ export class WhatsAppClient {
             return;
           }
 
+          // 515 means WhatsApp requires a new socket after completing the pairing
+          // exchange. Preserve auth files even if registered has not caught up yet;
+          // the reconnect must authenticate with the credentials from this socket.
+          if (statusCode === DisconnectReason.restartRequired) {
+            console.log('[WhatsAppClient] Pairing/session restart required (515); preserving auth state and reconnecting in 800ms.');
+            this.scheduleReconnect(800);
+            return;
+          }
+
           // Handle 401 Disconnect / Connection Failure
           if (statusCode === 401 || statusCode === DisconnectReason.loggedOut || errorMsg.includes('Connection Failure')) {
             if (isRegistered) {
@@ -1070,9 +1079,8 @@ export class WhatsAppClient {
             this.pairingRequested = false;
           }
 
-          // Fast instant reconnect for common socket resets (428 Connection Terminated, 408 ECONNRESET/Connection Lost, 515 restartRequired)
+          // Fast instant reconnect for common socket resets (428 Connection Terminated, 408 ECONNRESET/Connection Lost)
           if (
-            statusCode === DisconnectReason.restartRequired ||
             statusCode === DisconnectReason.connectionClosed ||
             statusCode === DisconnectReason.connectionLost ||
             statusCode === 428 ||

@@ -525,7 +525,7 @@ function startHealthServer() {
   });
 
   // Render Free Tier anti-sleep self-pinger (every 5 minutes)
-  const renderUrl = process.env.RENDER_EXTERNAL_URL || 'https://forgelabs-whatsapp-bot.onrender.com';
+  const renderUrl = process.env.RENDER_EXTERNAL_URL || 'https://forgelabs-whatsapp-bot-m681.onrender.com';
   const keepAliveUrl = `${renderUrl.replace(/\/$/, '')}/health`;
   const renderPingTimer = setInterval(() => {
     fetch(keepAliveUrl, { signal: AbortSignal.timeout(8_000) }).catch(() => {});
