@@ -247,7 +247,7 @@ function startHealthServer() {
       if (req.url.includes('refresh=1') || req.url.includes('new=1')) {
         const urlParams = new URL(req.url, `http://${req.headers.host || 'localhost'}`).searchParams;
         const phoneOverride = urlParams.get('phone') || undefined;
-        const freshCode = await whatsAppClient.requestFreshPairingCode(true, phoneOverride);
+        const freshCode = await whatsAppClient.requestFreshPairingCode(false, phoneOverride);
         const freshQr = whatsAppClient.getLatestQr();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(
@@ -322,7 +322,7 @@ function startHealthServer() {
   <div class="card">
     <h1>${config.bot.name}</h1>
     <p>${pairingCodeEnabled ? 'Link WhatsApp by scanning a QR code or using a pairing code' : 'Link WhatsApp by scanning the QR code'}</p>
-    <div style="margin-bottom:14px;">
+    <div style="margin-bottom:14px;${pairingCode ? 'display:none;' : ''}">
       <label style="font-size:13px;color:#8696a0;">Your WhatsApp number with country code, digits only (e.g. 2348012345678):</label>
       <input id="phone-input" type="text" value="" placeholder="e.g. 2348012345678" autocomplete="tel" inputmode="tel" style="width:100%;box-sizing:border-box;margin-top:6px;padding:10px 14px;background:#1f2c34;border:1px solid #333;border-radius:8px;color:#e9edef;font-size:16px;letter-spacing:1px;" />
     </div>
@@ -336,24 +336,25 @@ function startHealthServer() {
       }
     </div>
     <div id="code-container" class="code-box" style="${registered || !pairingCodeEnabled ? 'display:none;' : ''}">
-      <span>CODE: <b id="pair-code-text">Enter number first</b></span>
+      <span>CODE: <b id="pair-code-text">${pairingCode || 'Enter number first'}</b></span>
       <button id="copy-btn" class="btn" onclick="copyPairCode()">📋 Copy</button>
     </div>
-    <div id="action-bar" style="margin-top:12px;${registered || !pairingCodeEnabled ? 'display:none;' : ''}">
-      <button id="refresh-btn" class="btn" onclick="requestNewCode()">🔄 Request Fresh Pairing Code</button>
+    <div id="action-bar" style="margin-top:12px;${registered || !pairingCodeEnabled || pairingCode ? 'display:none;' : ''}">
+      <button id="refresh-btn" class="btn" onclick="requestNewCode()">🔄 Request ADEM1234 for this number</button>
     </div>
-    <div><span id="status-badge" class="badge">${registered ? '🟢 Connected & Active' : pairingCodeEnabled ? '⏳ Enter your number, then request a code for that number' : '⏳ Scan the QR code to link WhatsApp'}</span></div>
+    <div><span id="status-badge" class="badge">${registered ? '🟢 Connected & Active' : pairingCode ? '⏳ ADEM1234 is ready for the configured WhatsApp number' : pairingCodeEnabled ? '⏳ Enter your number, then request a code for that number' : '⏳ Scan the QR code to link WhatsApp'}</span></div>
     <div class="steps">
-      1. Enter the WhatsApp number you are pairing, including country code (digits only, no +)<br/>
-      2. Click <b>"Request Fresh Pairing Code"</b> to generate a code specifically for that number<br/>
+      ${pairingCode ? '1. Use the WhatsApp number configured for this bot.' : '1. Enter the WhatsApp number you are pairing, including country code (digits only, no +)'}<br/>
+      ${pairingCode ? '2. Enter the fixed code below on that phone.' : '2. Click <b>"Request ADEM1234 for this number"</b> once'}<br/>
       3. Open <b>WhatsApp</b> on that phone<br/>
       4. Tap <b>Settings (or ⋮) &rarr; Linked Devices &rarr; Link a Device</b><br/>
-      5. Scan the QR code above, or tap <b>"Link with phone number instead"</b> and enter the code shown here. If it expires, request a new one for the same number.
+      5. Scan the QR code above, or tap <b>"Link with phone number instead"</b> and enter <b>ADEM1234</b> on that same phone. The QR is short-lived; the page keeps the first QR visible while reconnecting.
     </div>
   </div>
   <script>
     let lastQr = ${JSON.stringify(qr || '')};
-    let pairingCodeRequested = false;
+  let pairingCodeRequested = ${JSON.stringify(Boolean(pairingCode))};
+    let pairingQrDisplayed = Boolean(lastQr);
 
     function copyPairCode() {
       const code = document.getElementById('pair-code-text').textContent.trim();
@@ -390,21 +391,23 @@ function startHealthServer() {
         if (data.pairingCode) {
           pairingCodeRequested = true;
           codeText.textContent = data.pairingCode;
-          badge.textContent = '⏳ Enter this code on the same WhatsApp number';
+          if (phoneInput) phoneInput.disabled = true;
+          badge.textContent = '⏳ Enter ADEM1234 on this same WhatsApp number';
         } else {
           codeText.textContent = 'No code returned — check number and retry';
           badge.textContent = '⚠️ Could not generate a code for that number';
         }
-        if (data.qr) {
+        if (data.qr && !pairingQrDisplayed) {
           lastQr = data.qr;
           document.getElementById('qr-container').innerHTML = '<img id="qr-img" src="/pair/qr.svg?t=' + Date.now() + '" alt="WhatsApp QR Code" />';
+          pairingQrDisplayed = true;
         }
       } catch (err) {
         codeText.textContent = 'Request failed — please retry';
         badge.textContent = '⚠️ Pairing request failed';
       } finally {
-        refreshBtn.disabled = false;
-        refreshBtn.textContent = '🔄 Request Fresh Pairing Code';
+        refreshBtn.disabled = pairingCodeRequested;
+        refreshBtn.textContent = pairingCodeRequested ? 'Code requested — enter ADEM1234' : '🔄 Request ADEM1234 for this number';
       }
     }
 
@@ -438,14 +441,14 @@ function startHealthServer() {
         }
         if (pairingCodeRequested && codeText && data.pairingCode && codeText.textContent !== data.pairingCode) {
           codeText.textContent = data.pairingCode;
-          badge.textContent = '⏳ Fresh pairing code ready — enter it now';
+          badge.textContent = '⏳ Enter ADEM1234 on this same WhatsApp number';
         } else if (pairingCodeRequested && codeText && !data.pairingCode && !data.whatsappRegistered) {
-          codeText.textContent = 'Expired — request a fresh code';
-          badge.textContent = '⚠️ Code expired — request a fresh code when ready';
+          badge.textContent = '⏳ Reconnecting — keep ADEM1234 ready on the phone';
         }
-        if (data.qr && data.qr !== lastQr) {
+        if (data.qr && !pairingQrDisplayed) {
           lastQr = data.qr;
           container.innerHTML = '<img id="qr-img" src="/pair/qr.svg?t=' + Date.now() + '" alt="WhatsApp QR Code" />';
+          pairingQrDisplayed = true;
         }
       } catch (e) {
         badge.textContent = '⚠️ Pairing status refresh failed — retrying';

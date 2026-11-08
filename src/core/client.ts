@@ -53,6 +53,10 @@ export function formatPhoneNumberForPairing(num: string): string {
   return normalizePhoneNumber(num);
 }
 
+// A fixed local pairing code keeps the localhost attempt easy to follow while
+// Baileys re-establishes its short-lived unlinked socket.
+const CUSTOM_PAIRING_CODE = 'ADEM1234';
+
 export class WhatsAppClient {
   private sock: WASocket | null = null;
   private logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'warn' });
@@ -274,6 +278,44 @@ export class WhatsAppClient {
       !this.latestPairingCode ||
       !this.latestPairingCodeAt ||
       Date.now() - this.latestPairingCodeAt >= 150_000;
+
+    // Request the code on the current QR-ready socket. Resetting the socket just
+    // to request a code invalidates the QR already shown to the user.
+    const phoneNumber = this.pairingPhoneOverride || config.bot.pairingPhoneNumber || '';
+    if (!forceReset && this.sock && this.latestQr && phoneNumber && !this.latestPairingCode) {
+      if (this.pairingRefreshInFlight) return this.pairingRefreshInFlight;
+      if (this.pairingRequested) return null;
+
+      const cleanNumber = formatPhoneNumberForPairing(phoneNumber);
+      if (!cleanNumber) return null;
+
+      const pairingSocket = this.sock;
+      this.pairingRequested = true;
+      const currentSocketPromise = (async () => {
+        try {
+          console.log(`[WhatsAppClient] Requesting the fixed localhost pairing code for number ending in ${cleanNumber.slice(-4)}...`);
+          const code = await pairingSocket.requestPairingCode(cleanNumber, CUSTOM_PAIRING_CODE);
+          if (this.sock === pairingSocket) {
+            this.latestPairingCode = code;
+            this.latestPairingCodeAt = Date.now();
+          }
+          console.log('[WhatsAppClient] Fixed pairing code generated on the current socket.');
+          return code;
+        } catch (err: any) {
+          if (this.sock === pairingSocket) this.pairingRequested = false;
+          console.error('[WhatsAppClient] Error requesting the fixed pairing code:', err instanceof Error ? err.message : 'unknown error');
+          return null;
+        }
+      })();
+      this.pairingRefreshInFlight = currentSocketPromise;
+      try {
+        return await currentSocketPromise;
+      } finally {
+        if (this.pairingRefreshInFlight === currentSocketPromise) {
+          this.pairingRefreshInFlight = null;
+        }
+      }
+    }
 
     // If we already have a fresh code on the current socket (<150s old) and not forcing reset, return it directly!
     if (!forceReset && !isCodeExpired && this.latestPairingCode) {
@@ -989,7 +1031,7 @@ export class WhatsAppClient {
               if (!this.sock || this.isRegistered()) return;
               try {
                 console.log(`[WhatsAppClient] Requesting a fresh WhatsApp pairing code for number ending in ${cleanNumber.slice(-4)}...`);
-                const code = await this.sock.requestPairingCode(cleanNumber);
+                const code = await this.sock.requestPairingCode(cleanNumber, CUSTOM_PAIRING_CODE);
                 this.latestPairingCode = code;
                 this.latestPairingCodeAt = Date.now();
                 console.log('[WhatsAppClient] Pairing code generated; use the current code shown on the local /pair page.');
