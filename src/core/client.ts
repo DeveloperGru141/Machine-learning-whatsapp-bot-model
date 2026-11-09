@@ -6,7 +6,7 @@ import makeWASocket, {
   type WAMessage,
   type WASocket,
 } from '@whiskeysockets/baileys';
-import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied, saveChannelQuote, saveChannelMeme, setBotSetting, saveSessionBundleToDb, getSessionBundleFromDb } from '../memory/db.js';
+import { db, upsertKnownGroup, findActiveRelaySession, markRelaySessionReplied, saveChannelQuote, saveChannelMeme, getBotSetting, setBotSetting, saveSessionBundleToDb, getSessionBundleFromDb } from '../memory/db.js';
 import { parseQuoteFromText, WHATSAPP_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-quotes-service.js';
 import { WHATSAPP_MEME_CHANNEL_INVITE_CODE } from '../plugins/scheduler/channel-memes-service.js';
 import { stickerEngine } from '../plugins/stickers/sticker-engine.js';
@@ -930,18 +930,76 @@ export class WhatsAppClient {
           this.autoBackupSessionToRender();
         }
       };
-      // fetchLatestBaileysVersion() can return a stale bundled protocol revision while
-      // reporting it as latest. WhatsApp rejects new device registrations on stale
-      // revisions, often surfacing on the phone as "Couldn't link device".
-      const waWebVersion = await fetchLatestWaWebVersion({});
-      if (!waWebVersion.isLatest || waWebVersion.error) {
-        const reason = waWebVersion.error instanceof Error ? waWebVersion.error.message : 'unknown fetch error';
-        console.error(`[WhatsAppClient] Could not fetch the current WhatsApp Web protocol version (${reason}); retrying in 30s.`);
-        this.scheduleReconnect(30_000);
-        return;
+      // Keep the live WhatsApp version as the source of truth. A short-lived
+      // persistent cache lets an already-linked session recover if Render cannot
+      // reach WhatsApp's sw.js endpoint during a restart. Pairing still requires a
+      // live version because stale revisions can make new device linking fail.
+      const waVersionSetting = 'whatsapp_web_protocol_version';
+      const waVersionCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
+      let waWebVersion: Awaited<ReturnType<typeof fetchLatestWaWebVersion>>;
+      try {
+        waWebVersion = await fetchLatestWaWebVersion({ signal: AbortSignal.timeout(15_000) });
+      } catch (error: any) {
+        waWebVersion = {
+          version: [2, 3000, 0],
+          isLatest: false,
+          error: error instanceof Error ? error : new Error('unknown fetch error'),
+        };
       }
-      const { version } = waWebVersion;
-      console.log(`[WhatsAppClient] Starting Baileys with live WhatsApp Web protocol v${version.join('.')}`);
+
+      const isUsableVersion = (candidate: unknown): candidate is [number, number, number] =>
+        Array.isArray(candidate) && candidate.length === 3 &&
+        candidate.every((part) => Number.isSafeInteger(part) && part >= 0) &&
+        candidate[0] === 2 && candidate[1] === 3000 && candidate[2] > 0;
+      const error = waWebVersion.error as any;
+      const failureReason = [
+        error?.name || 'VersionFetchError',
+        error?.message || 'unknown fetch error',
+        error?.output?.statusCode || error?.statusCode ? `http=${error.output?.statusCode || error.statusCode}` : '',
+        error?.cause?.code ? `cause=${error.cause.code}` : '',
+      ].filter(Boolean).join(' ');
+
+      let version: [number, number, number];
+      let protocolVersionFallback = false;
+      if (waWebVersion.isLatest && !waWebVersion.error && isUsableVersion(waWebVersion.version)) {
+        version = waWebVersion.version;
+        await setBotSetting(waVersionSetting, JSON.stringify({ version, checkedAt: Date.now() }));
+        console.log(`[WhatsAppClient] Starting Baileys with live WhatsApp Web protocol v${version.join('.')}`);
+      } else {
+        if (!this.isRegistered()) {
+          console.error(`[WhatsAppClient] Could not fetch a verified WhatsApp Web protocol version (${failureReason}); pairing remains paused and will retry in 30s.`);
+          this.scheduleReconnect(30_000);
+          return;
+        }
+
+        let cachedVersion: [number, number, number] | null = null;
+        try {
+          const stored = JSON.parse(await getBotSetting(waVersionSetting, '{}'));
+          if (
+            isUsableVersion(stored?.version) &&
+            Number.isFinite(stored?.checkedAt) &&
+            Date.now() - stored.checkedAt >= 0 &&
+            Date.now() - stored.checkedAt <= waVersionCacheTtlMs
+          ) {
+            cachedVersion = stored.version;
+          }
+        } catch {}
+
+        if (cachedVersion) {
+          version = cachedVersion;
+          console.warn(`[WhatsAppClient] Live protocol fetch failed (${failureReason}); reconnecting the registered session with its last verified protocol v${version.join('.')}.`);
+        } else if (isUsableVersion(waWebVersion.version)) {
+          // Baileys returns its bundled protocol revision when sw.js cannot be read.
+          // Use it only to recover an existing registration; never use it for pairing.
+          version = waWebVersion.version;
+          console.warn(`[WhatsAppClient] Live protocol fetch failed (${failureReason}); attempting existing-session recovery with Baileys' bundled protocol v${version.join('.')}.`);
+        } else {
+          console.error(`[WhatsAppClient] No usable protocol version is available (${failureReason}); retrying in 30s.`);
+          this.scheduleReconnect(30_000);
+          return;
+        }
+        protocolVersionFallback = true;
+      }
 
       const msgRetryCounterMap = new Map<string, any>();
       const msgRetryCounterCache = {
@@ -1145,6 +1203,12 @@ export class WhatsAppClient {
           // Handle 401 Disconnect / Connection Failure
           if (statusCode === 401 || statusCode === DisconnectReason.loggedOut || errorMsg.includes('Connection Failure')) {
             if (isRegistered) {
+              if (protocolVersionFallback) {
+                this.loggedOutRetryCount = 0;
+                console.error('[WhatsAppClient] Fallback protocol was rejected for this socket; preserving registered credentials and retrying the live version fetch in 30s.');
+                this.scheduleReconnect(30_000);
+                return;
+              }
               this.loggedOutRetryCount++;
               if (this.loggedOutRetryCount <= 3) {
                 console.log(
@@ -1221,6 +1285,7 @@ export class WhatsAppClient {
           this.authenticatedSocketOpen = this.isRegistered();
           healthMonitor.setConnectionStatus(true);
           if (this.isRegistered()) {
+            void setBotSetting(waVersionSetting, JSON.stringify({ version, checkedAt: Date.now() }));
             this.sessionBundleInvalidated = false;
             this.autoBackupSessionToRender();
           }
