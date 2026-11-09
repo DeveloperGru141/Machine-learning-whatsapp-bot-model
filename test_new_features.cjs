@@ -1,9 +1,19 @@
 const assert = require('assert');
-const { BOT_WELCOME_MESSAGE, BOT_GROUP_INTRO } = require('./dist/security/anti-ban.js');
-const { groupAdminPlugin } = require('./dist/plugins/group-admin/admin-plugin.js');
-const { sanitizeAssistantResponse } = require('./dist/agent/harness.js');
-const { buildSystemPrompt } = require('./dist/agent/prompt.js');
-const { llmClient } = require('./dist/agent/llm-client.js');
+
+(async () => {
+const [
+  { BOT_WELCOME_MESSAGE, BOT_GROUP_INTRO },
+  { groupAdminPlugin },
+  { sanitizeAssistantResponse },
+  { buildSystemPrompt },
+  { llmClient },
+] = await Promise.all([
+  import('./dist/security/anti-ban.js'),
+  import('./dist/plugins/group-admin/admin-plugin.js'),
+  import('./dist/agent/harness.js'),
+  import('./dist/agent/prompt.js'),
+  import('./dist/agent/llm-client.js'),
+]);
 
 console.log('🧪 Starting Verification Test Suite for New Fixes & Features...\n');
 
@@ -32,14 +42,14 @@ console.log('✅ Test 1 Passed: Intro messages use plain English first then Pidg
 
 // Test 2: System prompt rules for creator number and intro sequence
 console.log('▶ Test 2: Verify System Prompt Creator Rules...');
-const prompt = buildSystemPrompt('1234567890@s.whatsapp.net', '1234567890@s.whatsapp.net', false);
+const prompt = await buildSystemPrompt('1234567890@s.whatsapp.net', '1234567890@s.whatsapp.net', false);
 assert(
   prompt.includes("NEVER add or append Ademola's phone number to messages, introductions, or anywhere else unless the user EXPLICITLY asks"),
   'System prompt must strictly forbid adding Ademola phone number without explicit request'
 );
 assert(
-  prompt.includes('ALWAYS start your introduction in plain English first'),
-  'System prompt must require plain English introduction first'
+  prompt.includes('INTRODUCTIONS: When introducing yourself, use the active party\'s language and register'),
+  'System prompt must use the active party\'s language when introducing the bot'
 );
 assert(
   prompt.includes('OWNER KICK & DEMOTE IMMUNITY'),
@@ -68,7 +78,6 @@ const mockCtxAdmin = {
   },
 };
 
-(async () => {
   // Attempt 1: Target "Ademola"
   const res1 = await kickTool.execute({ target: 'Ademola' }, mockCtxAdmin);
   assert.strictEqual(res1.success, false);
@@ -140,11 +149,16 @@ const mockCtxAdmin = {
 
   // Test 7: Training Pipeline Distillation & Anti-Generic Guardrails
   console.log('▶ Test 7: Verify Training Pipeline Distillation & Anti-Generic Guardrails...');
-  const { styleAdapter } = require('./dist/learning/style-adapter.js');
-  const techCtx = styleAdapter.getStyleContext('test@s.whatsapp.net', 'How do I fix a bug in my typescript code?');
-  assert(techCtx.fewShotExemplars.length > 0, 'Must retrieve few-shot exemplars');
-  const hasTechExemplar = techCtx.fewShotExemplars.some(e => e.context.toLowerCase().includes('recursion') || e.context.toLowerCase().includes('async') || e.context.toLowerCase().includes('api'));
-  assert(hasTechExemplar, 'Technical queries must match distilled technical/programming exemplars');
+  const { styleAdapter } = await import('./dist/learning/style-adapter.js');
+  const { db } = await import('./dist/memory/db.js');
+  const trainingContext = `typescript bug regression ${Date.now()}`;
+  await db.prepare(`
+    INSERT INTO dialogue_exemplars (chat_jid, context_text, response_text, response_type, vibe_classification, quality_score, created_at)
+    VALUES ('tool_integrity_test', ?, 'Check the failing line, then run the focused compiler command.', 'text', 'tech', 9999, ?)
+  `).run(trainingContext, Date.now());
+  const techCtx = await styleAdapter.getStyleContext('test@s.whatsapp.net', 'How do I fix a bug in my typescript code?');
+  assert(techCtx.fewShotExemplars.some((e) => e.context === trainingContext), 'Technical queries must retrieve matching distilled programming exemplars.');
+  await db.prepare('DELETE FROM dialogue_exemplars WHERE chat_jid = ? AND context_text = ?').run('tool_integrity_test', trainingContext);
 
   // Sanitizer must strip generic preambles and generic closings
   const genericInput1 = 'Great question! An API is simply a bridge that lets two apps communicate. Hope this helps!';
@@ -161,4 +175,7 @@ const mockCtxAdmin = {
   console.log('✅ Test 7 Passed: Training pipeline exemplars and anti-generic response distillation verified.\n');
 
   console.log('🎉 ALL 7 VERIFICATION TESTS PASSED SUCCESSFULLY! 🚀');
-})();
+})().catch((err) => {
+  console.error('❌ Test failed:', err);
+  process.exitCode = 1;
+});

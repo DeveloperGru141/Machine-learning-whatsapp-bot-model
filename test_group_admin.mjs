@@ -20,7 +20,7 @@ function assert(name, condition, detail = '') {
 }
 
 async function run() {
-  initDatabase();
+  await initDatabase();
 
   const groupJid = '120363028392182910@g.us';
   const ownerJid = '2348108574293@s.whatsapp.net';
@@ -30,7 +30,7 @@ async function run() {
   const spammerJid = '2348077776666@s.whatsapp.net';
 
   // Seed known group in database
-  upsertKnownGroup(groupJid, 'Dev & Banter Hub', 25, true);
+  await upsertKnownGroup(groupJid, 'Dev & Banter Hub', 25, true);
 
   // Mock Baileys Socket
   let lastAction = null;
@@ -147,7 +147,7 @@ async function run() {
   assert('Baileys delete key remoteJid, id, and participant match', lastDeleteKey?.id === 'SPAM_STZ_777' && lastDeleteKey?.participant === spammerJid);
 
   // Test via chat_logs lookup
-  chatLogger.logMessage({
+  await chatLogger.logMessage({
     chatJid: groupJid,
     senderJid: spammerJid,
     senderName: 'Spam Bot',
@@ -224,7 +224,7 @@ async function run() {
   assert('handleAntiLink issues delete stanza to revoke spam link', lastDeleteKey?.id === 'SPAM_LINK_MSG_1');
 
   // 11. Test prompt elevated status injection
-  const promptAdmin = buildSystemPrompt(adminJid, groupJid, true, 'kick that guy');
+  const promptAdmin = await buildSystemPrompt(adminJid, groupJid, true, 'kick that guy');
   assert('System prompt injects ELEVATED STATUS when bot is group admin', promptAdmin.includes('ELEVATED STATUS: YOU ARE AN ACTIVE ADMIN IN THIS GROUP'));
   assert('System prompt lists all elevated tools', promptAdmin.includes('kick_member') && promptAdmin.includes('add_member') && promptAdmin.includes('delete_group_message') && promptAdmin.includes('set_disappearing_messages'));
 

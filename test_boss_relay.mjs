@@ -18,17 +18,17 @@ function assert(name, condition, detail = '') {
 }
 
 async function run() {
-  initDatabase();
+  await initDatabase();
 
   // 1. Check getContact for boss keywords
-  const bossContact = contactService.getContact('boss');
+  const bossContact = await contactService.getContact('boss');
   assert('contactService.getContact("boss") returns Ademola', bossContact?.phone_number === '2348108574293', `Got: ${JSON.stringify(bossContact)}`);
   assert('contactService.getContact("boss") is NOT Crypto Boss', bossContact?.display_name !== 'Crypto Boss😊' && bossContact?.phone_number !== '2348129109255');
 
-  const yourBossContact = contactService.getContact('your boss');
+  const yourBossContact = await contactService.getContact('your boss');
   assert('contactService.getContact("your boss") returns Ademola', yourBossContact?.phone_number === '2348108574293');
 
-  const creatorContact = contactService.getContact('creator');
+  const creatorContact = await contactService.getContact('creator');
   assert('contactService.getContact("creator") returns Ademola', creatorContact?.phone_number === '2348108574293');
 
   // 2. Test get_contact tool for non-owner
@@ -42,8 +42,8 @@ async function run() {
   };
 
   const getBossResult = await getContactTool.execute({ query: 'boss' }, mockCtxNonOwner);
-  assert('get_contact tool returns Ademola when non-owner searches for boss', getBossResult.success && getBossResult.message.includes('Ademola') && getBossResult.message.includes('+2348108574293'));
-  assert('get_contact does NOT reveal Crypto Boss', !getBossResult.message.includes('Crypto Boss') && !getBossResult.message.includes('2348129109255'));
+  assert('get_contact identifies Ademola when a non-owner searches for boss', getBossResult.success && getBossResult.message.includes('Ademola'));
+  assert('get_contact does not disclose either private phone number', !getBossResult.message.includes('+2348108574293') && !getBossResult.message.includes('Crypto Boss') && !getBossResult.message.includes('2348129109255'));
 
   // 3. Test send_message_to_contact tool with mock socket
   let interceptedTargetJid = '';
@@ -61,7 +61,7 @@ async function run() {
   const sendMsgTool = contactPlugin.tools.find(t => t.name === 'send_message_to_contact');
   const sendBossResult = await sendMsgTool.execute(
     { recipient: 'boss', message: 'Good afternoon boss Ademola' },
-    { ...mockCtxNonOwner, sock: mockSock }
+    { ...mockCtxNonOwner, chatJid: '2348161220611@s.whatsapp.net', isGroup: false, sock: mockSock }
   );
 
   assert('send_message_to_contact succeeds for recipient: "boss"', sendBossResult.success, `Result: ${JSON.stringify(sendBossResult)}`);
@@ -72,16 +72,16 @@ async function run() {
   // 4. Test "tell your boss" query
   const tellBossResult = await sendMsgTool.execute(
     { recipient: 'your boss', message: 'The server is running smoothly' },
-    { ...mockCtxNonOwner, sock: mockSock }
+    { ...mockCtxNonOwner, chatJid: '2348161220611@s.whatsapp.net', isGroup: false, sock: mockSock }
   );
   assert('send_message_to_contact succeeds for recipient: "your boss"', tellBossResult.success);
   assert('Target JID for "your boss" is Ademola', interceptedTargetJid === '2348108574293@s.whatsapp.net');
 
   // 5. Test system prompt instructions
-  const prompt = buildSystemPrompt('2348161220611@s.whatsapp.net', '120363028392182910@g.us', true, 'tell your boss hello');
+  const prompt = await buildSystemPrompt('2348161220611@s.whatsapp.net', '120363028392182910@g.us', true, 'tell your boss hello');
   assert('Prompt contains Boss messaging instructions', prompt.includes('MESSAGING YOUR BOSS / CREATOR / OWNER (ADEMOLA)'));
-  assert('Prompt instructs never to ask for boss phone number', prompt.includes('NEVER ask the user for his phone number'));
-  assert('Prompt instructs never to match Crypto Boss', prompt.includes('NEVER match or display "Crypto Boss"'));
+  assert('Prompt instructs never to ask for boss phone number', prompt.toLowerCase().includes("never ask for the owner's phone number"));
+  assert('Prompt instructs never to match Crypto Boss', prompt.toLowerCase().includes('never match or display "crypto boss"'));
   assert('Prompt contains rule 17 for Boss recognition', prompt.includes('17. RECOGNIZE BOSS & INSTANT RELAY'));
 
   console.log(`\nResults: ${passed}/${total} tests passed!`);

@@ -14,6 +14,59 @@ export interface FootballMatch {
   dateStr: string;
 }
 
+function decodeSearchHtml(value: string): string {
+  return (value || '')
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&#x([\da-f]{1,6});/gi, (_match, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code)))
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&');
+}
+
+/** Normalize a search-engine redirect into a direct, usable HTTP(S) source URL. */
+export function normalizeSearchSourceUrl(rawUrl: string, baseUrl = 'https://duckduckgo.com/'): string | undefined {
+  try {
+    let parsed = new URL(decodeSearchHtml(rawUrl.trim()), baseUrl);
+    if ((parsed.hostname === 'duckduckgo.com' || parsed.hostname.endsWith('.duckduckgo.com')) && parsed.searchParams.has('uddg')) {
+      const destination = parsed.searchParams.get('uddg');
+      if (!destination) return undefined;
+      parsed = new URL(destination);
+    }
+    if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password) return undefined;
+    if (parsed.hostname === 'duckduckgo.com' || parsed.hostname.endsWith('.duckduckgo.com')) return undefined;
+    if (!parsed.hostname.includes('.') || parsed.hostname.startsWith('.') || parsed.hostname.endsWith('.')) return undefined;
+    parsed.hash = '';
+    return parsed.href;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Parse title, snippet, and URL from the same DuckDuckGo result block. */
+export function parseDuckDuckGoResults(html: string, limit = 5): Array<{ title: string; snippet: string; url: string }> {
+  const links = [...html.matchAll(/<a\b([^>]*\bclass=["'][^"']*\bresult__a\b[^"']*["'][^>]*)>([\s\S]*?)<\/a>/gi)];
+  const results: Array<{ title: string; snippet: string; url: string }> = [];
+  for (let index = 0; index < links.length && results.length < limit; index++) {
+    const link = links[index];
+    const attrs = link[1] || '';
+    const href = attrs.match(/\bhref\s*=\s*(["'])(.*?)\1/i)?.[2];
+    const url = href ? normalizeSearchSourceUrl(href) : undefined;
+    const title = decodeSearchHtml((link[2] || '').replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim();
+    const from = (link.index || 0) + link[0].length;
+    const to = links[index + 1]?.index ?? Math.min(html.length, from + 6000);
+    const resultBlock = html.slice(from, to);
+    const snippetMatch = resultBlock.match(/<a\b[^>]*\bclass=["'][^"']*\bresult__snippet\b[^"']*["'][^>]*>([\s\S]*?)<\/a>/i);
+    const snippet = snippetMatch
+      ? decodeSearchHtml(snippetMatch[1].replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim()
+      : '';
+    if (url && title.length > 5 && snippet.length > 20) results.push({ title, snippet, url });
+  }
+  return results;
+}
+
 /**
  * Supported ESPN Soccer leagues and friendly keys
  */
@@ -110,17 +163,14 @@ export async function queryGoogleNewsRss(
         .replace(/&quot;/g, '"')
         .replace(/&#39;/g, "'")
         .trim();
-      const cleanUrl = rawUrl
-        .replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1')
-        .replace(/&amp;/g, '&')
-        .trim();
+      const cleanUrl = normalizeSearchSourceUrl(rawUrl, 'https://news.google.com/');
 
       if (cleanTitle.length > 5) {
         items.push({
           title: cleanTitle,
           date: rawDate.trim(),
           snippet: cleanDesc.length > 20 ? cleanDesc.slice(0, 200) : undefined,
-          url: /^https?:\/\//i.test(cleanUrl) ? cleanUrl : undefined,
+          url: cleanUrl,
         });
       }
     }
@@ -449,62 +499,17 @@ export class WebSearchPlugin implements IPlugin {
 
             if (htmlRes.ok) {
               const html = await htmlRes.text();
-              const snippets: string[] = [];
-              const searchResults: Array<{ title: string; url: string }> = [];
-
-              const titleRegex = /<a\b(?=[^>]*\bclass=["'][^"']*result__a[^"']*["'])(?=[^>]*\bhref=["']([^"']+)["'])[^>]*>([\s\S]*?)<\/a>/gi;
-              let titleMatch: RegExpExecArray | null;
-              while ((titleMatch = titleRegex.exec(html)) !== null && searchResults.length < 5) {
-                const title = titleMatch[2]
-                  .replace(/<[^>]+>/g, '')
-                  .replace(/&quot;/g, '"')
-                  .replace(/&#x27;/g, "'")
-                  .replace(/&amp;/g, '&')
-                  .replace(/&lt;/g, '<')
-                  .replace(/&gt;/g, '>')
-                  .replace(/\s+/g, ' ')
-                  .trim();
-                let url = titleMatch[1].replace(/&amp;/g, '&');
-                try {
-                  const parsed = new URL(url, 'https://duckduckgo.com');
-                  url = parsed.searchParams.get('uddg') || parsed.href;
-                  if (!/^https?:\/\//i.test(url)) url = parsed.href;
-                } catch {}
-                if (title && /^https?:\/\//i.test(url)) searchResults.push({ title, url });
-              }
-
-              // Extract snippet blocks from DDG HTML search results
-              const snippetRegex = /<a\s+class="result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
-              let match: RegExpExecArray | null;
-
-              while ((match = snippetRegex.exec(html)) !== null && snippets.length < 5) {
-                const cleaned = match[1]
-                  .replace(/<[^>]+>/g, '')
-                  .replace(/&quot;/g, '"')
-                  .replace(/&#x27;/g, "'")
-                  .replace(/&amp;/g, '&')
-                  .replace(/&lt;/g, '<')
-                  .replace(/&gt;/g, '>')
-                  .replace(/\s+/g, ' ')
-                  .trim();
-                if (cleaned.length > 20) {
-                  snippets.push(cleaned);
-                }
-              }
-
-              if (snippets.length > 0) {
-                console.log(`[WebSearch] Found ${snippets.length} web snippet(s) for "${rawQuery}"`);
-                const formatted = snippets.map((snippet, index) => {
-                  const source = searchResults[index];
-                  return `${index + 1}. ${source ? `${source.title}: ` : ''}${snippet}${source ? ` (Source: ${source.url})` : ''}`;
-                }).join('\n\n');
+              const searchResults = parseDuckDuckGoResults(html, 5);
+              if (searchResults.length > 0) {
+                console.log(`[WebSearch] Found ${searchResults.length} web result(s) for "${rawQuery}"`);
+                const formatted = searchResults.map((result, index) =>
+                  `${index + 1}. ${result.title}: ${result.snippet} (Source: ${result.url})`
+                ).join('\n\n');
                 return {
                   success: true,
                   message: `Live Web Search Results for "${rawQuery}":\n${formatted}\n\n[Search complete. Use only these current results for changing facts and include a source link when useful.]`,
-                  data: snippets.map((snippet, index) => ({ ...searchResults[index], snippet })),
-                  ...(searchResults.length > 0
-                    ? { evidence: { kind: 'live' as const, fetchedAt: Date.now(), sources: searchResults.map((result) => result.url) } }
-                    : {}),
+                  data: searchResults,
+                  evidence: { kind: 'live' as const, fetchedAt: Date.now(), sources: searchResults.map((result) => result.url) },
                 };
               }
             }

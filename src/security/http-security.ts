@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import crypto from 'crypto';
-import { config } from '../config/env.js';
+import { isIP } from 'node:net';
 
 export interface AuthCheckResult {
   isAuthenticated: boolean;
@@ -8,24 +8,18 @@ export interface AuthCheckResult {
 }
 
 export class HttpSecurityManager {
-  private failedAttempts = new Map<string, { count: number; blockedUntil: number }>();
+  private failedAttempts = new Map<string, { count: number; blockedUntil: number; lastAttemptAt: number }>();
   private requestCounts = new Map<string, { count: number; windowStart: number }>();
+  private requestsSincePrune = 0;
+  private readonly maxTrackedKeys = 10_000;
 
   /**
-   * Resolves the configured ADMIN_API_KEY from environment, or derives a deterministic
-   * secret from bot owner configuration.
+   * Resolves an explicitly configured admin secret. No predictable fallback is used:
+   * admin endpoints fail closed if the deployment has no secret configured.
    */
-  public getAdminKey(): string {
-    if (process.env.ADMIN_API_KEY && process.env.ADMIN_API_KEY.trim()) {
-      return process.env.ADMIN_API_KEY.trim();
-    }
-    if (process.env.SESSION_BACKUP_KEY && process.env.SESSION_BACKUP_KEY.trim()) {
-      return process.env.SESSION_BACKUP_KEY.trim();
-    }
-
-    // Deterministic fallback derived from bot owner phone and pairing phone
-    const baseSecret = `forgelabs_${config.bot.owners.join('_')}_${config.bot.pairingPhoneNumber || '2347058967815'}`;
-    return crypto.createHash('sha256').update(baseSecret).digest('hex').slice(0, 32);
+  public getAdminKey(): string | null {
+    const configuredKey = process.env.ADMIN_API_KEY?.trim() || process.env.SESSION_BACKUP_KEY?.trim() || '';
+    return configuredKey.length >= 32 ? configuredKey : null;
   }
 
   /**
@@ -42,9 +36,12 @@ export class HttpSecurityManager {
   /**
    * Rate limits incoming HTTP requests per IP to prevent DoS and brute-force scans.
    */
-  public checkRateLimit(req: IncomingMessage, maxPerMinute: number = 100): boolean {
+  public checkRateLimit(req: IncomingMessage, maxPerMinute: number = 100, bucket = 'global'): boolean {
     const ip = this.getClientIp(req);
     const now = Date.now();
+    const key = `${bucket}:${ip}`;
+
+    this.pruneMaps(now);
 
     // Check if IP is currently blocked due to repeated auth failures
     const blockInfo = this.failedAttempts.get(ip);
@@ -52,14 +49,15 @@ export class HttpSecurityManager {
       return false;
     }
 
-    const current = this.requestCounts.get(ip) || { count: 0, windowStart: now };
+    const current = this.requestCounts.get(key) || { count: 0, windowStart: now };
     if (now - current.windowStart > 60_000) {
       current.count = 1;
       current.windowStart = now;
     } else {
       current.count++;
     }
-    this.requestCounts.set(ip, current);
+    if (!this.requestCounts.has(key)) this.keepMapBounded(this.requestCounts);
+    this.requestCounts.set(key, current);
 
     return current.count <= maxPerMinute;
   }
@@ -82,8 +80,13 @@ export class HttpSecurityManager {
     }
 
     const now = Date.now();
-    const current = this.failedAttempts.get(ip) || { count: 0, blockedUntil: 0 };
+    const previous = this.failedAttempts.get(ip);
+    const current = !previous || now - previous.lastAttemptAt > 10 * 60_000 ||
+      (previous.blockedUntil > 0 && previous.blockedUntil <= now)
+      ? { count: 0, blockedUntil: 0, lastAttemptAt: now }
+      : previous;
     current.count++;
+    current.lastAttemptAt = now;
 
     // If 5 failed attempts in short succession, block IP for 5 minutes
     if (current.count >= 5) {
@@ -91,19 +94,21 @@ export class HttpSecurityManager {
       console.warn(`[HttpSecurity] 🚨 IP ${ip} blocked for 5 minutes due to multiple unauthorized access attempts.`);
     }
 
+    if (!this.failedAttempts.has(ip)) this.keepMapBounded(this.failedAttempts);
     this.failedAttempts.set(ip, current);
   }
 
   /**
    * Verifies if the request contains valid admin credentials via Bearer token,
-   * x-admin-key header, or URL parameter (?token= or ?key=).
+   * x-admin-key header, or HTTP Basic password. Credentials in URL parameters are
+   * intentionally rejected because URLs are commonly retained in logs/history.
    * @param recordFailure Whether to count missing/invalid credentials toward IP blocking (default true).
    *                      Set to false for public probes (like /health) to prevent blocking uptime pingers.
    */
   public verifyAdminAuth(req: IncomingMessage, recordFailure: boolean = true): AuthCheckResult {
     const adminKey = this.getAdminKey();
     if (!adminKey) {
-      return { isAuthenticated: false, reason: 'No admin key configured on server' };
+      return { isAuthenticated: false, reason: 'No strong admin key configured on server' };
     }
 
     // 1. Check Authorization header: Bearer <key>
@@ -121,12 +126,13 @@ export class HttpSecurityManager {
       return { isAuthenticated: true };
     }
 
-    // 3. Check query parameters: ?token=... or ?key=...
-    if (req.url) {
+    // Basic auth lets the browser pair page authenticate without putting the
+    // admin secret in its URL. The username is ignored; the password is the key.
+    if (authHeader?.startsWith('Basic ')) {
       try {
-        const dummyUrl = new URL(req.url, 'http://localhost');
-        const tokenParam = dummyUrl.searchParams.get('token') || dummyUrl.searchParams.get('key');
-        if (tokenParam && this.timingSafeEqual(tokenParam.trim(), adminKey)) {
+        const decoded = Buffer.from(authHeader.slice(6).trim(), 'base64').toString('utf8');
+        const separator = decoded.indexOf(':');
+        if (separator >= 0 && this.timingSafeEqual(decoded.slice(separator + 1), adminKey)) {
           return { isAuthenticated: true };
         }
       } catch {}
@@ -152,11 +158,31 @@ export class HttpSecurityManager {
    * Resolves remote IP address safely from headers or socket
    */
   private getClientIp(req: IncomingMessage): string {
-    const forwarded = req.headers['x-forwarded-for'];
-    if (typeof forwarded === 'string') {
-      return forwarded.split(',')[0].trim();
+    const cloudflareIp = req.headers['cf-connecting-ip'];
+    if (process.env.RENDER_EXTERNAL_URL && typeof cloudflareIp === 'string' && isIP(cloudflareIp.trim())) {
+      // Render's Cloudflare edge overwrites this header, unlike X-Forwarded-For,
+      // which can contain caller-supplied values.
+      return cloudflareIp.trim();
     }
     return req.socket.remoteAddress || '127.0.0.1';
+  }
+
+  private pruneMaps(now: number): void {
+    this.requestsSincePrune++;
+    if (this.requestsSincePrune < 256 && this.requestCounts.size < this.maxTrackedKeys) return;
+    this.requestsSincePrune = 0;
+    for (const [key, value] of this.requestCounts) {
+      if (now - value.windowStart > 60_000) this.requestCounts.delete(key);
+    }
+    for (const [key, value] of this.failedAttempts) {
+      if (value.blockedUntil <= now && now - value.lastAttemptAt > 10 * 60_000) this.failedAttempts.delete(key);
+    }
+  }
+
+  private keepMapBounded<T>(map: Map<string, T>): void {
+    if (map.size < this.maxTrackedKeys) return;
+    const oldestKey = map.keys().next().value;
+    if (oldestKey !== undefined) map.delete(oldestKey);
   }
 }
 

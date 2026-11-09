@@ -2,8 +2,9 @@ import fs from 'fs';
 import type { WASocket } from '@whiskeysockets/baileys';
 import {
   saveChannelQuote,
-  getFreshestQuoteForNiche,
   markQuoteUsed,
+  reserveOutboundContent,
+  markOutboundContentSent,
   getAllKnownGroups,
   upsertKnownGroup,
   logAutonomousAction,
@@ -502,10 +503,38 @@ export async function broadcastMorningGroupMotivation(
       // 1. Detect group niche
       const niche = detectGroupNiche(group.subject);
 
-      // 2. Select freshest quote matching this niche
-      const quote = await getFreshestQuoteForNiche(niche);
+      // 2. Reserve a never-before-used quote for this group. The content ledger
+      // is atomic so manual and scheduled broadcasts cannot pick the same quote.
+      const quoteCandidates = await db.prepare(`
+        SELECT * FROM channel_quotes
+        WHERE niche = ?
+        ORDER BY CASE WHEN instr(image_path, 'newsletter_') > 0 THEN 0 ELSE 1 END,
+                 used_count ASC, last_used_at ASC, RANDOM()
+        LIMIT 100
+      `).all(niche) as unknown as ChannelQuote[];
+      let quote: ChannelQuote | undefined;
+      for (const candidate of quoteCandidates) {
+        if (await reserveOutboundContent(group.id, candidate.quote_text, 'group_motivation')) {
+          quote = candidate;
+          break;
+        }
+      }
+      if (!quote && niche !== 'general_growth') {
+        const generalCandidates = await db.prepare(`
+          SELECT * FROM channel_quotes
+          WHERE niche = 'general_growth'
+          ORDER BY used_count ASC, last_used_at ASC, RANDOM()
+          LIMIT 100
+        `).all() as unknown as ChannelQuote[];
+        for (const candidate of generalCandidates) {
+          if (await reserveOutboundContent(group.id, candidate.quote_text, 'group_motivation')) {
+            quote = candidate;
+            break;
+          }
+        }
+      }
       if (!quote) {
-        console.warn(`[ChannelQuotes] No quote found for niche: ${niche}`);
+        console.log(`[ChannelQuotes] ⏭️ No unused quote remains for "${group.subject}"; skipping instead of repeating old content.`);
         continue;
       }
 
@@ -516,14 +545,17 @@ export async function broadcastMorningGroupMotivation(
       // 4. Send message to group (with guaranteed HD accompanying image card)
       const imagePath = await getOrGenerateQuoteMedia(quote.id, quote.quote_text, quote.author, quote.niche, quote.image_path);
       const hasImage = Boolean(imagePath && fs.existsSync(imagePath));
-      if (hasImage) {
-        await socket.sendMessage(group.id, {
+      const sendResult = hasImage
+        ? await socket.sendMessage(group.id, {
           image: fs.readFileSync(imagePath),
           caption: messageText,
-        });
-      } else {
-        await socket.sendMessage(group.id, { text: messageText });
+        })
+        : await socket.sendMessage(group.id, { text: messageText });
+      if (!sendResult?.key?.id) {
+        console.warn(`[ChannelQuotes] WhatsApp returned no message ID for "${group.subject}"; keeping quote reserved to prevent a duplicate retry.`);
+        continue;
       }
+      await markOutboundContentSent(group.id, quote.quote_text);
       await chatLogger.logOutboundMessage(group.id, messageText);
       await markQuoteUsed(quote.id);
       deliveredGroups.push(group.subject);

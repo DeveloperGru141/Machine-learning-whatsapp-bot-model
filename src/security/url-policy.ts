@@ -14,7 +14,7 @@ function isBlockedIp(address: string): boolean {
       (a === 100 && b >= 64 && b <= 127) ||
       (a === 169 && b === 254) ||
       (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && (b === 0 || b === 168)) ||
+      (a === 192 && (b === 0 || b === 168 || (b === 88 && parts[2] === 99))) ||
       (a === 198 && (b === 18 || b === 19 || b === 51)) ||
       (a === 203 && b === 0);
   }
@@ -24,8 +24,14 @@ function isBlockedIp(address: string): boolean {
       const mapped = normalized.slice('::ffff:'.length);
       return isIP(mapped) === 4 ? isBlockedIp(mapped) : true;
     }
-    const isGlobalUnicast = /^[23][0-9a-f]{3}:/i.test(normalized);
-    return !isGlobalUnicast || normalized.startsWith('2001:db8:') || normalized.startsWith('2001:10:');
+    const firstHextet = Number.parseInt(normalized.split(':', 1)[0], 16);
+    const secondHextet = Number.parseInt(normalized.split(':')[1] || '0', 16);
+    const isGlobalUnicast = firstHextet >= 0x2000 && firstHextet <= 0x3fff;
+    const isIetfSpecialPurpose = firstHextet === 0x2001 && secondHextet <= 0x01ff;
+    const isDocumentation = (firstHextet === 0x2001 && secondHextet === 0x0db8) ||
+      (firstHextet === 0x3fff && secondHextet <= 0x0fff);
+    const is6to4 = firstHextet === 0x2002;
+    return !isGlobalUnicast || isIetfSpecialPurpose || isDocumentation || is6to4;
   }
   return true;
 }

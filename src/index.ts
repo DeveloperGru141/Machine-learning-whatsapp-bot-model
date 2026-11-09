@@ -68,6 +68,46 @@ function renderPairingQrSvg(payload: string): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" role="img" aria-label="WhatsApp pairing QR code" shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#fff"/><path fill="#000" d="${path}"/></svg>`;
 }
 
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character]!);
+}
+
+function isSameOriginRequest(req: http.IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  const host = req.headers.host;
+  if (typeof origin !== 'string' || typeof host !== 'string') return false;
+  try {
+    const parsedOrigin = new URL(origin);
+    return (parsedOrigin.protocol === 'https:' || parsedOrigin.protocol === 'http:') &&
+      parsedOrigin.host.toLowerCase() === host.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+function isSecureTransport(req: http.IncomingMessage): boolean {
+  if ((req.socket as any).encrypted === true) return true;
+  const remoteAddress = req.socket.remoteAddress || '';
+  if (remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress.startsWith('::ffff:127.')) return true;
+  const forwardedProtocol = req.headers['x-forwarded-proto'];
+  return Boolean(
+    process.env.RENDER_EXTERNAL_URL &&
+    typeof forwardedProtocol === 'string' &&
+    forwardedProtocol.split(',')[0].trim().toLowerCase() === 'https'
+  );
+}
+
+function rejectInsecureAdminRequest(res: http.ServerResponse): void {
+  res.writeHead(426, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify({ error: 'HTTPS is required for pairing and admin access.' }));
+}
+
 
 // In-memory capture of live server logs (last 500 lines) for Render /logs endpoint
 export const liveConsoleLogs: string[] = [];
@@ -178,6 +218,36 @@ function pruneTempAndMemory() {
         } catch {}
       }
     }
+    const viewOnceDir = path.resolve('./data/view_once');
+    if (fs.existsSync(viewOnceDir)) {
+      const maxArchiveAgeMs = 30 * 24 * 60 * 60 * 1000;
+      const maxArchiveFiles = 100;
+      const maxArchiveBytes = 250 * 1024 * 1024;
+      const now = Date.now();
+      const files: Array<{ filePath: string; size: number; mtimeMs: number }> = [];
+      let totalBytes = 0;
+      for (const name of fs.readdirSync(viewOnceDir)) {
+        const filePath = path.join(viewOnceDir, name);
+        try {
+          const stat = fs.lstatSync(filePath);
+          if (!stat.isFile()) continue;
+          files.push({ filePath, size: stat.size, mtimeMs: stat.mtimeMs });
+          totalBytes += stat.size;
+        } catch {}
+      }
+      files.sort((a, b) => a.mtimeMs - b.mtimeMs);
+      while (files.length > 0 && (
+        files.length > maxArchiveFiles ||
+        totalBytes > maxArchiveBytes ||
+        now - files[0].mtimeMs > maxArchiveAgeMs
+      )) {
+        const oldest = files.shift()!;
+        try {
+          fs.unlinkSync(oldest.filePath);
+          totalBytes -= oldest.size;
+        } catch {}
+      }
+    }
   } catch {}
 }
 
@@ -198,6 +268,10 @@ function startHealthServer() {
       }
       const report = healthMonitor.getHealthReport();
       const auth = httpSecurityManager.verifyAdminAuth(req, false);
+      if (auth.isAuthenticated && !isSecureTransport(req)) {
+        rejectInsecureAdminRequest(res);
+        return;
+      }
 
       // Public health probe (for Render uptime checks and load balancer probes)
       if (!auth.isAuthenticated) {
@@ -232,24 +306,80 @@ function startHealthServer() {
         memoryMB: Math.round(report.memoryUsage.rss / 1024 / 1024),
         timestamp: new Date().toISOString(),
       });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(payload);
       return;
     }
 
-    // 2. WhatsApp Pairing & QR Endpoints (Never blocked by rate-limiting)
-    if (req.url && (req.url.startsWith('/qr') || req.url.startsWith('/pair'))) {
+    // 2. WhatsApp pairing endpoints contain one-time account-linking credentials.
+    // Require admin authentication, throttle polls and code refreshes separately,
+    // and never let a cross-site GET mutate pairing state.
+    let requestUrl: URL;
+    try {
+      requestUrl = new URL(req.url || '/', 'http://localhost');
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ error: 'Invalid request URL.' }));
+      return;
+    }
+    const pathname = requestUrl.pathname;
+    const isPairingRoute = pathname === '/qr' || pathname === '/pair' || pathname === '/pair/qr.svg';
+    if (isPairingRoute) {
+      const isRefresh = requestUrl.searchParams.has('refresh') || requestUrl.searchParams.has('new');
+      if (!httpSecurityManager.checkRateLimit(req, 200, 'global') ||
+          !httpSecurityManager.checkRateLimit(req, 120, 'pairing') ||
+          (isRefresh && !httpSecurityManager.checkRateLimit(req, 3, 'pair-refresh'))) {
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ error: 'Too Many Requests: Pairing rate limit exceeded.' }));
+        return;
+      }
+
+      if (!isSecureTransport(req)) {
+        rejectInsecureAdminRequest(res);
+        return;
+      }
+
+      const auth = httpSecurityManager.verifyAdminAuth(req);
+      if (!auth.isAuthenticated) {
+        res.setHeader('Cache-Control', 'no-store');
+        if (auth.reason === 'No strong admin key configured on server') {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Pairing and admin endpoints require an ADMIN_API_KEY with at least 32 characters.' }));
+          return;
+        }
+        res.setHeader('WWW-Authenticate', 'Basic realm="WhatsApp pairing", charset="UTF-8"');
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Admin authentication required.' }));
+        return;
+      }
+
+      if (isRefresh && (req.method !== 'POST' || !isSameOriginRequest(req))) {
+        res.writeHead(403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ error: 'Pairing refresh must be a same-origin POST request.' }));
+        return;
+      }
+
+      if (!isRefresh && req.method !== 'GET') {
+        res.writeHead(405, { 'Allow': 'GET, POST', 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+        return;
+      }
+
       const registered = whatsAppClient.isRegistered();
       const pairingCodeEnabled = true; // Always allow pairing via phone input on the page
 
-      // On-demand refresh endpoint: /pair?refresh=1 or /qr?refresh=1
-      // Accepts optional phone= parameter to pair with a different number
-      if (req.url.includes('refresh=1') || req.url.includes('new=1')) {
-        const urlParams = new URL(req.url, `http://${req.headers.host || 'localhost'}`).searchParams;
-        const phoneOverride = urlParams.get('phone') || undefined;
+      // Keep the phone number out of request URLs and access logs.
+      if (isRefresh) {
+        const rawPhone = req.headers['x-pairing-phone'];
+        const phoneOverride = typeof rawPhone === 'string' ? rawPhone.trim() : undefined;
+        if (phoneOverride && !/^[1-9]\d{7,14}$/.test(phoneOverride)) {
+          res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ error: 'Phone number must be 8 to 15 digits including country code.' }));
+          return;
+        }
         const freshCode = await whatsAppClient.requestFreshPairingCode(false, phoneOverride);
         const freshQr = whatsAppClient.getLatestQr();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(
           JSON.stringify({
             status: whatsAppClient.isRegistered() ? 'already_connected' : 'pairing_code_refreshed',
@@ -267,7 +397,7 @@ function startHealthServer() {
 
       // Render the QR locally so the one-time WhatsApp linking credential is
       // never sent to a third-party QR image service.
-      if (req.url.startsWith('/pair/qr.svg')) {
+      if (pathname === '/pair/qr.svg') {
         if (!qr || registered) {
           res.writeHead(404, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store' });
           res.end();
@@ -282,8 +412,8 @@ function startHealthServer() {
         return;
       }
 
-      if (req.url.includes('json=1')) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (requestUrl.searchParams.has('json')) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(
           JSON.stringify({
             status: registered ? 'already_connected' : 'awaiting_qr_scan',
@@ -302,7 +432,7 @@ function startHealthServer() {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>${config.bot.name} • WhatsApp Pairing & QR</title>
+  <title>${escapeHtml(config.bot.name)} • WhatsApp Pairing & QR</title>
   <style>
     body { font-family: system-ui, -apple-system, sans-serif; background: #0b141a; color: #e9edef; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; text-align: center; }
     .card { background: #111b21; border: 1px solid #222e35; border-radius: 16px; padding: 32px; max-width: 440px; width: 100%; box-shadow: 0 12px 32px rgba(0,0,0,0.45); }
@@ -320,7 +450,7 @@ function startHealthServer() {
 </head>
 <body>
   <div class="card">
-    <h1>${config.bot.name}</h1>
+    <h1>${escapeHtml(config.bot.name)}</h1>
     <p>${pairingCodeEnabled ? 'Link WhatsApp by scanning a QR code or using a pairing code' : 'Link WhatsApp by scanning the QR code'}</p>
     <div style="margin-bottom:14px;${pairingCode ? 'display:none;' : ''}">
       <label style="font-size:13px;color:#8696a0;">Your WhatsApp number with country code, digits only (e.g. 2348012345678):</label>
@@ -336,7 +466,7 @@ function startHealthServer() {
       }
     </div>
     <div id="code-container" class="code-box" style="${registered || !pairingCodeEnabled ? 'display:none;' : ''}">
-      <span>CODE: <b id="pair-code-text">${pairingCode || 'Enter number first'}</b></span>
+      <span>CODE: <b id="pair-code-text">${escapeHtml(pairingCode || 'Enter number first')}</b></span>
       <button id="copy-btn" class="btn" onclick="copyPairCode()">📋 Copy</button>
     </div>
     <div id="action-bar" style="margin-top:12px;${registered || !pairingCodeEnabled || pairingCode ? 'display:none;' : ''}">
@@ -352,7 +482,7 @@ function startHealthServer() {
     </div>
   </div>
   <script>
-    let lastQr = ${JSON.stringify(qr || '')};
+    let lastQr = ${JSON.stringify(qr || '').replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026')};
   let pairingCodeRequested = ${JSON.stringify(Boolean(pairingCode))};
     let pairingQrDisplayed = Boolean(lastQr);
 
@@ -380,8 +510,10 @@ function startHealthServer() {
       pairingCodeRequested = false;
       codeText.textContent = 'Requesting code...';
       try {
-        const url = '/pair?refresh=1&phone=' + encodeURIComponent(phone);
-        const res = await fetch(url);
+        const res = await fetch('/pair?refresh=1', {
+          method: 'POST',
+          headers: { 'X-Pairing-Phone': phone, 'X-Requested-With': 'fetch' }
+        });
         const data = await res.json();
         if (data.whatsappRegistered) {
           badge.textContent = '🟢 Connected & Active';
@@ -424,7 +556,7 @@ function startHealthServer() {
       if (pairingPollInFlight) return;
       pairingPollInFlight = true;
       try {
-        const res = await fetch('/qr?json=1');
+        const res = await fetch('/qr?json=1', { cache: 'no-store' });
         const data = await res.json();
         const container = document.getElementById('qr-container');
         const badge = document.getElementById('status-badge');
@@ -459,7 +591,7 @@ function startHealthServer() {
   </script>
 </body>
 </html>`;
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(html);
       return;
     }
@@ -471,8 +603,15 @@ function startHealthServer() {
       return;
     }
 
+    const isAdminDataRoute = ['/logs', '/render-logs', '/console', '/debug', '/recent-logs', '/session-bundle']
+      .some((route) => pathname === route || pathname.startsWith(`${route}/`));
+    if (isAdminDataRoute && !isSecureTransport(req)) {
+      rejectInsecureAdminRequest(res);
+      return;
+    }
+
     
-    if (req.url && (req.url.startsWith('/logs') || req.url.startsWith('/render-logs') || req.url.startsWith('/console'))) {
+    if (pathname === '/logs' || pathname === '/render-logs' || pathname === '/console') {
       const auth = httpSecurityManager.verifyAdminAuth(req);
       if (!auth.isAuthenticated) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -484,7 +623,7 @@ function startHealthServer() {
       return;
     }
 
-    if (req.url?.startsWith('/debug') || req.url?.startsWith('/recent-logs')) {
+    if (pathname === '/debug' || pathname === '/recent-logs') {
       const auth = httpSecurityManager.verifyAdminAuth(req);
       if (!auth.isAuthenticated) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -502,7 +641,7 @@ function startHealthServer() {
       return;
     }
 
-    if (req.url?.startsWith('/session-bundle')) {
+    if (pathname === '/session-bundle') {
       const auth = httpSecurityManager.verifyAdminAuth(req);
       if (!auth.isAuthenticated) {
         // Return 404 Not Found to prevent leaking the existence of the session backup endpoint
@@ -512,23 +651,33 @@ function startHealthServer() {
       }
       try {
         const credsFile = path.join(config.paths.sessions, 'creds.json');
-        if (!fs.existsSync(credsFile)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
+        if (!fs.existsSync(credsFile) || !fs.lstatSync(credsFile).isFile()) {
+          res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
           res.end(JSON.stringify({ error: 'No registered session exists yet' }));
           return;
         }
         const zlib = await import('zlib');
         const filesMap: Record<string, string> = {};
+        let totalBytes = 0;
+        const maxBundleBytes = 20 * 1024 * 1024;
         for (const file of fs.readdirSync(config.paths.sessions)) {
+          if (!file.endsWith('.json')) continue;
           const fullPath = path.join(config.paths.sessions, file);
-          if (fs.statSync(fullPath).isFile()) {
+          const stat = fs.lstatSync(fullPath);
+          if (stat.isFile()) {
+            totalBytes += stat.size;
+            if (totalBytes > maxBundleBytes) {
+              res.writeHead(413, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+              res.end(JSON.stringify({ error: 'Session bundle exceeds the 20 MB safety limit.' }));
+              return;
+            }
             filesMap[file] = fs.readFileSync(fullPath, 'utf8');
           }
         }
         const jsonStr = JSON.stringify(filesMap);
         const gzipped = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'));
         const bundle = gzipped.toString('base64');
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(JSON.stringify({ success: true, count: Object.keys(filesMap).length, bundle }));
       } catch (err: any) {
         res.writeHead(500, { 'Content-Type': 'application/json' });

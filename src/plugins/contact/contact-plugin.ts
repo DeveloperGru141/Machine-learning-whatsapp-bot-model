@@ -497,8 +497,33 @@ export class ContactPlugin implements IPlugin {
                 targetName = `+${digits}`;
               }
             } else if (isOwner) {
-              // 2. Look up in contactService by name or nickname (STRICTLY OWNER ONLY)
-              const saved = await contactService.getContact(rawRecipient);
+              // Resolve names only when the match is unambiguous. A broad LIKE/LIMIT 1
+              // lookup can silently send private text to the wrong similarly named contact.
+              const matches = await contactService.searchContacts(rawRecipient, 10);
+              const exactMatches = matches.filter((contact) =>
+                [contact.custom_name, contact.display_name]
+                  .some((name) => name?.trim().toLocaleLowerCase() === rawRecipient.toLocaleLowerCase())
+              );
+              if (exactMatches.length === 0 && matches.length > 0) {
+                const suggestions = matches.slice(0, 5).map((contact) => contact.custom_name || contact.display_name).join(', ');
+                return {
+                  success: false,
+                  message: `I found similar contact names (${suggestions}) but no exact match for “${rawRecipient}”. Please give the exact saved name or phone number so I don't message the wrong person.`,
+                };
+              }
+              const candidates = exactMatches;
+              if (candidates.length > 1) {
+                const choices = candidates.slice(0, 5).map((contact) => {
+                  const display = contact.custom_name || contact.display_name;
+                  return `${display} (••${contact.phone_number?.slice(-4) || 'LID'})`;
+                }).join(', ');
+                return {
+                  success: false,
+                  message: `I found more than one contact matching “${rawRecipient}”: ${choices}. Please specify the exact name or phone number.`,
+                };
+              }
+
+              const saved = candidates[0];
               if (saved) {
                 targetName = saved.custom_name || saved.display_name || rawRecipient;
                 targetPhone = saved.phone_number;
@@ -506,25 +531,6 @@ export class ContactPlugin implements IPlugin {
                   targetJid = `${saved.phone_number}@s.whatsapp.net`;
                 } else {
                   targetJid = saved.jid;
-                }
-              } else {
-                // 3. Fallback search in SQLite contacts table (exclude accidental Crypto Boss match)
-                const row = await db.prepare(`
-                  SELECT * FROM contacts
-                  WHERE (display_name LIKE ? OR custom_name LIKE ? OR notes LIKE ?)
-                    AND display_name != 'Crypto Boss😊'
-                  ORDER BY CASE WHEN jid LIKE '%@s.whatsapp.net' THEN 0 ELSE 1 END
-                  LIMIT 1
-                `).get(`%${rawRecipient}%`, `%${rawRecipient}%`, `%${rawRecipient}%`) as any;
-
-                if (row) {
-                  targetName = row.custom_name || row.display_name || rawRecipient;
-                  targetPhone = row.phone_number;
-                  if (row.phone_number && row.phone_number.length <= 15) {
-                    targetJid = `${row.phone_number}@s.whatsapp.net`;
-                  } else {
-                    targetJid = row.jid;
-                  }
                 }
               }
             }
@@ -580,7 +586,10 @@ export class ContactPlugin implements IPlugin {
                   return { success: false, message: 'Permission denied: target-group admin status could not be verified.' };
                 }
               }
-              await ctx.sock.sendMessage(matchedGroup.group_jid, { text: cleanMessage });
+              const groupSend = await ctx.sock.sendMessage(matchedGroup.group_jid, { text: cleanMessage });
+              if (!groupSend?.key?.id) {
+                return { success: false, message: `WhatsApp did not confirm the message to group "${matchedGroup.subject}".` };
+              }
               await chatLogger.logMessage({
                 chatJid: matchedGroup.group_jid,
                 senderJid: 'bot',
@@ -652,10 +661,10 @@ export class ContactPlugin implements IPlugin {
           const sent = isOwner
             ? await antiBanEngine.runOwnerAuthorizedOutbound(dispatchMessage)
             : await dispatchMessage();
-          if (!sent) {
+          if (!sent?.key?.id) {
             return {
               success: false,
-              message: `Delivery failed to ${targetName} (${targetJid}): Socket could not dispatch message.`,
+              message: `WhatsApp did not confirm dispatch to ${targetName}; no sent state was recorded.`,
             };
           }
 
@@ -677,7 +686,7 @@ export class ContactPlugin implements IPlugin {
             console.warn('[ContactPlugin] Warning recording relay session:', relayErr.message);
           }
 
-          const stanzaId = sent?.key?.id || `wa_${Date.now()}`;
+          const stanzaId = sent.key.id;
           const receipt = await whatsAppClient.waitForDeliveryConfirmation(stanzaId, targetJid, 2000);
 
           const phoneDisplay = targetPhone ? ` (+${targetPhone})` : '';

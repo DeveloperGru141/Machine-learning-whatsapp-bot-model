@@ -13,6 +13,7 @@ import { stickerEngine } from '../plugins/stickers/sticker-engine.js';
 import { getOrGenerateMemeMedia, getOrGenerateQuoteMedia } from '../plugins/scheduler/media-card-generator.js';
 import pino from 'pino';
 import { Boom } from '@hapi/boom';
+import { createHash } from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
 import { config, normalizePhoneNumber } from '../config/env.js';
@@ -25,10 +26,11 @@ import { agentHarness } from '../agent/harness.js';
 import { ExecutionContext } from '../plugins/types.js';
 import { patternMiner } from '../learning/pattern-miner.js';
 import { batchLearner } from '../learning/batch-learner.js';
-import { downloadMediaMessage } from '@whiskeysockets/baileys';
+import { downloadMediaMessageBounded } from '../security/media-limits.js';
 import { analyzeVoiceNote } from './transcription.js';
 import { inspectUrlSafety } from '../plugins/link-summarizer/link-plugin.js';
 import { analyzeImageBuffer } from './vision.js';
+import { readLimitedResponse } from '../security/url-policy.js';
 import { requestQueue } from './queue.js';
 import { groupAdminPlugin } from '../plugins/group-admin/admin-plugin.js';
 import { setupGroupWelcome } from '../plugins/group-admin/welcome.js';
@@ -56,6 +58,40 @@ export function formatPhoneNumberForPairing(num: string): string {
 // A fixed local pairing code keeps the localhost attempt easy to follow while
 // Baileys re-establishes its short-lived unlinked socket.
 const CUSTOM_PAIRING_CODE = 'ADEM1234';
+const MAX_VIEW_ONCE_ARCHIVE_FILES = 100;
+const MAX_VIEW_ONCE_ARCHIVE_BYTES = 250 * 1024 * 1024;
+
+function makeRoomInViewOnceArchive(directory: string, nextFilePath: string, incomingBytes: number): void {
+  fs.mkdirSync(directory, { recursive: true });
+  const target = path.resolve(nextFilePath);
+  try {
+    if (!fs.lstatSync(target).isFile()) throw new Error('View-once archive target is not a regular file.');
+  } catch (error: any) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  const entries: Array<{ filePath: string; size: number; mtimeMs: number }> = [];
+  let totalBytes = 0;
+
+  for (const name of fs.readdirSync(directory)) {
+    const filePath = path.join(directory, name);
+    try {
+      const stat = fs.lstatSync(filePath);
+      if (!stat.isFile()) continue;
+      if (path.resolve(filePath) === target) continue;
+      entries.push({ filePath, size: stat.size, mtimeMs: stat.mtimeMs });
+      totalBytes += stat.size;
+    } catch {}
+  }
+
+  entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  while (entries.length + 1 > MAX_VIEW_ONCE_ARCHIVE_FILES || totalBytes + incomingBytes > MAX_VIEW_ONCE_ARCHIVE_BYTES) {
+    const oldest = entries[0];
+    if (!oldest) throw new Error('View-once archive storage limit reached.');
+    fs.unlinkSync(oldest.filePath);
+    entries.shift();
+    totalBytes -= oldest.size;
+  }
+}
 
 export class WhatsAppClient {
   private sock: WASocket | null = null;
@@ -471,7 +507,10 @@ export class WhatsAppClient {
   private assembleSessionBundle(env: NodeJS.ProcessEnv): string | undefined {
     const pointer = env.SESSION_BUNDLE_SET || '';
     const match = /^([a-z0-9]+):(\d+)$/.exec(pointer);
-    if (!match) return env.SESSION_BUNDLE_BASE64;
+    if (!match) {
+      const bundle = env.SESSION_BUNDLE_BASE64;
+      return bundle && bundle.length <= WhatsAppClient.SESSION_BUNDLE_MAX_B64_CHARS ? bundle : undefined;
+    }
 
     const [, version, rawCount] = match;
     const count = Number(rawCount);
@@ -480,10 +519,11 @@ export class WhatsAppClient {
     const chunks: string[] = [];
     for (let index = 0; index < count; index++) {
       const chunk = env[`SESSION_BUNDLE_${version}_${String(index).padStart(3, '0')}`];
-      if (!chunk) return undefined;
+      if (!chunk || chunk.length > WhatsAppClient.SESSION_BUNDLE_CHUNK_SIZE) return undefined;
       chunks.push(chunk);
     }
-    return chunks.join('');
+    const bundle = chunks.join('');
+    return bundle.length <= WhatsAppClient.SESSION_BUNDLE_MAX_B64_CHARS ? bundle : undefined;
   }
 
   /**
@@ -503,7 +543,8 @@ export class WhatsAppClient {
           signal: AbortSignal.timeout(15_000),
         });
         if (res.ok) {
-          const rows = (await res.json()) as Array<{ envVar?: { key?: string; value?: string } }>;
+          const responseBody = await readLimitedResponse(res, 4 * 1024 * 1024);
+          const rows = JSON.parse(responseBody.toString('utf8')) as Array<{ envVar?: { key?: string; value?: string } }>;
           const latestEnv: NodeJS.ProcessEnv = {};
           for (const row of rows) {
             if (row.envVar?.key && typeof row.envVar.value === 'string') {
@@ -669,7 +710,7 @@ export class WhatsAppClient {
           }
           saved = pointerDeleted;
         } else {
-          const body = (await res.text().catch(() => '')).slice(0, 200);
+          const body = (await readLimitedResponse(res, 16 * 1024).catch(() => Buffer.alloc(0))).toString('utf8').slice(0, 200);
           console.warn(`[WhatsAppClient] Render session backup response: ${res.status} ${body}`);
         }
       } else {
@@ -774,11 +815,24 @@ export class WhatsAppClient {
         try {
           const zlib = await import('zlib');
           const rawBuf = Buffer.from(hydrateSource, 'base64');
+          if (rawBuf.length > 2 * 1024 * 1024) throw new Error('Session bundle exceeds its compressed size limit.');
           const bundleJson =
             rawBuf[0] === 0x1f && rawBuf[1] === 0x8b
-              ? zlib.gunzipSync(rawBuf).toString('utf8')
+              ? zlib.gunzipSync(rawBuf, { maxOutputLength: 20 * 1024 * 1024 }).toString('utf8')
               : rawBuf.toString('utf8');
           const filesMap = JSON.parse(bundleJson) as Record<string, string>;
+          if (!filesMap || typeof filesMap !== 'object' || Array.isArray(filesMap) || Object.keys(filesMap).length > 5_000) {
+            throw new Error('Session bundle has an invalid file map.');
+          }
+          let totalSessionTextBytes = 0;
+          for (const [fileName, fileContent] of Object.entries(filesMap)) {
+            if (!fileName || fileName === '.' || fileName === '..' ||
+                path.basename(fileName) !== fileName || typeof fileContent !== 'string') {
+              throw new Error('Session bundle contains an invalid file entry.');
+            }
+            totalSessionTextBytes += Buffer.byteLength(fileContent, 'utf8');
+            if (totalSessionTextBytes > 20 * 1024 * 1024) throw new Error('Session bundle exceeds its expanded size limit.');
+          }
           // Guard: Only hydrate if creds.json is non-empty, valid JSON, and fully registered!
           let parsedCreds: any = null;
           try {
@@ -1861,7 +1915,7 @@ export class WhatsAppClient {
     if (isIncomingVoiceNote) {
       try {
         console.log(`[WhatsAppClient] Downloading voicenote from ${normalized.senderName}...`);
-        const audioBuffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
+        const audioBuffer = await downloadMediaMessageBounded(msg, 12 * 1024 * 1024);
 
         // If sent by creator & owner Ademola, save as a high-fidelity voice sample for ElevenLabs voice cloning
         if (isOwnerUser && audioBuffer && audioBuffer.length > 5000) {
@@ -1900,7 +1954,7 @@ export class WhatsAppClient {
       // Process Image: Read visual content with Vision
       try {
         console.log(`[WhatsAppClient] Reading image content from ${normalized.senderName}...`);
-        const imgBuffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
+        const imgBuffer = await downloadMediaMessageBounded(msg, 16 * 1024 * 1024);
         const visionDesc = await analyzeImageBuffer(imgBuffer, cleanedText);
         if (visionDesc) {
           promptText = `[Visual Content Analysis of Attached Image]:\n${visionDesc}\n\nUser Question/Caption: ${cleanedText || 'Describe and answer based on this image'}`;
@@ -2153,18 +2207,19 @@ export class WhatsAppClient {
         fs.mkdirSync(viewOnceDir, { recursive: true });
       }
 
-      const filePath = path.join(viewOnceDir, `${msgId}.${ext}`);
+      const storageId = createHash('sha256').update(`${chatJid}:${msgId}`).digest('hex').slice(0, 32);
+      const filePath = path.join(viewOnceDir, `${storageId}.${ext}`);
 
-      const buffer = (await downloadMediaMessage(
+      const buffer = await downloadMediaMessageBounded(
         {
           key: msg.key,
           message: inner,
         } as WAMessage,
-        'buffer',
-        {}
-      )) as Buffer;
+        25 * 1024 * 1024
+      );
 
       if (buffer && buffer.length > 0) {
+        makeRoomInViewOnceArchive(viewOnceDir, filePath, buffer.length);
         fs.writeFileSync(filePath, buffer);
         await saveViewOnceMessage({
           message_id: msgId,
@@ -2252,14 +2307,16 @@ export class WhatsAppClient {
             // Channel media has no encryption key, skip Baileys decrypt
             throw new Error('Newsletter media has no decryptable mediaKey');
           }
-          const buffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
+          const mediaLimit = msg.message?.videoMessage ? 25 * 1024 * 1024 : 8 * 1024 * 1024;
+          const buffer = await downloadMediaMessageBounded(msg, mediaLimit);
           if (buffer && buffer.length > 0) {
             const ext = msg.message?.videoMessage ? 'mp4' : 'jpg';
             const mediaDir = path.resolve('./assets/channel_media');
             if (!fs.existsSync(mediaDir)) {
               fs.mkdirSync(mediaDir, { recursive: true });
             }
-            downloadedImagePath = path.join(mediaDir, `media_${msgId}.${ext}`);
+            const storageId = createHash('sha256').update(`${channelJid}:${msgId}`).digest('hex').slice(0, 32);
+            downloadedImagePath = path.join(mediaDir, `media_${storageId}.${ext}`);
             fs.writeFileSync(downloadedImagePath, buffer);
             console.log(`[WhatsAppClient] 📥 Downloaded channel media to ${downloadedImagePath} (${buffer.length} bytes)`);
           }

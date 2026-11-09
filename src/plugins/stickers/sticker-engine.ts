@@ -1,9 +1,10 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'node:url';
 import type { WAMessage } from '@whiskeysockets/baileys';
-import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { db } from '../../memory/db.js';
 import { classifyStickerVibe } from '../../core/vision.js';
+import { downloadMediaMessageBounded } from '../../security/media-limits.js';
 
 export type StickerVibe =
   | 'humor'
@@ -24,22 +25,22 @@ export interface StickerMatch {
   confidence: number;
 }
 
-const STICKER_DIR = path.resolve('./assets/stickers');
+const STICKER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../assets/stickers');
 
 /**
  * Intelligent Pattern Recognition Dictionary:
  * Maps conversational intent, slang, emojis, and phrasing to sticker vibes.
  */
 const VIBE_PATTERNS: Record<StickerVibe, RegExp> = {
-  humor: /\b(lol|lmao|lmfao|rofl|haha|hahaha|hehe|kikiki|lwkmd|dead|die|funny|joke|banter|cracking|😂|🤣|💀|😭)\b/i,
-  celebration: /\b(congrats|congratulations|win|won|victory|celebrate|happy|success|party|hurray|cheers|fire|lit|blessed|🎉|🎊|🔥|✨|🥂)\b/i,
-  agreement: /\b(facts|true|correct|valid|spot on|no cap|agreed|exactly|100|sure|definitely|thumbsup|sabiman|you sabi|👍|🤝|💯|✔️)\b/i,
-  shock: /\b(what|wtf|omg|wow|shock|shocked|impossible|no way|really|screaming|eyes|mindblown|unbelievable|e shock me|o ga o|chinedu|😲|😱|🤯|👀)\b/i,
-  teasing: /\b(side eye|sideeye|smirk|werey|mumu|ode|clown|fool|shakara|yarn|dey play|play|tease|teasing|😏|🤡|👀|😜|🤪)\b/i,
-  cool: /\b(cool|smooth|swag|boss|odogwu|chief|senior man|soft|chill|relaxed|easy|😎|🕶️|🤙)\b/i,
-  confusion: /\b(huh|what do you mean|confused|confusion|dont understand|how come|why|question|scratch head|thinking|hmm|🤔|🤨|❓)\b/i,
-  facepalm: /\b(facepalm|smh|sigh|tired|exhausted|frustrated|give up|god forbid|why me|🤦|🤦‍♂️|🤦‍♀️|😩|😮‍💨)\b/i,
-  salute: /\b(respect|salute|solid|loyal|loyalty|twale|baba|honor|bow|cap|🫡|🙌|🙏)\b/i,
+  humor: /(?:\b(?:lol|lmao|lmfao|rofl|haha|hahaha|hehe|kikiki|lwkmd|dead|die|funny|joke|banter|cracking)\b|😂|🤣|💀|😭)/i,
+  celebration: /(?:\b(?:congrats|congratulations|win|won|victory|celebrate|happy|success|party|hurray|cheers|fire|lit|blessed)\b|🎉|🎊|🔥|✨|🥂)/i,
+  agreement: /(?:\b(?:facts|true|correct|valid|spot on|no cap|agreed|exactly|100|sure|definitely|thumbsup|sabiman|you sabi)\b|👍|🤝|💯|✔️)/i,
+  shock: /(?:\b(?:what|wtf|omg|wow|shock|shocked|impossible|no way|really|screaming|eyes|mindblown|unbelievable|e shock me|o ga o|chinedu)\b|😲|😱|🤯|👀)/i,
+  teasing: /(?:\b(?:side eye|sideeye|smirk|werey|mumu|ode|clown|fool|shakara|yarn|dey play|play|tease|teasing)\b|😏|🤡|👀|😜|🤪)/i,
+  cool: /(?:\b(?:cool|smooth|swag|boss|odogwu|chief|senior man|soft|chill|relaxed|easy)\b|😎|🕶️|🤙)/i,
+  confusion: /(?:\b(?:huh|what do you mean|confused|confusion|dont understand|how come|why|question|scratch head|thinking|hmm)\b|🤔|🤨|❓)/i,
+  facepalm: /(?:\b(?:facepalm|smh|sigh|tired|exhausted|frustrated|give up|god forbid|why me)\b|🤦|🤦‍♂️|🤦‍♀️|😩|😮‍💨)/i,
+  salute: /(?:\b(?:respect|salute|solid|loyal|loyalty|twale|baba|honor|bow|cap)\b|🫡|🙌|🙏)/i,
   general: /.*/i,
 };
 
@@ -243,7 +244,7 @@ class StickerEngine {
     // 3. Multimodal vision parsing of the sticker image
     let detectedVibe: StickerVibe | null = null;
     try {
-      const buffer = (await downloadMediaMessage(msg, 'buffer', {})) as Buffer;
+      const buffer = await downloadMediaMessageBounded(msg, 2 * 1024 * 1024);
       if (buffer && buffer.length > 0) {
         const visionResult = await classifyStickerVibe(buffer, contextText);
         if (visionResult) {

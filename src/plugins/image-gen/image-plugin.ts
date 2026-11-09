@@ -1,5 +1,4 @@
 import dns from 'node:dns';
-import fs from 'fs';
 import { Client } from '@gradio/client';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { config } from '../../config/env.js';
@@ -91,18 +90,12 @@ export class ImageGenPlugin implements IPlugin {
 
             if (fileData) {
               const fileUrl = typeof fileData === 'string' ? fileData : fileData?.url;
-              const localPath = typeof fileData === 'object' ? fileData?.path : undefined;
 
               if (fileUrl && (fileUrl.startsWith('http://') || fileUrl.startsWith('https://'))) {
                 console.log(`[ImageGen] Fetching generated FLUX.1 image: ${fileUrl.slice(0, 60)}...`);
                 const imgRes = await fetchPublicHttpUrl(fileUrl, { signal: AbortSignal.timeout(15_000) });
                 if (imgRes.ok) {
                   imageBuffer = await readLimitedResponse(imgRes, 20 * 1024 * 1024);
-                }
-              } else if (localPath && fs.existsSync(localPath)) {
-                const stats = fs.statSync(localPath);
-                if (stats.isFile() && stats.size <= 20 * 1024 * 1024) {
-                  imageBuffer = fs.readFileSync(localPath);
                 }
               }
             }

@@ -1,7 +1,13 @@
 import zlib from 'node:zlib';
-import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from '../types.js';
 import { unwrapMessage } from '../../core/normalizer.js';
+import { downloadMediaMessageBounded } from '../../security/media-limits.js';
+
+const MAX_DOCUMENT_BYTES = 12 * 1024 * 1024;
+const MAX_PDF_TOTAL_INFLATED_BYTES = 8 * 1024 * 1024;
+const MAX_PDF_STREAM_INFLATED_BYTES = 1 * 1024 * 1024;
+const MAX_PDF_STREAMS_TO_SCAN = 32;
+const MAX_DOCX_XML_BYTES = 8 * 1024 * 1024;
 
 /**
  * Decodes standard PDF literal string escape sequences
@@ -37,8 +43,13 @@ export function extractTextFromPdf(buffer: Buffer): string {
   // Search for stream ... endstream blocks
   const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
   let match: RegExpExecArray | null;
+  let totalInflatedBytes = 0;
+  let streamsScanned = 0;
 
   while ((match = streamRegex.exec(rawLatin)) !== null) {
+    if (++streamsScanned > MAX_PDF_STREAMS_TO_SCAN) break;
+    const remainingInflatedBytes = MAX_PDF_TOTAL_INFLATED_BYTES - totalInflatedBytes;
+    if (remainingInflatedBytes <= 0) break;
     const rawStream = match[1];
     let streamText = '';
 
@@ -46,13 +57,19 @@ export function extractTextFromPdf(buffer: Buffer): string {
     let contentToScan = rawStream;
     try {
       const streamBuf = Buffer.from(rawStream, 'latin1');
-      const decompressed = zlib.inflateSync(streamBuf);
+      const decompressed = zlib.inflateSync(streamBuf, {
+        maxOutputLength: Math.min(MAX_PDF_STREAM_INFLATED_BYTES, remainingInflatedBytes),
+      });
       contentToScan = decompressed.toString('latin1');
+      totalInflatedBytes += decompressed.length;
     } catch {
       try {
         const streamBuf = Buffer.from(rawStream, 'latin1');
-        const decompressed = zlib.inflateRawSync(streamBuf);
+        const decompressed = zlib.inflateRawSync(streamBuf, {
+          maxOutputLength: Math.min(MAX_PDF_STREAM_INFLATED_BYTES, remainingInflatedBytes),
+        });
         contentToScan = decompressed.toString('latin1');
+        totalInflatedBytes += decompressed.length;
       } catch {
         // Use raw uncompressed stream data
       }
@@ -160,7 +177,9 @@ export function extractTextFromDocx(buffer: Buffer): string {
             const locExtraLen = buffer.readUInt16LE(localHeaderOffset + 28);
             const dataOffset = localHeaderOffset + 30 + locFnLen + locExtraLen;
             const compData = buffer.subarray(dataOffset, dataOffset + compSize);
-            const decomp = method === 8 ? zlib.inflateRawSync(compData) : compData;
+            const decomp = method === 8
+              ? zlib.inflateRawSync(compData, { maxOutputLength: MAX_DOCX_XML_BYTES })
+              : compData;
             const xml = decomp.toString('utf8');
             const textMatches = xml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g) || [];
             const clean = textMatches.map((m) => m.replace(/<[^>]+>/g, '')).join(' ');
@@ -187,7 +206,9 @@ export function extractTextFromDocx(buffer: Buffer): string {
 
       if (filename === 'word/document.xml' && compSize > 0) {
         const compData = buffer.subarray(dataOffset, dataOffset + compSize);
-        const decomp = method === 8 ? zlib.inflateRawSync(compData) : compData;
+        const decomp = method === 8
+          ? zlib.inflateRawSync(compData, { maxOutputLength: MAX_DOCX_XML_BYTES })
+          : compData;
         const xml = decomp.toString('utf8');
         const textMatches = xml.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g) || [];
         const clean = textMatches.map((m) => m.replace(/<[^>]+>/g, '')).join(' ');
@@ -276,7 +297,7 @@ export class DocumentReaderPlugin implements IPlugin {
           const mimetype = (docMessage.mimetype || '').toLowerCase();
           console.log(`[DocumentReader] Downloading document: "${fileName}" (${mimetype})...`);
 
-          const buffer = (await downloadMediaMessage(targetMessage, 'buffer', {})) as Buffer;
+          const buffer = await downloadMediaMessageBounded(targetMessage, MAX_DOCUMENT_BYTES);
 
           if (!buffer || buffer.length === 0) {
             return {

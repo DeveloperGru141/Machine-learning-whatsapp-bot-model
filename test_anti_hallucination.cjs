@@ -1,12 +1,21 @@
 const assert = require('assert');
-const { agentHarness, extractInlineToolCalls } = require('./dist/agent/harness.js');
-const { pluginRegistry } = require('./dist/plugins/registry.js');
-const { contactPlugin } = require('./dist/plugins/contact/contact-plugin.js');
-const { llmClient } = require('./dist/agent/llm-client.js');
-const { assertPublicHttpUrl } = require('./dist/security/url-policy.js');
-const { userProfileManager } = require('./dist/memory/user-profiles.js');
 
 async function runTest() {
+  const [
+    { agentHarness, extractInlineToolCalls },
+    { pluginRegistry },
+    { contactPlugin },
+    { llmClient },
+    { assertPublicHttpUrl },
+    { userProfileManager },
+  ] = await Promise.all([
+    import('./dist/agent/harness.js'),
+    import('./dist/plugins/registry.js'),
+    import('./dist/plugins/contact/contact-plugin.js'),
+    import('./dist/agent/llm-client.js'),
+    import('./dist/security/url-policy.js'),
+    import('./dist/memory/user-profiles.js'),
+  ]);
   console.log('🧪 Testing tool-call authorization and outbound-message guardrails...');
   await pluginRegistry.registerPlugin(contactPlugin);
 

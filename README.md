@@ -65,6 +65,10 @@ A TypeScript WhatsApp bot built with Baileys, an LLM agent, modular tools, and a
    npm start
    ```
 
+### Protecting the pairing and admin endpoints
+
+Set a unique, high-entropy `ADMIN_API_KEY` in the deployment environment before opening `/pair`. The browser will show an HTTP Basic sign-in prompt; use any username and the key as the password. The key is also accepted as a Bearer token or `x-admin-key` header for admin APIs. Pairing codes, QR payloads, logs, and session bundles are never served anonymously, and admin keys in URL query parameters are not accepted.
+
 The HTTP server exposes health/status routes, including `/health`. Do not expose operational routes publicly without the protections configured for your deployment.
 
 ## Memory and language preferences

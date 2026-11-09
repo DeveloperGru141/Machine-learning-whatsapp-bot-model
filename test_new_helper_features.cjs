@@ -1,11 +1,19 @@
 const assert = require('assert');
-const { pluginRegistry } = require('./dist/plugins/registry.js');
-const { groupAdminPlugin } = require('./dist/plugins/group-admin/admin-plugin.js');
-const { schedulerPlugin } = require('./dist/plugins/scheduler/scheduler-plugin.js');
-const { llmClient, groqClients } = require('./dist/agent/llm-client.js');
-const { db } = require('./dist/memory/db.js');
 
 async function run() {
+  const [
+    { pluginRegistry },
+    { groupAdminPlugin },
+    { schedulerPlugin },
+    { llmClient, groqClients },
+    { db },
+  ] = await Promise.all([
+    import('./dist/plugins/registry.js'),
+    import('./dist/plugins/group-admin/admin-plugin.js'),
+    import('./dist/plugins/scheduler/scheduler-plugin.js'),
+    import('./dist/agent/llm-client.js'),
+    import('./dist/memory/db.js'),
+  ]);
   console.log('🧪 Testing New Helper Features & 3-Key Inference...\n');
 
   // Register plugins
@@ -106,7 +114,7 @@ async function run() {
   const briefTool = pluginRegistry.getTool('get_executive_briefing');
   assert(briefTool, 'get_executive_briefing tool must be registered');
 
-  const briefRes = await briefTool.execute({}, mockContext);
+  const briefRes = await briefTool.execute({}, { ...mockContext, isGroup: false, chatJid: '2348108574293@s.whatsapp.net' });
   assert.strictEqual(briefRes.success, true, 'get_executive_briefing should succeed');
   assert(briefRes.message.includes('EXECUTIVE MORNING BRIEFING'), 'Briefing should include executive header');
   assert(briefRes.message.includes('Ademola'), 'Briefing should address Ademola');

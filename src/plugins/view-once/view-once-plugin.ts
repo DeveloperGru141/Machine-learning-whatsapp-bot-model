@@ -24,16 +24,27 @@ export async function deliverViewOnceMediaToOwner(
   record: ViewOnceRecord,
   quoted?: any
 ): Promise<boolean> {
-  if (!fs.existsSync(record.file_path)) {
+  const viewOnceDirectory = path.resolve('data/view_once');
+  const safeFilePath = path.resolve(record.file_path);
+  const relativePath = path.relative(viewOnceDirectory, safeFilePath);
+  const isInsideViewOnceDirectory = relativePath !== '' && relativePath !== '..' &&
+    !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath);
+  let fileStat: fs.Stats | null = null;
+  try {
+    const stat = fs.lstatSync(safeFilePath);
+    if (stat.isFile() && stat.size <= 25 * 1024 * 1024) fileStat = stat;
+  } catch {}
+
+  if (!isInsideViewOnceDirectory || !fileStat) {
     await sock.sendMessage(
       ownerJid,
-      { text: `⚠️ View-once media file not found on disk: ${record.file_path}` },
+      { text: '⚠️ This view-once media file is missing or exceeds the safe retrieval limit.' },
       quoted ? { quoted } : undefined
     );
     return false;
   }
 
-  const fileBuffer = fs.readFileSync(record.file_path);
+  const fileBuffer = fs.readFileSync(safeFilePath);
   const timeStr = new Date(record.timestamp).toLocaleString('en-US', { timeZone: 'Africa/Lagos' });
   const senderDisplay = record.sender_name || 'Contact';
   const chatDisplay = record.chat_name || (record.is_group ? 'Group Chat' : 'Direct Message');

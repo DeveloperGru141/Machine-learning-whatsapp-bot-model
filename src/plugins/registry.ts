@@ -1,5 +1,4 @@
 import { IPlugin, BotTool, ExecutionContext, ToolResult } from './types.js';
-import { db } from '../memory/db.js';
 
 export class PluginRegistry {
   private plugins: Map<string, IPlugin> = new Map();
@@ -167,32 +166,9 @@ export class PluginRegistry {
    * Passing 25+ tool definitions to LLMs causes 30s+ grammar evaluation latency.
    * Passing 0-5 tools reduces inference time to 400ms-900ms while ensuring tools are never missed.
    */
-  public async getRelevantToolDefinitions(userMessage: string, isGroup?: boolean, chatJid?: string): Promise<any[]> {
+  public async getRelevantToolDefinitions(userMessage: string, isGroup?: boolean, _chatJid?: string): Promise<any[]> {
     const text = (userMessage || '').toLowerCase();
     const selected = new Set<string>();
-
-    let recentChatContext = '';
-    if (chatJid) {
-      try {
-        const recentRows = await db.prepare(`
-          SELECT message_text FROM chat_logs
-          WHERE chat_jid = ?
-          ORDER BY id DESC LIMIT 5
-        `).all(chatJid) as Array<{ message_text: string | null }>;
-        recentChatContext = recentRows.map((r) => r.message_text || '').join(' ').toLowerCase();
-      } catch {}
-    }
-
-    const isContinuation =
-      /^(do that|do it|do so|send it|send am|send the message|send the message to him|send to him|ping him|message him|proceed|yes|yes please|confirm|make you send am|send now|go ahead)$/i.test(
-        text.trim()
-      ) ||
-      (text.split(/\s+/).length <= 4 &&
-        (text.includes('send') ||
-          text.includes('message') ||
-          text.includes('ping') ||
-          text.includes('text') ||
-          text.includes('do')));
 
     // 1. Diagnostics, Status, Executive Briefing & Bot Health
     if (
@@ -281,55 +257,31 @@ export class PluginRegistry {
       selected.add('get_live_football_scores');
     }
 
+    const asksGroupMotivation = /\b(?:broadcast|send|share|post)\b/.test(text) &&
+      /\b(?:groups|group|everyone)\b/.test(text) &&
+      /\b(?:motivation|motivational|quote|verse|morning|evening|night|roundup|round-up)\b/.test(text);
+    const asksAllGroups = /\b(?:groups|everyone|all groups|every group|across all groups)\b/.test(text);
+    const asksToMessageGroup = /\b(?:send|tell|post|relay|forward|share)\b/.test(text) &&
+      /\b(?:group|groups|space)\b/.test(text) && !(asksGroupMotivation && asksAllGroups);
+
     // 4. Contact Management, Direct Messaging & Unreplied Catch-Up
-    const hasPhoneNumber = /\+?\d[\d\s-]{7,}\d/.test(text);
-    const recentHasPhone = /\+?\d[\d\s-]{7,}\d/.test(recentChatContext);
-    if (
-      hasPhoneNumber ||
-      isContinuation ||
-      (recentHasPhone && (text.includes('him') || text.includes('her') || text.includes('them') || text.includes('that') || text.includes('number'))) ||
-      text.includes('message') ||
-      text.includes('msg') ||
-      text.includes('text') ||
-      text.includes('dm') ||
-      text.includes('tell') ||
-      text.includes('send') ||
-      text.includes('sent') ||
-      text.includes('deliver') ||
-      text.includes('ping') ||
-      text.includes('inform') ||
-      text.includes('notify') ||
-      text.includes('write') ||
-      text.includes('forward') ||
-      text.includes('relay') ||
-      text.includes('holla') ||
-      text.includes('reach out') ||
-      text.includes('reach') ||
-      text.includes('alert') ||
-      text.includes('talk to') ||
-      text.includes('chat with') ||
-      text.includes('drop a note') ||
-      text.includes('say hi') ||
-      text.includes('greet') ||
-      text.includes('contact') ||
-      text.includes('save') ||
-      text.includes('phone') ||
-      text.includes('number') ||
-      text.includes('micah') ||
-      text.includes('vcard') ||
-      text.includes('vcf') ||
-      text.includes('someone') ||
-      text.includes('friend')
-    ) {
-      selected.add('send_message_to_contact');
-      selected.add('save_contact');
-      selected.add('get_contact');
-      selected.add('list_contacts');
-      if (text.includes('card') || text.includes('share') || text.includes('vcf')) {
-        selected.add('send_contact_card');
-        selected.add('export_contacts_vcf');
-      }
-    }
+    const hasPhoneNumber = /\+?\d[\d\s-]{7,}\d/.test(userMessage);
+    const dispatchVerb = /\b(?:send|message|msg|text|dm|tell|deliver|ping|inform|notify|write|forward|relay|holla|reach|alert|greet)\b/.test(text);
+    const namedRecipientCue = /\b(?:to\s+(?:him|her|them|someone|my friend|my boss|[\p{L}][\p{L}'-]{1,})|him|her|them|someone|my friend|my boss)\b/iu.test(userMessage) ||
+      /\b(?:message|msg|text|dm|ping)\s+(?!me\b|us\b|what\b|why\b|how\b)([\p{L}][\p{L}'-]{1,})/iu.test(userMessage);
+    const asksToSendContact = !asksToMessageGroup && !(asksGroupMotivation && asksAllGroups) && (
+      dispatchVerb && (hasPhoneNumber || namedRecipientCue)
+    ) && !/\b(?:contact card|vcard|vcf|export contacts)\b/.test(text);
+    const asksToSaveContact = /\b(?:save|add|store|create)\b/.test(text) && /\b(?:contact|number|phone)\b/.test(text);
+    const asksToLookupContact = !asksToSendContact && /\b(?:find|search|lookup|look up|show|get|check|who is|what is)\b/.test(text) &&
+      /\b(?:contact|address book|phone number|contact details|contact info)\b/.test(text);
+    const asksToListContacts = /\b(?:list|show|export)\b/.test(text) && /\b(?:contacts|address book|vcf)\b/.test(text);
+    if (asksToSendContact) selected.add('send_message_to_contact');
+    if (asksToSaveContact) selected.add('save_contact');
+    if (asksToLookupContact) selected.add('get_contact');
+    if (asksToListContacts) selected.add('list_contacts');
+    if (/\b(?:send|share|create)\b/.test(text) && /\b(?:contact card|vcard)\b/.test(text)) selected.add('send_contact_card');
+    if (/\bexport\b/.test(text) && /\b(?:contacts|address book|vcf)\b/.test(text)) selected.add('export_contacts_vcf');
 
     // 5. Unreplied DMs Catch-Up
     if (
@@ -358,10 +310,7 @@ export class PluginRegistry {
     if (text.includes('cancel') && /\b(?:scheduled|broadcast|reminder)\b/.test(text)) {
       selected.add('cancel_scheduled_broadcast');
     }
-    const asksGroupBroadcast = /\b(?:broadcast|send|share|post)\b/.test(text) &&
-      /\b(?:groups|group|everyone)\b/.test(text) &&
-      /\b(?:motivation|motivational|quote|verse|morning|evening|night|roundup|round-up)\b/.test(text);
-    if (asksGroupBroadcast) {
+    if (asksGroupMotivation && asksAllGroups) {
       if (/\b(?:evening|night|roundup|round-up)\b/.test(text)) selected.add('broadcast_group_evening_roundup');
       else selected.add('broadcast_group_motivation');
     }
@@ -569,7 +518,6 @@ export class PluginRegistry {
     }
 
     // 11. Group Messaging, Group Search, and Group Joining via Invite Link
-    const asksToMessageGroup = /\b(?:send|tell|post|relay|forward|share)\b/.test(text) && /\b(?:group|groups|space)\b/.test(text);
     if (asksToMessageGroup) {
       selected.add('send_message_to_group');
     }

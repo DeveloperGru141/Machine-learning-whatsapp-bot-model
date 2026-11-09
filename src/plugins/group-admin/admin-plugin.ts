@@ -29,46 +29,60 @@ export class GroupAdminPlugin implements IPlugin {
   public async resolveTargetGroup(sock: any, rawGroup?: string): Promise<{ jid: string; subject: string } | null> {
     const search = (rawGroup || '').trim();
     if (!search) return null;
-
-    if (search.endsWith('@g.us')) {
-      const known = await findKnownGroup(search);
-      return { jid: search, subject: known?.subject || search };
-    }
-
     const cached = await findKnownGroup(search);
-    if (cached) {
-      return { jid: cached.group_jid, subject: cached.subject };
-    }
-
     if (sock?.groupFetchAllParticipating) {
       try {
         const participating = await sock.groupFetchAllParticipating();
         const lowerSearch = search.toLowerCase();
-
-        // 1. Exact or substring match
-        for (const [jid, meta] of Object.entries(participating) as [string, any][]) {
-          const sub = (meta.subject || '').toLowerCase();
-          if (sub === lowerSearch || sub.includes(lowerSearch) || lowerSearch.includes(sub)) {
-            await upsertKnownGroup(jid, meta.subject || search, meta.participants?.length || 0);
-            return { jid, subject: meta.subject || search };
-          }
+        const entries = Object.entries(participating) as [string, any][];
+        if (search.endsWith('@g.us')) {
+          const liveEntry = entries.find(([jid]) => jid === search);
+          if (!liveEntry) return null;
+          const [jid, meta] = liveEntry;
+          await upsertKnownGroup(jid, meta.subject || cached?.subject || jid, meta.participants?.length || 0);
+          return { jid, subject: meta.subject || cached?.subject || jid };
+        }
+        if (cached) {
+          const liveCachedEntry = entries.find(([jid]) => jid === cached.group_jid);
+          if (!liveCachedEntry) return null;
+          const [jid, meta] = liveCachedEntry;
+          await upsertKnownGroup(jid, meta.subject || cached.subject, meta.participants?.length || 0);
+          return { jid, subject: meta.subject || cached.subject };
         }
 
-        // 2. Word overlap match (e.g. "empire" matching "Empire discussion group 💯💸")
+        const exact = entries.filter(([, meta]) => (meta.subject || '').trim().toLowerCase() === lowerSearch);
+        let matches = exact;
+        if (matches.length === 0) {
+          matches = entries.filter(([, meta]) => {
+            const subject = (meta.subject || '').trim().toLowerCase();
+            return subject && (subject.includes(lowerSearch) || lowerSearch.includes(subject));
+          });
+        }
+
+        // Word overlap (for example "empire" in "Empire discussion group") is
+        // useful only when it identifies one group; never choose the first match.
         const searchWords = lowerSearch.split(/\s+/).filter(w => w.length > 2);
-        for (const [jid, meta] of Object.entries(participating) as [string, any][]) {
-          const sub = (meta.subject || '').toLowerCase();
-          if (searchWords.some(w => sub.includes(w))) {
-            await upsertKnownGroup(jid, meta.subject || search, meta.participants?.length || 0);
-            return { jid, subject: meta.subject || search };
-          }
+        if (matches.length === 0 && searchWords.length > 0) {
+          matches = entries.filter(([, meta]) => {
+            const subject = (meta.subject || '').toLowerCase();
+            return searchWords.some(word => subject.includes(word));
+          });
         }
+
+        if (matches.length !== 1) return null;
+        const [jid, meta] = matches[0];
+        await upsertKnownGroup(jid, meta.subject || search, meta.participants?.length || 0);
+        return { jid, subject: meta.subject || search };
       } catch (err: any) {
         console.warn('[GroupAdmin] Error fetching participating groups:', err?.message || err);
+        return null;
       }
+      return null;
     }
-
-    return null;
+    if (search.endsWith('@g.us')) {
+      return cached ? { jid: search, subject: cached.subject } : null;
+    }
+    return cached ? { jid: cached.group_jid, subject: cached.subject } : null;
   }
 
   public async isBotAdmin(sock: any, groupJid: string): Promise<boolean> {
@@ -1437,39 +1451,15 @@ export class GroupAdminPlugin implements IPlugin {
             return { success: false, message: 'Both group name and message content are required.' };
           }
 
-          let targetGroupJid = '';
-          let targetGroupSubject = rawGroup;
-
-          const cached = await findKnownGroup(rawGroup);
-          if (cached) {
-            targetGroupJid = cached.group_jid;
-            targetGroupSubject = cached.subject;
-          }
-
-          if (!targetGroupJid && ctx.sock?.groupFetchAllParticipating) {
-            try {
-              const participating = await ctx.sock.groupFetchAllParticipating();
-              const lowerSearch = rawGroup.toLowerCase();
-              for (const [jid, meta] of Object.entries(participating) as [string, any][]) {
-                const sub = (meta.subject || '').toLowerCase();
-                if (sub.includes(lowerSearch) || lowerSearch.includes(sub)) {
-                  targetGroupJid = jid;
-                  targetGroupSubject = meta.subject || rawGroup;
-                  await upsertKnownGroup(jid, targetGroupSubject, meta.participants?.length || 0);
-                  break;
-                }
-              }
-            } catch (fetchErr) {
-              console.warn('[GroupAdmin] Error fetching participating groups during send:', fetchErr);
-            }
-          }
-
-          if (!targetGroupJid) {
+          const resolvedGroup = await this.resolveTargetGroup(ctx.sock, rawGroup);
+          if (!resolvedGroup) {
             return {
               success: false,
-              message: `Could not find a group matching "${rawGroup}" among the groups I am in. You can ask me "which groups are you in?" to see my list of groups.`,
+              message: `Could not uniquely identify "${rawGroup}" as one of my groups. Please use the exact group name or its WhatsApp group link/JID.`,
             };
           }
+          const targetGroupJid = resolvedGroup.jid;
+          const targetGroupSubject = resolvedGroup.subject;
 
           if (!(await this.isUserAdmin(ctx.sock, targetGroupJid, ctx.senderJid))) {
             return {
@@ -1504,10 +1494,13 @@ export class GroupAdminPlugin implements IPlugin {
             } catch {}
           }
 
-          await ctx.sock.sendMessage(targetGroupJid, {
+          const sendResult = await ctx.sock.sendMessage(targetGroupJid, {
             text: formattedText,
             mentions: mentions.length > 0 ? mentions : undefined,
           });
+          if (!sendResult?.key?.id) {
+            return { success: false, message: `WhatsApp did not confirm dispatch to "${targetGroupSubject}".` };
+          }
 
           await chatLogger.logMessage({
             chatJid: targetGroupJid,

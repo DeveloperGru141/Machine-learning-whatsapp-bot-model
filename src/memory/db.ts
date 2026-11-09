@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 import { createClient, type Client, type InArgs, type InValue, type Transaction } from '@libsql/client';
 import { config } from '../config/env.js';
 import fs from 'fs';
@@ -254,6 +255,20 @@ export async function initDatabase() {
       reserved_at INTEGER NOT NULL
     );
 
+    -- At-most-once content ledger for status posts and per-group motivational quotes.
+    -- The unique target/hash key also closes races between overlapping scheduler paths.
+    CREATE TABLE IF NOT EXISTS outbound_content_history (
+      target_chat TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      content_kind TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'reserved',
+      reserved_at INTEGER NOT NULL,
+      sent_at INTEGER,
+      PRIMARY KEY (target_chat, content_hash)
+    );
+    CREATE INDEX IF NOT EXISTS idx_outbound_content_history_sent
+      ON outbound_content_history(target_chat, sent_at);
+
     -- Contacts Book: Automatic and manual contact saving, address book indexing, and vCard export
     CREATE TABLE IF NOT EXISTS contacts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -499,6 +514,7 @@ export async function initDatabase() {
     `);
   } catch {}
 
+  await backfillOutboundContentHistory();
   await seedContactsFromVcfIfEmpty();
   await cleanTrainingTablesAndSeedUnreplied();
 }
@@ -610,6 +626,111 @@ export async function getRecentAutonomousActions(limit = 10): Promise<Array<{ id
   }
 }
 
+function hashOutboundContent(content: string): string {
+  let normalized = String(content || '').normalize('NFKC').toLowerCase().replace(/^\[status:\s*[^\]]+\]\s*/i, '').replace(/\s+/g, ' ').trim();
+  const quoteMatch = normalized.match(/(?:words of the day|morning motivation)[\s\S]*?>\s*["“]([\s\S]*?)["”]/i);
+  if (quoteMatch?.[1]) normalized = quoteMatch[1].replace(/\s+/g, ' ').trim();
+  normalized = normalized
+    .replace(/😂 \*meme of the moment[^]*?\*\(from whatsapp channel: memes\)\s*/i, '')
+    .replace(/\s+— \*forgelabs assistant\* 🫡\s*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return createHash('sha256').update(normalized).digest('hex');
+}
+
+function extractMotivationQuote(content: string): string | undefined {
+  if (!/(?:words of the day|morning motivation)/i.test(content)) return undefined;
+  return content.match(/(?:words of the day|morning motivation)[\s\S]*?>\s*["“]([\s\S]*?)["”]/i)?.[1]?.trim();
+}
+
+async function backfillOutboundContentHistory(): Promise<void> {
+  const marker = await db.prepare('SELECT value FROM bot_settings WHERE key = ? LIMIT 1')
+    .get('outbound_content_history_backfill_v1') as { value: string } | undefined;
+  if (marker?.value === 'complete') return;
+
+  let complete = true;
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO outbound_content_history
+      (target_chat, content_hash, content_kind, status, reserved_at, sent_at)
+    VALUES (?, ?, ?, 'sent', ?, ?)
+  `);
+
+  try {
+    const statusRows = await db.prepare(`
+      SELECT message_text, timestamp FROM chat_logs
+      WHERE chat_jid = 'status@broadcast' AND sender_jid = 'bot'
+        AND message_text IS NOT NULL AND message_text != ''
+    `).all() as Array<{ message_text: string; timestamp: number }>;
+    for (const row of statusRows) {
+      const content = row.message_text.replace(/^\[Status:\s*[^\]]+\]\s*/i, '').trim();
+      if (!content) continue;
+      const timestamp = Number(row.timestamp) || Date.now();
+      await insert.run('status@broadcast', hashOutboundContent(content), 'legacy_status', timestamp, timestamp);
+    }
+  } catch (err: any) {
+    complete = false;
+    console.warn('[DB] Could not backfill historic status content:', err?.message || err);
+  }
+
+  try {
+    const groupRows = await db.prepare(`
+      SELECT chat_jid, message_text, timestamp FROM chat_logs
+      WHERE is_group = 1 AND sender_jid = 'bot'
+        AND message_text LIKE '%Words of the Day%'
+    `).all() as Array<{ chat_jid: string; message_text: string; timestamp: number }>;
+    for (const row of groupRows) {
+      const quote = extractMotivationQuote(row.message_text);
+      if (!quote) continue;
+      const timestamp = Number(row.timestamp) || Date.now();
+      await insert.run(row.chat_jid, hashOutboundContent(quote), 'legacy_group_motivation', timestamp, timestamp);
+    }
+  } catch (err: any) {
+    complete = false;
+    console.warn('[DB] Could not backfill historic group motivation content:', err?.message || err);
+  }
+
+  if (complete) {
+    await db.prepare(`
+      INSERT INTO bot_settings (key, value, updated_at) VALUES (?, 'complete', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run('outbound_content_history_backfill_v1', Date.now());
+  }
+}
+
+/**
+ * Reserves content before sending so duplicate scheduled/tool paths cannot post
+ * the same payload to the same destination concurrently or on a later run.
+ * Reservations intentionally remain if a send outcome is ambiguous: retrying
+ * an accepted WhatsApp send would be more harmful than skipping that payload.
+ */
+export async function reserveOutboundContent(targetChat: string, content: string, contentKind: string): Promise<boolean> {
+  if (!targetChat?.trim() || !content?.trim()) return false;
+  try {
+    const result = await db.prepare(`
+      INSERT OR IGNORE INTO outbound_content_history
+        (target_chat, content_hash, content_kind, status, reserved_at)
+      VALUES (?, ?, ?, 'reserved', ?)
+    `).run(targetChat.trim(), hashOutboundContent(content), contentKind, Date.now());
+    return result.changes === 1;
+  } catch (err: any) {
+    console.error('[DB] Could not reserve outbound content:', err?.message || err);
+    return false;
+  }
+}
+
+export async function markOutboundContentSent(targetChat: string, content: string): Promise<void> {
+  if (!targetChat?.trim() || !content?.trim()) return;
+  try {
+    await db.prepare(`
+      UPDATE outbound_content_history
+      SET status = 'sent', sent_at = ?
+      WHERE target_chat = ? AND content_hash = ?
+    `).run(Date.now(), targetChat.trim(), hashOutboundContent(content));
+  } catch (err: any) {
+    console.error('[DB] Could not mark outbound content sent:', err?.message || err);
+  }
+}
+
 export interface KnownGroup {
   group_jid: string;
   subject: string;
@@ -618,7 +739,7 @@ export interface KnownGroup {
   updated_at: number;
 }
 
-export async function upsertKnownGroup(groupJid: string, subject: string, memberCount: number = 0, isAdmin: boolean = false): Promise<void> {
+export async function upsertKnownGroup(groupJid: string, subject: string, memberCount: number = 0, isAdmin?: boolean): Promise<void> {
   try {
     const cleanSubject = (subject || '').trim();
     if (!groupJid || !cleanSubject) return;
@@ -629,9 +750,9 @@ export async function upsertKnownGroup(groupJid: string, subject: string, member
       ON CONFLICT(group_jid) DO UPDATE SET
         subject = excluded.subject,
         member_count = CASE WHEN excluded.member_count > 0 THEN excluded.member_count ELSE known_groups.member_count END,
-        is_admin = CASE WHEN excluded.is_admin > 0 THEN excluded.is_admin ELSE known_groups.is_admin END,
+        is_admin = CASE WHEN ? IS NULL THEN known_groups.is_admin ELSE excluded.is_admin END,
         updated_at = excluded.updated_at
-    `).run(groupJid, cleanSubject, memberCount, isAdmin ? 1 : 0, Date.now());
+    `).run(groupJid, cleanSubject, memberCount, isAdmin ? 1 : 0, Date.now(), isAdmin == null ? null : 1);
   } catch (err: any) {
     console.error('[DB] Error upserting known group:', err?.message || err);
   }
@@ -660,14 +781,21 @@ export async function findKnownGroup(nameOrJid: string): Promise<KnownGroup | nu
       if (byJid) return byJid;
     }
 
-    const bySub = await db.prepare(`
-      SELECT * FROM known_groups
-      WHERE LOWER(subject) = LOWER(?) OR LOWER(subject) LIKE LOWER(?)
-      ORDER BY CASE WHEN LOWER(subject) = LOWER(?) THEN 0 ELSE 1 END, updated_at DESC
-      LIMIT 1
-    `).get(raw, `%${raw}%`, raw) as unknown as KnownGroup;
+    const exactMatches = await db.prepare(`
+      SELECT * FROM known_groups WHERE LOWER(TRIM(subject)) = LOWER(TRIM(?)) LIMIT 2
+    `).all(raw) as unknown as KnownGroup[];
+    if (exactMatches.length === 1) return exactMatches[0];
+    if (exactMatches.length > 1) return null;
 
-    return bySub || null;
+    // Only resolve a fuzzy name when it identifies exactly one group. Choosing the
+    // newest substring match can otherwise send private or group content elsewhere.
+    const partialMatches = await db.prepare(`
+      SELECT * FROM known_groups
+      WHERE instr(LOWER(subject), LOWER(?)) > 0 OR instr(LOWER(?), LOWER(subject)) > 0
+      ORDER BY updated_at DESC
+      LIMIT 2
+    `).all(raw, raw) as unknown as KnownGroup[];
+    return partialMatches.length === 1 ? partialMatches[0] : null;
   } catch {
     return null;
   }

@@ -55,10 +55,17 @@ export class StickerPlugin implements IPlugin {
           }
 
           const mentions = ctx.isGroup && ctx.senderJid ? [ctx.senderJid] : undefined;
+          let sendResult: any;
           if (ctx.sendSticker) {
-            await ctx.sendSticker(match.absolutePath, mentions);
+            sendResult = await ctx.sendSticker(match.absolutePath, mentions);
           } else if (ctx.sock) {
-            await OutboundSender.sendSticker(ctx.sock, ctx.chatJid, match.absolutePath, ctx.rawMessage, mentions);
+            sendResult = await OutboundSender.sendSticker(ctx.sock, ctx.chatJid, match.absolutePath, ctx.rawMessage, mentions);
+          } else {
+            return { success: false, message: 'Could not send the sticker because the WhatsApp connection is unavailable.' };
+          }
+
+          if (!sendResult?.key?.id) {
+            return { success: false, message: 'WhatsApp did not confirm the sticker send; it was not recorded as sent.' };
           }
 
           await chatLogger.logOutboundSticker(ctx.chatJid, match.filename, match.vibe);

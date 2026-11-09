@@ -10,7 +10,7 @@ import {
   db,
 } from '../../memory/db.js';
 import { chatLogger } from '../../memory/chat-logger.js';
-import { getStatusRecipientJids, safeSendStatus } from './scheduler-plugin.js';
+import { getStatusRecipientJids, sendStatusOnce } from './scheduler-plugin.js';
 import { getStartOfTodayWat } from './scheduler-db.js';
 import { getOrGenerateMemeMedia } from './media-card-generator.js';
 import {
@@ -380,22 +380,19 @@ export async function postChannelMemeWithCooldown(
         return { success: false, message: 'Status meme limit or spacing became active before sending.', cooldown, statusPolicy: await getStatusMemePostingStatus() };
       }
       const statusJidList = await getStatusRecipientJids(socket);
-      if (hasImage) {
-        await safeSendStatus(
-          socket,
-          { image: fs.readFileSync(imagePath), caption: outboundText },
-          {},
-          statusJidList
-        );
-      } else {
-        await safeSendStatus(
-          socket,
-          { text: outboundText },
-          { backgroundColor: '#2b2d42', font: 3 },
-          statusJidList
-        );
+      const sent = await sendStatusOnce(
+        socket,
+        hasImage ? { image: fs.readFileSync(imagePath), caption: outboundText } : { text: outboundText },
+        hasImage ? {} : { backgroundColor: '#2b2d42', font: 3 },
+        statusJidList,
+        outboundText,
+        `[Status: Meme] ${outboundText}`
+      );
+      if (!sent) {
+        await releaseStatusMemePost(statusReservation);
+        statusReservation = null;
+        return { success: false, message: 'This meme was already posted or WhatsApp did not confirm the status send.', cooldown, statusPolicy: await getStatusMemePostingStatus() };
       }
-      await chatLogger.logOutboundMessage('status@broadcast', outboundText);
       await releaseStatusMemePost(statusReservation);
       statusReservation = null;
       console.log(`[ChannelMemes] 📸 Posted meme #${meme.id} (${hasImage ? 'IMAGE' : 'TEXT'}) to WhatsApp Status (broadcast to ${statusJidList.length} contacts).`);

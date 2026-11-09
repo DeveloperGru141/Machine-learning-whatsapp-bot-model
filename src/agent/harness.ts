@@ -390,28 +390,35 @@ The requested live web lookup did not produce verifiable results. The user permi
           }
 
           const dedupKey = `${toolName}:${stableSerialize(toolArgs)}`;
-          if (executedToolKeys.has(dedupKey)) continue;
+          if (executedToolKeys.has(dedupKey)) {
+            console.warn(`[AgentHarness] Suppressed a duplicate tool call: ${toolName}`);
+            toolOutputs.push(`[${toolName} result]: This exact tool call already ran for this message. No second action was taken; use its earlier result above.`);
+            continue;
+          }
           executedToolKeys.add(dedupKey);
           executedToolCount++;
 
           console.log(`[Agent] Calling tool: ${toolName}`);
           await analyticsEngine.trackEvent('tool_call', toolName, context.chatJid, context.senderJid);
-          let toolResult;
+          let toolResult: any;
           try {
             toolResult = await pluginRegistry.executeTool(toolName, toolArgs, context);
-            if (toolName === 'web_search') {
-              currentEvidenceAvailable = toolResult.success && hasFreshLiveEvidence(toolResult.evidence);
-            }
-            await logAutonomousAction(
-              'tool_execution',
-              context.chatJid,
-              context.senderName,
-              `${toolName}: ${toolResult.success === false ? 'failed' : 'completed'}`
-            );
           } catch (toolError) {
-            await logAutonomousAction('tool_execution', context.chatJid, context.senderName, `${toolName}: failed`);
-            throw toolError;
+            const failureMessage = toolError instanceof Error ? toolError.message : String(toolError || 'Unknown error');
+            toolResult = { success: false, message: `Tool execution failed: ${failureMessage.slice(0, 800)}` };
           }
+          if (!toolResult || typeof toolResult !== 'object' || typeof toolResult.success !== 'boolean') {
+            toolResult = { success: false, message: 'Tool returned no valid success state; its result could not be verified.' };
+          }
+          if (toolName === 'web_search') {
+            currentEvidenceAvailable = toolResult.success && hasFreshLiveEvidence(toolResult.evidence);
+          }
+          await logAutonomousAction(
+            'tool_execution',
+            context.chatJid,
+            context.senderName,
+            `${toolName}: ${toolResult.success ? 'completed' : 'failed'}`
+          );
 
           let outputEntry = `[${toolName} result]: ${toolResult.message || JSON.stringify(toolResult)}`;
           if (

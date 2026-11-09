@@ -1,10 +1,37 @@
 import sharp from 'sharp';
+import { createHash } from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
 import { db } from '../../memory/db.js';
 import { config } from '../../config/env.js';
 
 const CHANNEL_MEDIA_DIR = path.join(path.dirname(config.paths.database), 'channel_media');
+const LEGACY_CHANNEL_MEDIA_DIR = path.resolve('./assets/channel_media');
+
+export function getSafeChannelMediaPath(candidate: string | null | undefined): string | null {
+  if (!candidate) return null;
+  const resolved = path.resolve(candidate);
+  const allowedDirs = [CHANNEL_MEDIA_DIR, LEGACY_CHANNEL_MEDIA_DIR];
+  const isInsideAllowedDir = allowedDirs.some((directory) => {
+    const relative = path.relative(directory, resolved);
+    return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  });
+  if (!isInsideAllowedDir) return null;
+
+  try {
+    const stat = fs.lstatSync(resolved);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > 60 * 1024 * 1024) return null;
+    return resolved;
+  } catch {
+    return null;
+  }
+}
+
+function safeMediaId(rawId: number | string): string {
+  const value = String(rawId);
+  if (/^\d{1,18}$/.test(value)) return value;
+  return createHash('sha256').update(value).digest('hex').slice(0, 32);
+}
 
 export function escapeXml(str: string): string {
   if (!str) return '';
@@ -276,17 +303,18 @@ export async function getOrGenerateMemeMedia(
   caption: string,
   existingPath?: string | null
 ): Promise<string> {
-  if (existingPath && fs.existsSync(existingPath)) {
-    const isLegacyBroken = existingPath.includes('meme_default.jpg');
+  const safeExistingPath = getSafeChannelMediaPath(existingPath);
+  if (safeExistingPath) {
+    const isLegacyBroken = safeExistingPath.includes('meme_default.jpg');
     if (!isLegacyBroken) {
       try {
-        const stats = fs.statSync(existingPath);
-        if (stats.size > 2000) return existingPath;
+        const stats = fs.statSync(safeExistingPath);
+        if (stats.size > 2000) return safeExistingPath;
       } catch {}
     }
   }
 
-  const filename = `meme_${memeId}.jpg`;
+  const filename = `meme_${safeMediaId(memeId)}.jpg`;
   fs.mkdirSync(CHANNEL_MEDIA_DIR, { recursive: true });
   const targetPath = path.join(CHANNEL_MEDIA_DIR, filename);
   await renderMemeCard(caption, targetPath);
@@ -311,17 +339,18 @@ export async function getOrGenerateQuoteMedia(
   niche: string,
   existingPath?: string | null
 ): Promise<string> {
-  if (existingPath && fs.existsSync(existingPath)) {
-    const isLegacyBroken = /quote_(tech_coding|wealth_business|academic_discipline|general_growth)\.jpg$/.test(existingPath);
+  const safeExistingPath = getSafeChannelMediaPath(existingPath);
+  if (safeExistingPath) {
+    const isLegacyBroken = /quote_(tech_coding|wealth_business|academic_discipline|general_growth)\.jpg$/.test(safeExistingPath);
     if (!isLegacyBroken) {
       try {
-        const stats = fs.statSync(existingPath);
-        if (stats.size > 2000) return existingPath;
+        const stats = fs.statSync(safeExistingPath);
+        if (stats.size > 2000) return safeExistingPath;
       } catch {}
     }
   }
 
-  const filename = `quote_${quoteId}.jpg`;
+  const filename = `quote_${safeMediaId(quoteId)}.jpg`;
   fs.mkdirSync(CHANNEL_MEDIA_DIR, { recursive: true });
   const targetPath = path.join(CHANNEL_MEDIA_DIR, filename);
   await renderQuoteCard(quote, author, niche, targetPath);

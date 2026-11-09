@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     ca-certificates \
     curl \
-    && pip3 install --no-cache-dir --break-system-packages edge-tts yt-dlp \
+    && pip3 install --no-cache-dir --break-system-packages edge-tts==7.3.1 yt-dlp==2026.10.26 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -19,6 +19,7 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
+COPY assets ./assets
 COPY data/train.jsonl ./data/train.jsonl
 COPY data/finetune_dataset.jsonl ./data/finetune_dataset.jsonl
 COPY data/contacts.vcf ./data/contacts.vcf

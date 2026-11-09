@@ -3,13 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
 import {
-  downloadMediaMessage,
   extractMessageContent,
   getContentType,
   proto,
   type WAMessage,
 } from '@whiskeysockets/baileys';
 import { config } from '../../config/env.js';
+import { downloadMediaMessageBounded } from '../../security/media-limits.js';
 
 const MAX_NEWSLETTER_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_NEWSLETTER_IMAGE_PIXELS = 40_000_000;
@@ -93,7 +93,7 @@ export async function downloadNewsletterImage(message: WAMessage): Promise<Buffe
   if (declaredSize > MAX_NEWSLETTER_IMAGE_BYTES) return null;
 
   try {
-    const buffer = await downloadMediaMessage(message, 'buffer', {});
+    const buffer = await downloadMediaMessageBounded(message, MAX_NEWSLETTER_IMAGE_BYTES);
     if (!Buffer.isBuffer(buffer) || buffer.length < 300 || buffer.length > MAX_NEWSLETTER_IMAGE_BYTES) return null;
     return buffer;
   } catch (error: any) {

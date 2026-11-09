@@ -16,6 +16,22 @@ try {
 
 const execFileAsync = promisify(execFile);
 
+function getSafeTempVideoFile(candidate: string, tempDir: string, filePrefix: string): string | null {
+  const resolvedPath = path.resolve(candidate);
+  const relativePath = path.relative(path.resolve(tempDir), resolvedPath);
+  if (relativePath === '' || relativePath === '..' || relativePath.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relativePath) || !path.basename(resolvedPath).startsWith(filePrefix)) {
+    return null;
+  }
+  try {
+    const stat = fs.lstatSync(resolvedPath);
+    if (!stat.isFile() || stat.size <= 2048 || stat.size > 60 * 1024 * 1024) return null;
+    return resolvedPath;
+  } catch {
+    return null;
+  }
+}
+
 // Pure Node.js downloader engine (works seamlessly on Render/Docker/Linux/Windows)
 let alldlInstance: any = null;
 try {
@@ -99,6 +115,17 @@ export class VideoDownloaderPlugin implements IPlugin {
 
         const fileId = crypto.randomBytes(6).toString('hex');
         const targetFilePath = path.join(tempDir, `vid_${fileId}.mp4`);
+        const cleanupTempVideoFiles = (): void => {
+          try {
+            for (const name of fs.readdirSync(tempDir)) {
+              if (!name.startsWith(`vid_${fileId}`)) continue;
+              const fullPath = path.join(tempDir, name);
+              try {
+                if (fs.lstatSync(fullPath).isFile()) fs.unlinkSync(fullPath);
+              } catch {}
+            }
+          } catch {}
+        };
 
         let downloadedPath: string | null = null;
         let videoTitle: string | undefined = undefined;
@@ -165,21 +192,14 @@ export class VideoDownloaderPlugin implements IPlugin {
             console.log('[VideoDownloader] Strategy 2: Attempting alldl.download...');
             const dlResult = await alldlInstance.download(sanitizedUrl, targetFilePath, { quality: 'medium' });
             if (dlResult && dlResult.path) {
-              const resolvedPath = path.resolve(dlResult.path);
-              const relativePath = path.relative(path.resolve(tempDir), resolvedPath);
-              const isExpectedTempFile = relativePath !== '' && relativePath !== '..' &&
-                !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath) &&
-                path.basename(resolvedPath).startsWith(`vid_${fileId}`);
-              if (isExpectedTempFile && fs.existsSync(resolvedPath)) {
-                const stat = fs.statSync(resolvedPath);
-                if (stat.size > 2048 && stat.size <= 60 * 1024 * 1024) {
-                  downloadedPath = resolvedPath;
-                  videoTitle = dlResult.title;
-                  console.log(`[VideoDownloader] Strategy 2 succeeded: ${downloadedPath} (${stat.size} bytes)`);
-                }
+              const safePath = getSafeTempVideoFile(dlResult.path, tempDir, `vid_${fileId}`);
+              if (safePath) {
+                downloadedPath = safePath;
+                videoTitle = dlResult.title;
+                console.log(`[VideoDownloader] Strategy 2 succeeded: ${downloadedPath} (${fs.statSync(safePath).size} bytes)`);
               }
-            } else if (fs.existsSync(targetFilePath) && fs.statSync(targetFilePath).size > 2048) {
-              downloadedPath = targetFilePath;
+            } else {
+              downloadedPath = getSafeTempVideoFile(targetFilePath, tempDir, `vid_${fileId}`);
             }
           } catch (err: any) {
             checkPrivateError(err?.message || '');
@@ -270,8 +290,8 @@ export class VideoDownloaderPlugin implements IPlugin {
               await execFileAsync('yt-dlp', downloaderArgs, { timeout: 25_000, windowsHide: true });
               const files = fs.readdirSync(tempDir).filter((f) => f.startsWith(`vid_${fileId}`));
               if (files.length > 0) {
-                const p = path.join(tempDir, files[0]);
-                if (fs.statSync(p).size > 2048) {
+                const p = getSafeTempVideoFile(path.join(tempDir, files[0]), tempDir, `vid_${fileId}`);
+                if (p) {
                   downloadedPath = p;
                   console.log(`[VideoDownloader] Strategy 5 (yt-dlp) succeeded: ${p}`);
                 }
@@ -286,7 +306,11 @@ export class VideoDownloaderPlugin implements IPlugin {
         }
 
         // Verify result
-        if (!downloadedPath || !fs.existsSync(downloadedPath)) {
+        downloadedPath = downloadedPath
+          ? getSafeTempVideoFile(downloadedPath, tempDir, `vid_${fileId}`)
+          : null;
+        if (!downloadedPath) {
+          cleanupTempVideoFiles();
           if (isPrivateDetected) {
             return {
               success: false,
@@ -303,23 +327,20 @@ export class VideoDownloaderPlugin implements IPlugin {
         const stat = fs.statSync(downloadedPath);
         // WhatsApp max size check (60MB)
         if (stat.size > 60 * 1024 * 1024) {
-          try {
-            fs.unlinkSync(downloadedPath);
-          } catch {}
+          cleanupTempVideoFiles();
           return {
             success: false,
             message: `Omo the video heavy gan (pass 60MB)! WhatsApp no go allow me send file wey big pass 60MB. Try find shorter clip make we run am! 😅`,
           };
         }
 
-        const videoBuffer = fs.readFileSync(downloadedPath);
-        const finalCaption = args.caption || videoTitle || undefined;
-        await ctx.sendVideo(videoBuffer, finalCaption);
-
-        // Cleanup
         try {
-          fs.unlinkSync(downloadedPath);
-        } catch {}
+          const videoBuffer = fs.readFileSync(downloadedPath);
+          const finalCaption = args.caption || videoTitle || undefined;
+          await ctx.sendVideo(videoBuffer, finalCaption);
+        } finally {
+          cleanupTempVideoFiles();
+        }
 
         return {
           success: true,
