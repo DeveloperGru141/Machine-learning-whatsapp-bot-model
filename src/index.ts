@@ -325,7 +325,8 @@ function startHealthServer() {
     const pathname = requestUrl.pathname;
     const isPairingRoute = pathname === '/qr' || pathname === '/pair' || pathname === '/pair/qr.svg';
     if (isPairingRoute) {
-      const isRefresh = requestUrl.searchParams.has('refresh') || requestUrl.searchParams.has('new');
+      const isNewSession = requestUrl.searchParams.get('new') === '1';
+      const isRefresh = requestUrl.searchParams.has('refresh') || isNewSession;
       if (!httpSecurityManager.checkRateLimit(req, 200, 'global') ||
           !httpSecurityManager.checkRateLimit(req, 120, 'pairing') ||
           (isRefresh && !httpSecurityManager.checkRateLimit(req, 3, 'pair-refresh'))) {
@@ -377,7 +378,7 @@ function startHealthServer() {
           res.end(JSON.stringify({ error: 'Phone number must be 8 to 15 digits including country code.' }));
           return;
         }
-        const freshCode = await whatsAppClient.requestFreshPairingCode(false, phoneOverride);
+        const freshCode = await whatsAppClient.requestFreshPairingCode(isNewSession, phoneOverride);
         const freshQr = whatsAppClient.getLatestQr();
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(

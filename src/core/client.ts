@@ -156,7 +156,10 @@ export class WhatsAppClient {
   }
 
   private loggedOutRetryCount = 0;
-  private sessionBundleInvalidated = false;
+  private sessionBundleInvalidated = process.env.SESSION_BUNDLE_INVALIDATED?.trim().toLowerCase() === 'true';
+  private pendingSessionRepairFinalization = this.sessionBundleInvalidated;
+  private persistentRepairModeLoaded = this.sessionBundleInvalidated;
+  private sessionRepairFinalizeTimer: NodeJS.Timeout | null = null;
   private authenticatedSocketOpen = false;
 
   /**
@@ -302,7 +305,7 @@ export class WhatsAppClient {
    * @param phoneOverride - optional phone number to pair with instead of config default
    */
   public async requestFreshPairingCode(forceReset: boolean = false, phoneOverride?: string): Promise<string | null> {
-    if (this.isRegistered()) {
+    if (this.isRegistered() && !forceReset) {
       return null;
     }
 
@@ -379,7 +382,9 @@ export class WhatsAppClient {
   private async generateFreshPairingCode(): Promise<string | null> {
     // Clean session wipe & fresh socket start
     console.log('[WhatsAppClient] 🔄 Generating clean pairing session and fresh pairing code...');
+    await this.setPersistentSessionRepairMode(true);
     this.sessionBundleInvalidated = true;
+    this.pendingSessionRepairFinalization = true;
     this.authenticatedSocketOpen = false;
     try {
       if (this.sock) {
@@ -412,6 +417,51 @@ export class WhatsAppClient {
     }
 
     return this.latestPairingCode;
+  }
+
+  private async setPersistentSessionRepairMode(enabled: boolean): Promise<void> {
+    const value = String(enabled);
+    const apiKey = process.env.RENDER_API_KEY;
+    const serviceId = process.env.RENDER_SERVICE_ID?.trim();
+    if (!apiKey || !serviceId) {
+      throw new Error('Persistent pairing mode requires RENDER_API_KEY and RENDER_SERVICE_ID.');
+    }
+
+    const response = await fetch(
+      `https://api.render.com/v1/services/${serviceId}/env-vars/SESSION_BUNDLE_INVALIDATED`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ value }),
+        signal: AbortSignal.timeout(15_000),
+      }
+    );
+    if (!response.ok) {
+      const body = (await readLimitedResponse(response, 16 * 1024).catch(() => Buffer.alloc(0))).toString('utf8').slice(0, 200);
+      throw new Error(`Render pairing-mode update failed: ${response.status} ${body}`);
+    }
+    await setBotSetting('whatsapp_session_repair_mode', value);
+    this.persistentRepairModeLoaded = true;
+  }
+
+  private scheduleSessionRepairModeFinalizeRetry(): void {
+    if (this.sessionRepairFinalizeTimer) return;
+    this.sessionRepairFinalizeTimer = setTimeout(() => {
+      this.sessionRepairFinalizeTimer = null;
+      if (!this.pendingSessionRepairFinalization) return;
+      void this.setPersistentSessionRepairMode(false).then(() => {
+        this.pendingSessionRepairFinalization = false;
+        console.log('[WhatsAppClient] Cleared persistent pairing mode after the replacement session was backed up.');
+      }).catch((error: any) => {
+        console.error(`[WhatsAppClient] Could not clear persistent pairing mode yet: ${error?.message || error}`);
+        this.scheduleSessionRepairModeFinalizeRetry();
+      });
+    }, 30_000);
+    this.sessionRepairFinalizeTimer.unref?.();
   }
 
   private startKeepAlive(): void {
@@ -846,6 +896,18 @@ export class WhatsAppClient {
       if (saved) {
         this.lastBackupHash = hash;
         console.log(`[WhatsAppClient] 💾 Persisted authenticated session (${Object.keys(filesMap).length} files kept, ${dropped} pruned, ${bundle.length}b base64) to Render & DB!`);
+        if (this.pendingSessionRepairFinalization) {
+          try {
+            await this.setPersistentSessionRepairMode(false);
+            this.pendingSessionRepairFinalization = false;
+            if (this.sessionRepairFinalizeTimer) clearTimeout(this.sessionRepairFinalizeTimer);
+            this.sessionRepairFinalizeTimer = null;
+            console.log('[WhatsAppClient] Replacement session is backed up; cleared persistent pairing mode.');
+          } catch (error: any) {
+            console.error(`[WhatsAppClient] Replacement session is backed up, but pairing mode remains set until its flag can be cleared: ${error?.message || error}`);
+            this.scheduleSessionRepairModeFinalizeRetry();
+          }
+        }
       }
     } catch (err: any) {
       console.warn('[WhatsAppClient] Auto backup to Render failed:', err.message);
@@ -898,6 +960,18 @@ export class WhatsAppClient {
     try {
       if (!fs.existsSync(config.paths.sessions)) {
         fs.mkdirSync(config.paths.sessions, { recursive: true });
+      }
+
+      // A persistent repair marker prevents a deployment during fresh pairing from
+      // restoring the old registered bundle over the new, incomplete credentials.
+      if (!this.persistentRepairModeLoaded) {
+        const envRepairMode = process.env.SESSION_BUNDLE_INVALIDATED?.trim().toLowerCase();
+        if (envRepairMode === 'true' ||
+          (envRepairMode !== 'false' && await getBotSetting('whatsapp_session_repair_mode', '') === 'true')) {
+          this.sessionBundleInvalidated = true;
+          this.pendingSessionRepairFinalization = true;
+        }
+        this.persistentRepairModeLoaded = true;
       }
 
       const credsFile = path.join(config.paths.sessions, 'creds.json');
@@ -980,11 +1054,11 @@ export class WhatsAppClient {
         }
       };
       // Keep the live WhatsApp version as the source of truth. A short-lived
-      // persistent cache lets an already-linked session recover if Render cannot
-      // reach WhatsApp's sw.js endpoint during a restart. Pairing still requires a
-      // live version because stale revisions can make new device linking fail.
+      // verified cache also lets pairing proceed during temporary sw.js rate limits;
+      // the cache is limited to one hour for unregistered pairing attempts.
       const waVersionSetting = 'whatsapp_web_protocol_version';
       const waVersionCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
+      const pairingVersionCacheTtlMs = 60 * 60 * 1000;
       let waWebVersion: Awaited<ReturnType<typeof fetchLatestWaWebVersion>>;
       try {
         waWebVersion = await fetchLatestWaWebVersion({ signal: AbortSignal.timeout(15_000) });
@@ -1015,20 +1089,15 @@ export class WhatsAppClient {
         await setBotSetting(waVersionSetting, JSON.stringify({ version, checkedAt: Date.now() }));
         console.log(`[WhatsAppClient] Starting Baileys with live WhatsApp Web protocol v${version.join('.')}`);
       } else {
-        if (!this.isRegistered()) {
-          console.error(`[WhatsAppClient] Could not fetch a verified WhatsApp Web protocol version (${failureReason}); pairing remains paused and will retry in 30s.`);
-          this.scheduleReconnect(30_000);
-          return;
-        }
-
         let cachedVersion: [number, number, number] | null = null;
         try {
           const stored = JSON.parse(await getBotSetting(waVersionSetting, '{}'));
+          const cacheTtl = this.isRegistered() ? waVersionCacheTtlMs : pairingVersionCacheTtlMs;
           if (
             isUsableVersion(stored?.version) &&
             Number.isFinite(stored?.checkedAt) &&
             Date.now() - stored.checkedAt >= 0 &&
-            Date.now() - stored.checkedAt <= waVersionCacheTtlMs
+            Date.now() - stored.checkedAt <= cacheTtl
           ) {
             cachedVersion = stored.version;
           }
@@ -1036,14 +1105,21 @@ export class WhatsAppClient {
 
         if (cachedVersion) {
           version = cachedVersion;
-          console.warn(`[WhatsAppClient] Live protocol fetch failed (${failureReason}); reconnecting the registered session with its last verified protocol v${version.join('.')}.`);
+          const sessionKind = this.isRegistered() ? 'registered session' : 'fresh pairing';
+          console.warn(`[WhatsAppClient] Live protocol fetch failed (${failureReason}); using the recently verified protocol v${version.join('.')} for ${sessionKind}.`);
         } else if (isUsableVersion(waWebVersion.version)) {
+          if (!this.isRegistered()) {
+            console.error(`[WhatsAppClient] Could not fetch a recent verified WhatsApp Web protocol version (${failureReason}); pairing remains paused and will retry in 30s.`);
+            this.scheduleReconnect(30_000);
+            return;
+          }
           // Baileys returns its bundled protocol revision when sw.js cannot be read.
           // Use it only to recover an existing registration; never use it for pairing.
           version = waWebVersion.version;
           console.warn(`[WhatsAppClient] Live protocol fetch failed (${failureReason}); attempting existing-session recovery with Baileys' bundled protocol v${version.join('.')}.`);
         } else {
-          console.error(`[WhatsAppClient] No usable protocol version is available (${failureReason}); retrying in 30s.`);
+          const reason = this.isRegistered() ? 'No usable protocol version' : 'No recent verified protocol version';
+          console.error(`[WhatsAppClient] ${reason} is available (${failureReason}); retrying in 30s.`);
           this.scheduleReconnect(30_000);
           return;
         }
