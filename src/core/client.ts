@@ -817,8 +817,12 @@ export class WhatsAppClient {
         this.lastBackupAt = Date.now();
         return;
       }
-      const rawServiceId = process.env.RENDER_SERVICE_ID || '';
-      const serviceId = (rawServiceId && rawServiceId !== 'srv-dbipgmetlv9c73bcah0g') ? rawServiceId : 'srv-dbnges6417fc73dmuec0';
+      const serviceId = process.env.RENDER_SERVICE_ID?.trim() || '';
+      if (!serviceId) {
+        console.warn('[WhatsAppClient] Render session backup skipped: RENDER_SERVICE_ID is not configured.');
+        this.lastBackupAt = Date.now();
+        return;
+      }
       const envVarsUrl = `https://api.render.com/v1/services/${serviceId}/env-vars`;
       const headers = {
         'Authorization': `Bearer ${apiKey}`,
