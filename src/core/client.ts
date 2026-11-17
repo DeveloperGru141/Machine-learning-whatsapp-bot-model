@@ -16,6 +16,7 @@ import { Boom } from '@hapi/boom';
 import { createHash } from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
+import { gunzipSync } from 'node:zlib';
 import { config, normalizePhoneNumber } from '../config/env.js';
 import { normalizeMessage, NormalizedMessage } from './normalizer.js';
 import { shouldRespondToMessage, recordGroupInteraction } from './filter.js';
@@ -526,6 +527,90 @@ export class WhatsAppClient {
     return bundle.length <= WhatsAppClient.SESSION_BUNDLE_MAX_B64_CHARS ? bundle : undefined;
   }
 
+  private hasRegisteredCredentials(creds: any): boolean {
+    return Boolean(creds?.registered === true || (creds?.me?.id && !creds?.pairingEphemeralKeyPair));
+  }
+
+  /** Decode and validate a bundle before it can replace local auth state. */
+  private decodeRegisteredSessionBundle(bundle: string): Record<string, string> | undefined {
+    try {
+      if (
+        bundle.length <= 100 ||
+        bundle.length > WhatsAppClient.SESSION_BUNDLE_MAX_B64_CHARS ||
+        !/^[A-Za-z0-9+/]+={0,2}$/.test(bundle)
+      ) return undefined;
+
+      const rawBuf = Buffer.from(bundle, 'base64');
+      if (rawBuf.length > 2 * 1024 * 1024) return undefined;
+      const bundleJson = rawBuf[0] === 0x1f && rawBuf[1] === 0x8b
+        ? gunzipSync(rawBuf, { maxOutputLength: 20 * 1024 * 1024 }).toString('utf8')
+        : rawBuf.toString('utf8');
+      const filesMap = JSON.parse(bundleJson) as Record<string, string>;
+      if (!filesMap || typeof filesMap !== 'object' || Array.isArray(filesMap) || Object.keys(filesMap).length > 5_000) {
+        return undefined;
+      }
+
+      let totalSessionTextBytes = 0;
+      for (const [fileName, fileContent] of Object.entries(filesMap)) {
+        if (!fileName || fileName === '.' || fileName === '..' || path.basename(fileName) !== fileName || typeof fileContent !== 'string') {
+          return undefined;
+        }
+        totalSessionTextBytes += Buffer.byteLength(fileContent, 'utf8');
+        if (totalSessionTextBytes > 20 * 1024 * 1024) return undefined;
+      }
+
+      const creds = JSON.parse(filesMap['creds.json'] || '{}');
+      return this.hasRegisteredCredentials(creds) ? filesMap : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private installSessionBundle(filesMap: Record<string, string>): number {
+    const stagingDir = `${config.paths.sessions}.restore-${process.pid}-${Date.now()}`;
+    const previousDir = `${config.paths.sessions}.unlinked-${process.pid}-${Date.now()}`;
+    fs.mkdirSync(path.dirname(stagingDir), { recursive: true });
+    fs.mkdirSync(stagingDir, { recursive: true });
+
+    // One-time recovery: stale pairwise Signal sessions for the owner can make DM replies
+    // get accepted by the server but never decrypt on the owner's devices. Skip them on the
+    // first boot that lacks the marker so Baileys negotiates fresh sessions (groups unaffected).
+    const resetMarker = 'reset-marker-owner-sessions-v1';
+    const needsOwnerReset = filesMap[resetMarker] === undefined;
+    const ownerSessionRe = /^session-(102409552584830|2348108574293)[_.@]/;
+    let skippedOwnerSessions = 0;
+    try {
+      for (const [fileName, fileContent] of Object.entries(filesMap)) {
+        if (needsOwnerReset && ownerSessionRe.test(fileName)) {
+          skippedOwnerSessions++;
+          continue;
+        }
+        fs.writeFileSync(path.join(stagingDir, fileName), fileContent, 'utf8');
+      }
+      if (needsOwnerReset) {
+        fs.writeFileSync(path.join(stagingDir, resetMarker), new Date().toISOString(), 'utf8');
+      }
+
+      const hadPrevious = fs.existsSync(config.paths.sessions);
+      if (hadPrevious) fs.renameSync(config.paths.sessions, previousDir);
+      try {
+        fs.renameSync(stagingDir, config.paths.sessions);
+      } catch (err) {
+        if (hadPrevious && fs.existsSync(previousDir)) fs.renameSync(previousDir, config.paths.sessions);
+        throw err;
+      }
+      if (hadPrevious) fs.rmSync(previousDir, { recursive: true, force: true });
+    } catch (err) {
+      fs.rmSync(stagingDir, { recursive: true, force: true });
+      throw err;
+    }
+
+    if (needsOwnerReset) {
+      console.log(`[WhatsAppClient] ♻️ One-time owner session reset: dropped ${skippedOwnerSessions} stale owner Signal session(s).`);
+    }
+    return Object.keys(filesMap).length - skippedOwnerSessions;
+  }
+
   /**
    * Reads the freshest session bundle straight from Render, supporting both a
    * legacy single variable and a chunked bundle that stays below OS env limits.
@@ -534,8 +619,7 @@ export class WhatsAppClient {
    */
   private async fetchLatestSessionBundle(): Promise<string | undefined> {
     const apiKey = process.env.RENDER_API_KEY;
-    const rawServiceId = process.env.RENDER_SERVICE_ID || '';
-    const serviceId = (rawServiceId && rawServiceId !== 'srv-dbipgmetlv9c73bcah0g') ? rawServiceId : 'srv-dbnges6417fc73dmuec0';
+    const serviceId = process.env.RENDER_SERVICE_ID?.trim() || '';
     if (apiKey && serviceId) {
       try {
         const res = await fetch(`https://api.render.com/v1/services/${serviceId}/env-vars?limit=100`, {
@@ -552,25 +636,33 @@ export class WhatsAppClient {
             }
           }
           const latestBundle = this.assembleSessionBundle(latestEnv);
-          if (latestBundle && latestBundle.length > 100) {
+          if (latestBundle && this.decodeRegisteredSessionBundle(latestBundle)) {
             console.log(`[WhatsAppClient] ☁️ Fetched latest session bundle from Render API (${latestBundle.length}b).`);
             return latestBundle;
           }
+          console.warn('[WhatsAppClient] Render API returned no valid registered WhatsApp session bundle; checking local backup sources.');
         } else {
-          console.warn(`[WhatsAppClient] Render API bundle fetch returned ${res.status}; falling back to process.env snapshot.`);
+          console.warn(`[WhatsAppClient] Render API bundle fetch returned ${res.status}; checking local backup sources.`);
         }
       } catch (err: any) {
         console.warn('[WhatsAppClient] Render API bundle fetch failed; falling back to process.env snapshot:', err?.message || err);
       }
     }
 
+    const processBundle = this.assembleSessionBundle(process.env);
+    if (processBundle && this.decodeRegisteredSessionBundle(processBundle)) {
+      console.log(`[WhatsAppClient] Using the validated registered session bundle from the current environment (${processBundle.length}b).`);
+      return processBundle;
+    }
+
     const dbBundle = await getSessionBundleFromDb();
-    if (dbBundle && dbBundle.length > 100) {
+    if (dbBundle && this.decodeRegisteredSessionBundle(dbBundle)) {
       console.log(`[WhatsAppClient] 🗄️ Fetched session bundle from database (${dbBundle.length}b).`);
       return dbBundle;
     }
 
-    return this.assembleSessionBundle(process.env);
+    if (dbBundle) console.warn('[WhatsAppClient] Database session backup is invalid or unregistered; refusing to use it for recovery.');
+    return undefined;
   }
 
   public async autoBackupSessionToRender(): Promise<void> {
@@ -808,67 +900,24 @@ export class WhatsAppClient {
         fs.mkdirSync(config.paths.sessions, { recursive: true });
       }
 
-      // Hydrate session files from SESSION_BUNDLE_BASE64 on cloud containers (Render) if sessions/creds.json is missing and not invalidated
       const credsFile = path.join(config.paths.sessions, 'creds.json');
-      const hydrateSource = !fs.existsSync(credsFile) && !this.sessionBundleInvalidated ? await this.fetchLatestSessionBundle() : undefined;
-      if (!fs.existsSync(credsFile) && hydrateSource && !this.sessionBundleInvalidated) {
-        try {
-          const zlib = await import('zlib');
-          const rawBuf = Buffer.from(hydrateSource, 'base64');
-          if (rawBuf.length > 2 * 1024 * 1024) throw new Error('Session bundle exceeds its compressed size limit.');
-          const bundleJson =
-            rawBuf[0] === 0x1f && rawBuf[1] === 0x8b
-              ? zlib.gunzipSync(rawBuf, { maxOutputLength: 20 * 1024 * 1024 }).toString('utf8')
-              : rawBuf.toString('utf8');
-          const filesMap = JSON.parse(bundleJson) as Record<string, string>;
-          if (!filesMap || typeof filesMap !== 'object' || Array.isArray(filesMap) || Object.keys(filesMap).length > 5_000) {
-            throw new Error('Session bundle has an invalid file map.');
-          }
-          let totalSessionTextBytes = 0;
-          for (const [fileName, fileContent] of Object.entries(filesMap)) {
-            if (!fileName || fileName === '.' || fileName === '..' ||
-                path.basename(fileName) !== fileName || typeof fileContent !== 'string') {
-              throw new Error('Session bundle contains an invalid file entry.');
-            }
-            totalSessionTextBytes += Buffer.byteLength(fileContent, 'utf8');
-            if (totalSessionTextBytes > 20 * 1024 * 1024) throw new Error('Session bundle exceeds its expanded size limit.');
-          }
-          // Guard: Only hydrate if creds.json is non-empty, valid JSON, and fully registered!
-          let parsedCreds: any = null;
-          try {
-            parsedCreds = JSON.parse(filesMap['creds.json'] || '{}');
-          } catch {}
-          const isUsable = Boolean(
-            parsedCreds?.registered === true ||
-              (parsedCreds?.me?.id && !parsedCreds?.pairingEphemeralKeyPair)
-          );
+      let localCredsRegistered = false;
+      try {
+        localCredsRegistered = this.hasRegisteredCredentials(JSON.parse(fs.readFileSync(credsFile, 'utf8')));
+      } catch {}
 
-          if (filesMap['creds.json'] && isUsable) {
-            // One-time recovery: stale pairwise Signal sessions for the owner can make DM replies
-            // get accepted by the server but never decrypt on the owner's devices. Skip them on the
-            // first boot that lacks the marker so Baileys negotiates fresh sessions (groups unaffected).
-            const resetMarker = 'reset-marker-owner-sessions-v1';
-            const needsOwnerReset = filesMap[resetMarker] === undefined;
-            const ownerSessionRe = /^session-(102409552584830|2348108574293)[_.@]/;
-            let skippedOwnerSessions = 0;
-            for (const [fileName, fileContent] of Object.entries(filesMap)) {
-              const safeName = path.basename(fileName);
-              if (needsOwnerReset && ownerSessionRe.test(safeName)) {
-                skippedOwnerSessions++;
-                continue;
-              }
-              fs.writeFileSync(path.join(config.paths.sessions, safeName), fileContent, 'utf8');
-            }
-            if (needsOwnerReset) {
-              fs.writeFileSync(path.join(config.paths.sessions, resetMarker), new Date().toISOString(), 'utf8');
-              console.log(`[WhatsAppClient] ♻️ One-time owner session reset: dropped ${skippedOwnerSessions} stale owner Signal session(s).`);
-            }
-            console.log(`[WhatsAppClient] 🔑 Hydrated ${Object.keys(filesMap).length - skippedOwnerSessions} session files from SESSION_BUNDLE_BASE64.`);
-          } else {
-            console.warn('[WhatsAppClient] SESSION_BUNDLE_BASE64 is unlinked or incomplete; skipping hydration to await fresh pairing.');
-          }
+      // Recover missing or unlinked local pairing state from the newest validated
+      // registered bundle. Incomplete QR/pair-code credentials must never mask it.
+      const needsBundleRecovery = !localCredsRegistered && !this.sessionBundleInvalidated;
+      const hydrateSource = needsBundleRecovery ? await this.fetchLatestSessionBundle() : undefined;
+      if (needsBundleRecovery && hydrateSource && !this.sessionBundleInvalidated) {
+        try {
+          const filesMap = this.decodeRegisteredSessionBundle(hydrateSource);
+          if (!filesMap) throw new Error('No valid registered credentials in backup bundle.');
+          const hydratedCount = this.installSessionBundle(filesMap);
+          console.log(`[WhatsAppClient] 🔑 Restored ${hydratedCount} registered session files over the missing/unlinked local auth state.`);
         } catch (err: any) {
-          console.warn('[WhatsAppClient] Failed to hydrate SESSION_BUNDLE_BASE64:', err.message);
+          console.warn('[WhatsAppClient] Failed to restore registered session bundle:', err.message);
         }
       }
 
@@ -885,7 +934,7 @@ export class WhatsAppClient {
             this.pairingRequested = false;
           } else {
             const rawCreds = JSON.parse(content);
-            const isFullyPaired = Boolean(rawCreds?.registered === true || (rawCreds?.me?.id && !rawCreds?.pairingEphemeralKeyPair));
+            const isFullyPaired = this.hasRegisteredCredentials(rawCreds);
 
             if (!isFullyPaired) {
               // Incomplete pairing attempt left a partial creds.me without account/registered; wipe so Baileys sends RegistrationNode
